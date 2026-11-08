@@ -13,7 +13,14 @@ import (
 	"time"
 
 	"github.com/kukushouhou/DKStore/internal/api"
+	"github.com/kukushouhou/DKStore/internal/auth"
+	"github.com/kukushouhou/DKStore/internal/checker"
 	"github.com/kukushouhou/DKStore/internal/config"
+	"github.com/kukushouhou/DKStore/internal/host"
+	"github.com/kukushouhou/DKStore/internal/ignore"
+	"github.com/kukushouhou/DKStore/internal/inventory"
+	"github.com/kukushouhou/DKStore/internal/notify"
+	"github.com/kukushouhou/DKStore/internal/registry"
 	"github.com/kukushouhou/DKStore/internal/secret"
 	"github.com/kukushouhou/DKStore/internal/store"
 	"github.com/kukushouhou/DKStore/internal/version"
@@ -44,9 +51,34 @@ func run() error {
 	}
 	defer st.Close()
 
-	if _, err := secret.LoadOrCreate(cfg.DataDir); err != nil {
+	box, err := secret.LoadOrCreate(cfg.DataDir)
+	if err != nil {
 		return err
 	}
+
+	authSvc := auth.New(st)
+	hostReg := host.NewRegistry(st, box)
+	_ = hostReg.EnsureLocalHost(ctx)
+
+	invSvc := inventory.New(st, hostReg)
+	regCli := registry.New(st, box)
+	ignSvc := ignore.New(st)
+	ntfSvc := notify.New(st)
+	chkSvc := checker.New(log, st, hostReg, invSvc, regCli, ignSvc, ntfSvc)
+
+	chkSvc.StartScheduler(ctx)
+	// 启动时若从未检查过且存在主机，自动后台触发一次初始检查
+	go func() {
+		time.Sleep(1 * time.Second)
+		hosts, _ := hostReg.List(ctx)
+		if len(hosts) > 0 {
+			var count int
+			_ = st.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM check_run`).Scan(&count)
+			if count == 0 {
+				chkSvc.Trigger("startup", "", false)
+			}
+		}
+	}()
 
 	assets, ok := web.Assets()
 	if cfg.DevMode || !ok {
@@ -55,8 +87,18 @@ func run() error {
 	}
 
 	srv := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           api.New(log, st, assets).Handler(),
+		Addr: cfg.Listen,
+		Handler: api.New(api.Deps{
+			Log:     log,
+			Store:   st,
+			Auth:    authSvc,
+			Hosts:   hostReg,
+			Reg:     regCli,
+			Ignore:  ignSvc,
+			Notify:  ntfSvc,
+			Checker: chkSvc,
+			Assets:  assets,
+		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

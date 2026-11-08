@@ -1,20 +1,29 @@
-# DKStore — 家庭 Docker 应用更新中心
+# DKStore — Home Docker App Update Center
+
+**English** | [简体中文](./README_zh-CN.md)
 
 > [!WARNING]
-> **当前状态：早期开发中（Work in Progress / Pre-Alpha）**
-> 本项目正在进行第一阶段开发与内部测试，尚未发布可用版本，请勿用于生产或日常环境。
+> **Status: Work in Progress (Pre-Alpha)**
+> DKStore is currently under active Phase-1 development and internal testing. No stable release is available yet — please do not use it in production environments.
 
-面向家庭 NAS / Linux 主机的 Docker 应用更新提醒与管理中心。
+DKStore is an app-store-like update center designed for home NAS, routers, and Linux servers running Docker. Install once on any device in your home network to check updates across all your Docker hosts and NAS devices, without replacing existing managers such as Synology Container Manager.
 
-## 开发构建
+## Key Principles
 
-需要 Go 1.27+、Node 24+。
+- **Update-first, not ops-first**: Clean app-store style view grouped into *Available Updates*, *Caution Updates* (major version bumps & databases), and *Ignored*.
+- **Install once, manage everywhere**: Agentless remote management via SSH / native platform APIs.
+- **Coexist with native managers**: Read-only discovery in Phase 1; preserves Compose projects and native NAS manager metadata.
+- **Bilingual UI**: Built-in English (`en-US`) and Simplified Chinese (`zh-CN`) interface.
 
-```powershell
-# 后端（开发模式）
+## Development
+
+Requires Go 1.27+ and Node 24+.
+
+```bash
+# Backend (dev mode)
 go run ./cmd/dkstore -dev -log-level debug
 
-# 前端
+# Frontend
 cd web
 npm install
 npm run dev

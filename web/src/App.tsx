@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { App as AntApp, ConfigProvider } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
+import enUS from 'antd/locale/en_US'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider } from 'react-router'
 import { router } from './router'
@@ -24,14 +25,21 @@ function useSystemDark() {
 
 export default function App() {
   const mode = useUIStore((s) => s.themeMode)
+  const locale = useUIStore((s) => s.locale)
   const systemDark = useSystemDark()
   const dark = mode === 'dark' || (mode === 'system' && systemDark)
+
   useEffect(() => {
     document.documentElement.dataset.theme = dark ? 'dark' : 'light'
   }, [dark])
 
+  useEffect(() => {
+    document.documentElement.lang = locale
+    queryClient.invalidateQueries()
+  }, [locale])
+
   return (
-    <ConfigProvider locale={zhCN} theme={buildTheme(dark)}>
+    <ConfigProvider locale={locale === 'en-US' ? enUS : zhCN} theme={buildTheme(dark)}>
       <AntApp>
         <QueryClientProvider client={queryClient}>
           <RouterProvider router={router} />

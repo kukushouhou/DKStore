@@ -12,6 +12,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/platform"
 	"github.com/kukushouhou/DKStore/internal/platform/docker"
 	"github.com/kukushouhou/DKStore/internal/secret"
@@ -288,38 +289,44 @@ func (r *Registry) TrustHostKey(ctx context.Context, id, fingerprint string) err
 	return err
 }
 
-// TestConnection 执行分步连接诊断，不会保存主机。
-func (r *Registry) TestConnection(ctx context.Context, in CreateOrUpdateInput) (*TestResult, error) {
+// TestConnection 执行分步连接诊断（支持按 lang 返回中/英诊断步骤），不会保存主机。
+func (r *Registry) TestConnection(ctx context.Context, in CreateOrUpdateInput, lang i18n.Lang) (*TestResult, error) {
+	tr := func(zh, en string) string {
+		if lang == i18n.EnUS {
+			return en
+		}
+		return zh
+	}
 	res := &TestResult{}
 	if in.Transport == "local" || in.Transport == "" {
 		sock := transport.DefaultLocalSocket()
 		if _, err := os.Stat(sock); err != nil {
 			res.Steps = append(res.Steps, StepResult{
-				Step:    "检查本机 Docker Socket",
+				Step:    tr("检查本机 Docker Socket", "Check local Docker Socket"),
 				Status:  "error",
-				Message: fmt.Sprintf("未找到 %s：%v", sock, err),
+				Message: fmt.Sprintf(tr("未找到 %s：%v", "%s not found: %v"), sock, err),
 			})
 			return res, nil
 		}
 		res.Steps = append(res.Steps, StepResult{
-			Step:    "检查本机 Docker Socket",
+			Step:    tr("检查本机 Docker Socket", "Check local Docker Socket"),
 			Status:  "ok",
 			Message: sock,
 		})
-		tr := transport.NewLocal(sock)
-		defer tr.Close()
-		ad := docker.New("test", tr)
+		lTr := transport.NewLocal(sock)
+		defer lTr.Close()
+		ad := docker.New("test", lTr)
 		info, err := ad.Probe(ctx)
 		if err != nil {
 			res.Steps = append(res.Steps, StepResult{
-				Step:    "读取 Docker Engine 信息",
+				Step:    tr("读取 Docker Engine 信息", "Query Docker Engine info"),
 				Status:  "error",
 				Message: err.Error(),
 			})
 			return res, nil
 		}
 		res.Steps = append(res.Steps, StepResult{
-			Step:    "读取 Docker Engine 信息",
+			Step:    tr("读取 Docker Engine 信息", "Query Docker Engine info"),
 			Status:  "ok",
 			Message: fmt.Sprintf("Docker %s (%s/%s)", info.DockerVersion, info.OS, info.Arch),
 		})
@@ -351,7 +358,7 @@ func (r *Registry) TestConnection(ctx context.Context, in CreateOrUpdateInput) (
 			res.PresentedHostKey = mismatch.Presented
 		}
 		res.Steps = append(res.Steps, StepResult{
-			Step:    "SSH 连接与 Docker 通道探测",
+			Step:    tr("SSH 连接与 Docker 通道探测", "SSH connection & Docker channel probe"),
 			Status:  "error",
 			Message: err.Error(),
 		})
@@ -364,14 +371,14 @@ func (r *Registry) TestConnection(ctx context.Context, in CreateOrUpdateInput) (
 	res.TransportMode = string(sshTr.Mode())
 	res.Steps = append(res.Steps,
 		StepResult{
-			Step:    "SSH 握手与认证",
+			Step:    tr("SSH 握手与认证", "SSH handshake & authentication"),
 			Status:  "ok",
-			Message: fmt.Sprintf("主机指纹 %s", sshTr.PresentedHostKey()),
+			Message: fmt.Sprintf(tr("主机指纹 %s", "Host fingerprint %s"), sshTr.PresentedHostKey()),
 		},
 		StepResult{
-			Step:    "Docker 通道探测",
+			Step:    tr("Docker 通道探测", "Docker channel probe"),
 			Status:  "ok",
-			Message: fmt.Sprintf("使用方式：%s", describeMode(sshTr.Mode())),
+			Message: describeMode(sshTr.Mode(), lang),
 		},
 	)
 
@@ -379,14 +386,14 @@ func (r *Registry) TestConnection(ctx context.Context, in CreateOrUpdateInput) (
 	info, err := ad.Probe(ctx)
 	if err != nil {
 		res.Steps = append(res.Steps, StepResult{
-			Step:    "读取 Docker Engine 信息",
+			Step:    tr("读取 Docker Engine 信息", "Query Docker Engine info"),
 			Status:  "error",
 			Message: err.Error(),
 		})
 		return res, nil
 	}
 	res.Steps = append(res.Steps, StepResult{
-		Step:    "读取 Docker Engine 信息",
+		Step:    tr("读取 Docker Engine 信息", "Query Docker Engine info"),
 		Status:  "ok",
 		Message: fmt.Sprintf("Docker %s · %s (%s/%s)", info.DockerVersion, info.PlatformVersion, info.OS, info.Arch),
 	})
@@ -538,14 +545,26 @@ func newID(prefix string) string {
 	return prefix + hex.EncodeToString(b)
 }
 
-func describeMode(m transport.Mode) string {
+func describeMode(m transport.Mode, lang i18n.Lang) string {
+	if lang == i18n.EnUS {
+		switch m {
+		case transport.ModeStreamLocal:
+			return "Mode: SSH StreamLocal direct (/var/run/docker.sock)"
+		case transport.ModeDialStdio:
+			return "Mode: SSH docker system dial-stdio"
+		case transport.ModeSudoStdio:
+			return "Mode: SSH sudo docker system dial-stdio"
+		default:
+			return string(m)
+		}
+	}
 	switch m {
 	case transport.ModeStreamLocal:
-		return "SSH StreamLocal 直连 /var/run/docker.sock"
+		return "方式：SSH StreamLocal 直连 /var/run/docker.sock"
 	case transport.ModeDialStdio:
-		return "SSH docker system dial-stdio"
+		return "方式：SSH docker system dial-stdio"
 	case transport.ModeSudoStdio:
-		return "SSH sudo docker system dial-stdio"
+		return "方式：SSH sudo docker system dial-stdio"
 	default:
 		return string(m)
 	}

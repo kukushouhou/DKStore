@@ -1,25 +1,278 @@
-import { Card, Segmented, Space, Typography } from 'antd'
-import { useUIStore } from '../store/ui'
+import { useEffect, useState } from 'react'
+import {
+  Button,
+  Card,
+  Col,
+  Form,
+  Input,
+  List,
+  Row,
+  Segmented,
+  Select,
+  Space,
+  Typography,
+  message,
+} from 'antd'
+import { DeleteOutlined, PlusOutlined, SendOutlined } from '@ant-design/icons'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { api, type AppSettings, type RegistryCred } from '../api/client'
+import { useI18n } from '../i18n'
+import { useUIStore, type Locale, type ThemeMode } from '../store/ui'
 
 export default function SettingsPage() {
+  const { locale, setLocale, t } = useI18n()
   const { themeMode, setThemeMode } = useUIStore()
+  const qc = useQueryClient()
+
+  const settingsQuery = useQuery({ queryKey: ['settings'], queryFn: api.getSettings })
+  const credsQuery = useQuery({ queryKey: ['regCreds'], queryFn: api.listRegCreds })
+
+  const [form] = Form.useForm<AppSettings>()
+  const [credForm] = Form.useForm<RegistryCred>()
+  const [oldPw, setOldPw] = useState('')
+  const [newPw, setNewPw] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [testingNotify, setTestingNotify] = useState(false)
+
+  useEffect(() => {
+    if (settingsQuery.data) {
+      form.setFieldsValue(settingsQuery.data)
+    }
+  }, [settingsQuery.data, form])
+
+  const channelVal = Form.useWatch('channel', form)
+
+  const onSaveSettings = async () => {
+    const vals = form.getFieldsValue(true) as AppSettings
+    vals.locale = locale
+    setSaving(true)
+    try {
+      await api.saveSettings(vals)
+      message.success(t.settings.settingsSaved)
+      qc.invalidateQueries({ queryKey: ['settings'] })
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const onTestNotify = async () => {
+    const vals = form.getFieldsValue(true) as AppSettings
+    vals.locale = locale
+    setTestingNotify(true)
+    try {
+      await api.testNotify(vals)
+      message.success(t.settings.testSent)
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setTestingNotify(false)
+    }
+  }
+
+  const onAddCred = async () => {
+    const vals = await credForm.validateFields()
+    try {
+      await api.saveRegCred(vals)
+      credForm.resetFields()
+      qc.invalidateQueries({ queryKey: ['regCreds'] })
+      message.success(t.settings.settingsSaved)
+    } catch (e) {
+      message.error((e as Error).message)
+    }
+  }
+
+  const onUpdatePw = async () => {
+    try {
+      await api.setPassword(oldPw, newPw)
+      setOldPw('')
+      setNewPw('')
+      qc.invalidateQueries({ queryKey: ['authStatus'] })
+      message.success(t.settings.pwUpdated)
+    } catch (e) {
+      message.error((e as Error).message)
+    }
+  }
+
+  const switchLang = async (next: Locale) => {
+    setLocale(next)
+    if (settingsQuery.data) {
+      await api.saveSettings({ ...settingsQuery.data, locale: next })
+    }
+  }
+
   return (
-    <>
-      <Typography.Title level={3}>设置</Typography.Title>
-      <Card>
-        <Space>
-          <Typography.Text>外观</Typography.Text>
-          <Segmented
-            value={themeMode}
-            onChange={(v) => setThemeMode(v as typeof themeMode)}
-            options={[
-              { label: '跟随系统', value: 'system' },
-              { label: '浅色', value: 'light' },
-              { label: '深色', value: 'dark' },
-            ]}
+    <Space direction="vertical" size="large" style={{ width: '100%' }}>
+      <Typography.Title level={3} style={{ margin: 0 }}>
+        {t.settings.title}
+      </Typography.Title>
+
+      <Card title={t.settings.appearanceAndLang}>
+        <Space direction="vertical" size="middle">
+          <Space wrap>
+            <Typography.Text style={{ minWidth: 200, display: 'inline-block' }}>
+              {t.settings.language}
+            </Typography.Text>
+            <Segmented
+              value={locale}
+              onChange={(v) => switchLang(v as Locale)}
+              options={[
+                { label: '简体中文 (zh-CN)', value: 'zh-CN' },
+                { label: 'English (en-US)', value: 'en-US' },
+              ]}
+            />
+          </Space>
+          <Space wrap>
+            <Typography.Text style={{ minWidth: 200, display: 'inline-block' }}>
+              {t.settings.theme}
+            </Typography.Text>
+            <Segmented
+              value={themeMode}
+              onChange={(v) => setThemeMode(v as ThemeMode)}
+              options={[
+                { label: t.settings.themeSystem, value: 'system' },
+                { label: t.settings.themeLight, value: 'light' },
+                { label: t.settings.themeDark, value: 'dark' },
+              ]}
+            />
+          </Space>
+        </Space>
+      </Card>
+
+      <Card title={`${t.settings.scheduleTitle} & ${t.settings.notifyTitle}`}>
+        <Form form={form} layout="vertical">
+          <Form.Item name="checkIntervalHours" label={t.settings.intervalLabel}>
+            <Select
+              style={{ maxWidth: 280 }}
+              options={[
+                { label: t.settings.intervalOff, value: 0 },
+                ...[1, 3, 6, 12, 24].map((n) => ({
+                  label: t.settings.intervalHours.replace('{n}', String(n)),
+                  value: n,
+                })),
+              ]}
+            />
+          </Form.Item>
+
+          <Form.Item name="channel" label={t.settings.channelLabel}>
+            <Select
+              style={{ maxWidth: 320 }}
+              options={[
+                { label: t.settings.channelNone, value: '' },
+                { label: t.settings.channelWebhook, value: 'webhook' },
+                { label: t.settings.channelWecom, value: 'wecom' },
+                { label: t.settings.channelBark, value: 'bark' },
+                { label: t.settings.channelTelegram, value: 'telegram' },
+                { label: t.settings.channelNtfy, value: 'ntfy' },
+              ]}
+            />
+          </Form.Item>
+
+          {channelVal && channelVal !== 'telegram' && (
+            <Form.Item name="webhookUrl" label={t.settings.webhookUrlLabel}>
+              <Input placeholder="https://..." />
+            </Form.Item>
+          )}
+
+          {channelVal === 'telegram' && (
+            <Row gutter={12}>
+              <Col xs={24} md={12}>
+                <Form.Item name="telegramBotToken" label={t.settings.tgTokenLabel}>
+                  <Input.Password />
+                </Form.Item>
+              </Col>
+              <Col xs={24} md={12}>
+                <Form.Item name="telegramChatId" label={t.settings.tgChatIdLabel}>
+                  <Input />
+                </Form.Item>
+              </Col>
+            </Row>
+          )}
+
+          <Space>
+            <Button type="primary" loading={saving} onClick={onSaveSettings}>
+              {t.settings.saveSettings}
+            </Button>
+            {channelVal && (
+              <Button icon={<SendOutlined />} loading={testingNotify} onClick={onTestNotify}>
+                {t.settings.testNotify}
+              </Button>
+            )}
+          </Space>
+        </Form>
+      </Card>
+
+      <Card title={t.settings.regCredsTitle}>
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Typography.Text type="secondary">{t.settings.regCredsDesc}</Typography.Text>
+          <Form form={credForm} layout="inline" style={{ rowGap: 8 }}>
+            <Form.Item name="registry" rules={[{ required: true }]}>
+              <Input placeholder={t.settings.regDomain} />
+            </Form.Item>
+            <Form.Item name="username" rules={[{ required: true }]}>
+              <Input placeholder={t.settings.regUser} />
+            </Form.Item>
+            <Form.Item name="secret" rules={[{ required: true }]}>
+              <Input.Password placeholder={t.settings.regSecret} />
+            </Form.Item>
+            <Form.Item>
+              <Button icon={<PlusOutlined />} onClick={onAddCred}>
+                {t.settings.addCred}
+              </Button>
+            </Form.Item>
+          </Form>
+
+          <List
+            size="small"
+            dataSource={credsQuery.data?.items ?? []}
+            renderItem={(item) => (
+              <List.Item
+                actions={[
+                  <Button
+                    key="del"
+                    type="text"
+                    danger
+                    size="small"
+                    icon={<DeleteOutlined />}
+                    onClick={async () => {
+                      await api.deleteRegCred(item.registry)
+                      qc.invalidateQueries({ queryKey: ['regCreds'] })
+                    }}
+                  />,
+                ]}
+              >
+                <Space>
+                  <Typography.Text strong>{item.registry}</Typography.Text>
+                  <Typography.Text type="secondary">({item.username})</Typography.Text>
+                </Space>
+              </List.Item>
+            )}
           />
         </Space>
       </Card>
-    </>
+
+      <Card title={t.settings.securityTitle}>
+        <Row gutter={12} style={{ maxWidth: 640 }}>
+          <Col xs={24} md={10}>
+            <Input.Password
+              placeholder={t.settings.oldPw}
+              value={oldPw}
+              onChange={(e) => setOldPw(e.target.value)}
+            />
+          </Col>
+          <Col xs={24} md={10}>
+            <Input.Password
+              placeholder={t.settings.newPw}
+              value={newPw}
+              onChange={(e) => setNewPw(e.target.value)}
+            />
+          </Col>
+          <Col xs={24} md={4}>
+            <Button onClick={onUpdatePw}>{t.settings.updatePw}</Button>
+          </Col>
+        </Row>
+      </Card>
+    </Space>
   )
 }

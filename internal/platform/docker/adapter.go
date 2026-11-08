@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	" net/url"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"sort"
