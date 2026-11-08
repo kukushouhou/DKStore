@@ -15,6 +15,7 @@ import (
 	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/platform"
 	"github.com/kukushouhou/DKStore/internal/platform/docker"
+	"github.com/kukushouhou/DKStore/internal/platform/synology"
 	"github.com/kukushouhou/DKStore/internal/secret"
 	"github.com/kukushouhou/DKStore/internal/store"
 	"github.com/kukushouhou/DKStore/internal/transport"
@@ -382,7 +383,17 @@ func (r *Registry) TestConnection(ctx context.Context, in CreateOrUpdateInput, l
 		},
 	)
 
-	ad := docker.New("test", sshTr)
+	var ad platform.Adapter
+	if in.Kind == "synology" || isSynologyTarget(ctx, sshTr) {
+		ad = synology.New("test", sshTr, synology.DSMConfig{
+			URL:           in.DSMURL,
+			Username:      in.DSMUser,
+			Secret:        in.DSMSecret,
+			SkipTLSVerify: true,
+		})
+	} else {
+		ad = docker.New("test", sshTr)
+	}
 	info, err := ad.Probe(ctx)
 	if err != nil {
 		res.Steps = append(res.Steps, StepResult{
@@ -397,6 +408,21 @@ func (r *Registry) TestConnection(ctx context.Context, in CreateOrUpdateInput, l
 		Status:  "ok",
 		Message: fmt.Sprintf("Docker %s · %s (%s/%s)", info.DockerVersion, info.PlatformVersion, info.OS, info.Arch),
 	})
+	if ad.Kind() == "synology" {
+		if info.Capabilities.NativeProjects {
+			res.Steps = append(res.Steps, StepResult{
+				Step:    tr("群晖 Container Manager 原生项目发现", "Synology Container Manager native project discovery"),
+				Status:  "ok",
+				Message: tr("已启用（可自动识别群晖 Project 与套件中心容器）", "Enabled (detects DSM Projects & Package Center containers)"),
+			})
+		} else {
+			res.Steps = append(res.Steps, StepResult{
+				Step:    tr("群晖 Container Manager 原生项目发现", "Synology Container Manager native project discovery"),
+				Status:  "skipped",
+				Message: tr("仅使用标准 Docker/Compose 发现", "Using standard Docker/Compose discovery"),
+			})
+		}
+	}
 	res.OK = true
 	res.Info = info
 	return res, nil
@@ -407,16 +433,19 @@ func (r *Registry) OpenAdapter(ctx context.Context, hostID string) (platform.Ada
 	var (
 		h            Host
 		sshSecretRef string
+		dsmSecretRef string
 		infoStr      string
 	)
 	err := r.st.DB.QueryRowContext(ctx, `
 		SELECT id, name, kind, transport, COALESCE(address,''), COALESCE(port,22),
 		       COALESCE(ssh_user,''), COALESCE(ssh_auth,'password'), COALESCE(ssh_secret_ref,''),
-		       COALESCE(ssh_host_key,''), COALESCE(transport_mode,''), COALESCE(info_json,''),
-		       COALESCE(status,'unknown'), COALESCE(last_seen_at,0)
+		       COALESCE(ssh_host_key,''), COALESCE(transport_mode,''),
+		       COALESCE(dsm_url,''), COALESCE(dsm_user,''), COALESCE(dsm_secret_ref,''),
+		       COALESCE(info_json,''), COALESCE(status,'unknown'), COALESCE(last_seen_at,0)
 		FROM host WHERE id=?`, hostID).Scan(
 		&h.ID, &h.Name, &h.Kind, &h.Transport, &h.Address, &h.Port,
 		&h.SSHUser, &h.SSHAuth, &sshSecretRef, &h.SSHHostKey, &h.TransportMode,
+		&h.DSMURL, &h.DSMUser, &dsmSecretRef,
 		&infoStr, &h.Status, &h.LastSeenAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -432,8 +461,22 @@ func (r *Registry) OpenAdapter(ctx context.Context, hostID string) (platform.Ada
 		}
 	}
 
+	var dsmSecret string
+	if dsmSecretRef != "" {
+		dsmSecret, _ = r.loadSecret(ctx, dsmSecretRef)
+	}
+	dsmCfg := synology.DSMConfig{
+		URL:           h.DSMURL,
+		Username:      h.DSMUser,
+		Secret:        dsmSecret,
+		SkipTLSVerify: true,
+	}
+
 	if h.Transport == "local" {
 		tr := transport.NewLocal("")
+		if h.Kind == "synology" || isSynologyTarget(ctx, tr) {
+			return synology.New(h.ID, tr, dsmCfg), &h, nil
+		}
 		return docker.New(h.ID, tr), &h, nil
 	}
 
@@ -477,10 +520,23 @@ func (r *Registry) OpenAdapter(ctx context.Context, hostID string) (platform.Ada
 			return nil, &h, err
 		}
 	}
+	h.TransportMode = string(sshTr.Mode())
 	if h.SSHHostKey == "" && sshTr.PresentedHostKey() != "" {
 		_ = r.TrustHostKey(ctx, h.ID, sshTr.PresentedHostKey())
 	}
+	if h.Kind == "synology" || isSynologyTarget(ctx, sshTr) {
+		if h.Kind != "synology" {
+			h.Kind = "synology"
+			_, _ = r.st.DB.ExecContext(ctx, `UPDATE host SET kind='synology' WHERE id=?`, h.ID)
+		}
+		return synology.New(h.ID, sshTr, dsmCfg), &h, nil
+	}
 	return docker.New(h.ID, sshTr), &h, nil
+}
+
+func isSynologyTarget(ctx context.Context, tr transport.Transport) bool {
+	b, err := tr.ReadFile(ctx, "/etc.defaults/VERSION")
+	return err == nil && len(b) > 0
 }
 
 // ProbeAndSave 探测主机并更新数据库中的 status / info_json / transport_mode。
@@ -554,6 +610,8 @@ func describeMode(m transport.Mode, lang i18n.Lang) string {
 			return "Mode: SSH docker system dial-stdio"
 		case transport.ModeSudoStdio:
 			return "Mode: SSH sudo docker system dial-stdio"
+		case transport.ModeSudoPassStdio:
+			return "Mode: SSH sudo (with admin password) docker system dial-stdio"
 		default:
 			return string(m)
 		}
@@ -565,6 +623,8 @@ func describeMode(m transport.Mode, lang i18n.Lang) string {
 		return "方式：SSH docker system dial-stdio"
 	case transport.ModeSudoStdio:
 		return "方式：SSH sudo docker system dial-stdio"
+	case transport.ModeSudoPassStdio:
+		return "方式：SSH sudo（管理员密码）docker system dial-stdio"
 	default:
 		return string(m)
 	}

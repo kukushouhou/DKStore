@@ -223,6 +223,7 @@ export default function HostsPage() {
               >
                 <Space direction="vertical" size={6}>
                   <Space wrap>
+                    {h.kind === 'synology' && <Tag color="geekblue">Synology DSM</Tag>}
                     <Tag>{h.transport === 'local' ? t.hosts.localSocket : t.hosts.sshRemote}</Tag>
                     {h.address && (
                       <Typography.Text code>
@@ -308,6 +309,12 @@ export default function HostsPage() {
               <>
                 <Form.Item name="name" label={t.hosts.nameLabel} rules={[{ required: true }]}>
                   <Input placeholder={t.hosts.namePlaceholder} />
+                </Form.Item>
+                <Form.Item name="kind" label={t.hosts.kindLabel}>
+                  <Radio.Group style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    <Radio value="docker">{t.hosts.kindDocker}</Radio>
+                    <Radio value="synology">{t.hosts.kindSynology}</Radio>
+                  </Radio.Group>
                 </Form.Item>
                 <Form.Item name="transport" label={t.hosts.transportLabel}>
                   <Radio.Group style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>

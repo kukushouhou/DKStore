@@ -180,6 +180,9 @@ func Evaluate(in Input) Output {
 			out.Category = CategoryCaution
 			out.Reason = dbReason
 			remoteBest := version.SelectBestDisplayTag(in.Ref.Tag, in.RemoteMatchedTags)
+			if remoteBest == in.Ref.Tag && curDisplay != "" && curDisplay != in.Ref.Tag {
+				remoteBest = ""
+			}
 			if remoteBest != "" {
 				out.TargetVersion = remoteBest
 			} else {
@@ -236,6 +239,9 @@ func Evaluate(in Input) Output {
 		out.Kind = KindDigestUpdate
 		out.Category = CategoryNormal
 		remoteBest := version.SelectBestDisplayTag(in.Ref.Tag, in.RemoteMatchedTags)
+		if remoteBest == in.Ref.Tag && curDisplay != "" && curDisplay != in.Ref.Tag {
+			remoteBest = ""
+		}
 		if remoteBest != "" {
 			out.TargetVersion = remoteBest
 		} else if curTag.Scheme != version.SchemeUnknown && curTag.Precision == 3 {

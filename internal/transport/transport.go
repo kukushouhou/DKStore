@@ -2,6 +2,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -26,10 +27,11 @@ import (
 type Mode string
 
 const (
-	ModeLocal       Mode = "local"
-	ModeStreamLocal Mode = "streamlocal"
-	ModeDialStdio   Mode = "dial_stdio"
-	ModeSudoStdio   Mode = "sudo_dial_stdio"
+	ModeLocal         Mode = "local"
+	ModeStreamLocal   Mode = "streamlocal"
+	ModeDialStdio     Mode = "dial_stdio"
+	ModeSudoStdio     Mode = "sudo_dial_stdio"
+	ModeSudoPassStdio Mode = "sudo_pass_dial_stdio"
 )
 
 // Transport 封装到一台目标主机的只读连接。
@@ -246,9 +248,12 @@ func buildSSHAuth(cfg SSHConfig) (ssh.AuthMethod, error) {
 	}
 }
 
-// probeDockerMode 依次尝试：streamlocal 直连 → docker system dial-stdio → sudo -n docker system dial-stdio。
+// probeDockerMode 依次尝试：streamlocal 直连 → docker system dial-stdio → sudo -n dial-stdio → sudo -k -S dial-stdio（兼容群晖等管理员密码 sudo）。
 func (t *SSHTransport) probeDockerMode(ctx context.Context) error {
 	candidates := []Mode{ModeStreamLocal, ModeDialStdio, ModeSudoStdio}
+	if t.cfg.AuthType != "key" && t.cfg.Secret != "" {
+		candidates = append(candidates, ModeSudoPassStdio)
+	}
 	var errs []string
 	for _, m := range candidates {
 		t.mode = m
@@ -278,6 +283,8 @@ type streamLocalChannelPayload struct {
 	Reserved1  uint32
 }
 
+const dockerStdioShellCmd = `sh -c 'PATH="$PATH:/usr/local/bin:/var/packages/ContainerManager/target/usr/bin:/var/packages/Docker/target/usr/bin" exec docker system dial-stdio'`
+
 func (t *SSHTransport) dialDockerConn(ctx context.Context, _, _ string) (net.Conn, error) {
 	if err := t.ensureClient(ctx); err != nil {
 		return nil, err
@@ -292,15 +299,17 @@ func (t *SSHTransport) dialDockerConn(ctx context.Context, _, _ string) (net.Con
 		go ssh.DiscardRequests(reqs)
 		return &sshChannelConn{Channel: ch}, nil
 	case ModeDialStdio:
-		return t.openStdioConn("docker system dial-stdio")
+		return t.openStdioConn(dockerStdioShellCmd, "")
 	case ModeSudoStdio:
-		return t.openStdioConn("sudo -n docker system dial-stdio")
+		return t.openStdioConn("sudo -n "+dockerStdioShellCmd, "")
+	case ModeSudoPassStdio:
+		return t.openStdioConn("sudo -k -S -p '' "+dockerStdioShellCmd, t.cfg.Secret)
 	default:
 		return nil, fmt.Errorf("未知传输模式: %s", t.mode)
 	}
 }
 
-func (t *SSHTransport) openStdioConn(cmd string) (net.Conn, error) {
+func (t *SSHTransport) openStdioConn(cmd string, sudoPass string) (net.Conn, error) {
 	sess, err := t.client.NewSession()
 	if err != nil {
 		return nil, err
@@ -318,6 +327,12 @@ func (t *SSHTransport) openStdioConn(cmd string) (net.Conn, error) {
 	if err := sess.Start(cmd); err != nil {
 		_ = sess.Close()
 		return nil, err
+	}
+	if sudoPass != "" {
+		if _, err := io.WriteString(stdin, sudoPass+"\n"); err != nil {
+			_ = sess.Close()
+			return nil, err
+		}
 	}
 	return &stdioSessionConn{sess: sess, r: stdout, w: stdin}, nil
 }
@@ -340,15 +355,9 @@ func (t *SSHTransport) ReadFile(ctx context.Context, path string) ([]byte, error
 	if err := t.ensureClient(ctx); err != nil {
 		return nil, err
 	}
-	sess, err := t.client.NewSession()
-	if err != nil {
-		return nil, err
-	}
-	defer sess.Close()
-
-	// 只读白名单命令：仅执行 cat -- 'path'
-	cmd := "cat -- " + shellQuote(path)
-	out, err := sess.Output(cmd)
+	// 只读白名单命令：仅执行 cat -- 'path'（若权限不足且当前为 sudo 模式，则回退只读 sudo cat）
+	baseCmd := "cat -- " + shellQuote(path)
+	out, err := t.runReadOnlyCmd(baseCmd)
 	if err != nil {
 		return nil, fmt.Errorf("读取远端文件 %s 失败: %w", path, err)
 	}
@@ -356,6 +365,38 @@ func (t *SSHTransport) ReadFile(ctx context.Context, path string) ([]byte, error
 		out = out[:maxFileSize]
 	}
 	return out, nil
+}
+
+// ExecSynoWebAPIProjectList 在群晖主机上通过只读 synowebapi 查询 Container Manager 原生项目列表。
+func (t *SSHTransport) ExecSynoWebAPIProjectList(ctx context.Context) ([]byte, error) {
+	if err := t.ensureClient(ctx); err != nil {
+		return nil, err
+	}
+	const cmd = "/usr/syno/bin/synowebapi --exec api=SYNO.Docker.Project version=1 method=list"
+	return t.runReadOnlyCmd(cmd)
+}
+
+func (t *SSHTransport) runReadOnlyCmd(baseCmd string) ([]byte, error) {
+	runOnce := func(cmd string, stdinPass string) ([]byte, error) {
+		sess, err := t.client.NewSession()
+		if err != nil {
+			return nil, err
+		}
+		defer sess.Close()
+		if stdinPass != "" {
+			sess.Stdin = bytes.NewReader([]byte(stdinPass + "\n"))
+		}
+		return sess.Output(cmd)
+	}
+	if out, err := runOnce(baseCmd, ""); err == nil {
+		return out, nil
+	} else if t.mode == ModeSudoStdio {
+		return runOnce("sudo -n "+baseCmd, "")
+	} else if t.mode == ModeSudoPassStdio && t.cfg.Secret != "" {
+		return runOnce("sudo -k -S -p '' "+baseCmd, t.cfg.Secret)
+	} else {
+		return nil, err
+	}
 }
 
 func (t *SSHTransport) Close() error {

@@ -83,8 +83,12 @@ func (p ParsedRef) WithTag(newTag string) string {
 
 func normalizeRegistry(r string) string {
 	switch strings.ToLower(r) {
-	case "index.docker.io", "registry-1.docker.io", "registry.hub.docker.com", "docker.io":
+	case "index.docker.io", "registry-1.docker.io", "registry.hub.docker.com", "docker.io",
+		"docker.1ms.run", "docker.3ms.run", "docker.m.daocloud.io", "dockerproxy.com",
+		"docker.nju.edu.cn", "hub-mirror.c.163.com", "mirror.baidubce.com":
 		return "docker.io"
+	case "ghcr.io", "ghcr.nju.edu.cn", "ghcr.m.daocloud.io", "ghcr-proxy.com":
+		return "ghcr.io"
 	default:
 		return strings.ToLower(r)
 	}

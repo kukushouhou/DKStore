@@ -117,6 +117,15 @@ func (c *Client) CheckManifest(ctx context.Context, ref version.ParsedRef, hostP
 	// 先发 GET（同时拿顶层 Docker-Content-Digest 和响应体，若是 Index 可直接解析平台 Manifest，无需二次拉取 Index）
 	resp, body, err := c.doRegistryRequest(ctx, ref.Registry, ref.Repository, http.MethodGet, manifestURL, acceptManifestHeaders)
 	if err != nil {
+		// 当国内网络直连 registry-1.docker.io 失败（如 EOF/连接重置）时，自动回退到 Docker Hub Tags API 获取该标签 Digest
+		if ref.Registry == "docker.io" && !strings.HasPrefix(tag, "sha256:") {
+			if fbRes, fbErr := c.fetchDockerHubTagManifest(ctx, ref.Repository, tag, hostPlatform); fbErr == nil && fbRes.RepoDigest != "" {
+				if b, mErr := json.Marshal(fbRes); mErr == nil {
+					c.putCache(ctx, cacheKey, b, 30*time.Minute)
+				}
+				return fbRes, nil
+			}
+		}
 		return nil, err
 	}
 	res := &ManifestResult{
@@ -287,6 +296,46 @@ func pickTopVersionTags(entries []TagDigestEntry, limit int) []string {
 		parsed = append(parsed[:bestIdx], parsed[bestIdx+1:]...)
 	}
 	return out
+}
+
+func (c *Client) fetchDockerHubTagManifest(ctx context.Context, repository, tag, hostPlatform string) (*ManifestResult, error) {
+	u := fmt.Sprintf("%s/v2/repositories/%s/tags/%s", c.hubAPIBase(), repository, url.PathEscape(tag))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, &RegistryError{Kind: ErrNetwork, Message: err.Error()}
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, &RegistryError{Kind: ErrNetwork, Message: err.Error()}
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, classifyHTTPStatus("Docker Hub", resp.StatusCode)
+	}
+	var payload struct {
+		Digest string `json:"digest"`
+		Images []struct {
+			OS      string `json:"os"`
+			Arch    string `json:"architecture"`
+			Variant string `json:"variant"`
+			Digest  string `json:"digest"`
+		} `json:"images"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+	res := &ManifestResult{RepoDigest: strings.TrimSpace(payload.Digest)}
+	for _, im := range payload.Images {
+		if formatPlatform(im.OS, im.Arch, im.Variant) == hostPlatform && im.Digest != "" {
+			res.PlatformDigest = im.Digest
+			if res.RepoDigest == "" {
+				res.RepoDigest = im.Digest
+			}
+			break
+		}
+	}
+	return res, nil
 }
 
 func (c *Client) fetchDockerHubTags(ctx context.Context, repository string, maxPages int) ([]TagDigestEntry, error) {

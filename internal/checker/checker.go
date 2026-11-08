@@ -288,7 +288,7 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 
 func (s *Service) checkSingleService(ctx context.Context, svc svcRow, bypassCache bool) (out classify.Output, errKind, errMsg string, curMatched []string) {
 	ref, err := version.ParseImageRef(svc.ImageRef)
-	if err != nil || strings.HasPrefix(svc.ImageRef, "sha256:") {
+	if err != nil || strings.HasPrefix(svc.ImageRef, "sha256:") || (svc.RepoDigest == "" && !ref.IsPinnedDigest()) {
 		return classify.Output{Kind: classify.KindUncomparable}, "", "", nil
 	}
 
