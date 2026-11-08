@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -15,6 +16,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -34,20 +37,31 @@ const (
 	ModeSudoPassStdio Mode = "sudo_pass_dial_stdio"
 )
 
-// Transport 封装到一台目标主机的只读连接。
+// ErrFileConflict 表示目标文件在更新执行前已被外部修改。
+var ErrFileConflict = errors.New("external file conflict")
+
+// Transport 封装到一台目标主机的基础连接。
 type Transport interface {
 	// Mode 返回实际生效的传输模式。
 	Mode() Mode
-	// DoDocker 向目标 Docker Engine 发起只读 HTTP 请求（仅允许 GET/HEAD）。
+	// DoDocker 向目标 Docker Engine 发起只读 HTTP 请求（GET/HEAD）。
 	DoDocker(ctx context.Context, path string) (*http.Response, error)
 	// ReadFile 读取目标主机上的文本文件（用于读取 Compose YAML 与 .env，上限 2 MiB）。
 	ReadFile(ctx context.Context, path string) ([]byte, error)
 	Close() error
 }
 
+// ExecutableTransport 扩展 Transport，提供镜像拉取、容器重建、Compose 单服务更新与冲突校验写入能力。
+type ExecutableTransport interface {
+	Transport
+	RequestDocker(ctx context.Context, method, path string, body io.Reader, headers map[string]string) (*http.Response, error)
+	WriteFileAtomic(ctx context.Context, path string, data []byte, expectedSHA256 string) error
+	ExecComposeService(ctx context.Context, workDir string, configFiles, envFiles []string, projectName, serviceName string, startContainer bool) (string, error)
+}
+
 const maxFileSize = 2 << 20 // 2 MiB
 
-// readOnlyHTTPClient 使用自定义 dialer 构建只允许 GET/HEAD 的 Docker HTTP 客户端。
+// newReadOnlyHTTPClient 使用自定义 dialer 构建默认 30s 超时的 Docker HTTP 客户端。
 func newReadOnlyHTTPClient(dial func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
@@ -60,10 +74,23 @@ func newReadOnlyHTTPClient(dial func(ctx context.Context, network, addr string) 
 	}
 }
 
-// LocalTransport 通过本机 Unix Socket 访问 Docker，并直接读取本机文件。
+// newStreamingHTTPClient 构建不设固定总超时（由 ctx 控制生命周期）的 Docker HTTP 客户端，用于镜像拉取流与容器操作。
+func newStreamingHTTPClient(dial func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext:         dial,
+			DisableKeepAlives:   false,
+			MaxIdleConnsPerHost: 4,
+			IdleConnTimeout:     30 * time.Second,
+		},
+	}
+}
+
+// LocalTransport 通过本机 Unix Socket 访问 Docker，并直接读写本机文件。
 type LocalTransport struct {
-	socketPath string
-	httpClient *http.Client
+	socketPath   string
+	httpClient   *http.Client
+	streamClient *http.Client
 }
 
 // NewLocal 创建本机传输。socketPath 为空时使用默认路径。
@@ -76,8 +103,9 @@ func NewLocal(socketPath string) *LocalTransport {
 		return d.DialContext(ctx, "unix", socketPath)
 	}
 	return &LocalTransport{
-		socketPath: socketPath,
-		httpClient: newReadOnlyHTTPClient(dial),
+		socketPath:   socketPath,
+		httpClient:   newReadOnlyHTTPClient(dial),
+		streamClient: newStreamingHTTPClient(dial),
 	}
 }
 
@@ -95,14 +123,24 @@ func DefaultLocalSocket() string {
 func (l *LocalTransport) Mode() Mode { return ModeLocal }
 
 func (l *LocalTransport) DoDocker(ctx context.Context, path string) (*http.Response, error) {
+	return l.RequestDocker(ctx, http.MethodGet, path, nil, nil)
+}
+
+func (l *LocalTransport) RequestDocker(ctx context.Context, method, path string, body io.Reader, headers map[string]string) (*http.Response, error) {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+path, nil)
+	req, err := http.NewRequestWithContext(ctx, method, "http://docker"+path, body)
 	if err != nil {
 		return nil, err
 	}
-	return l.httpClient.Do(req)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	if method == http.MethodGet || method == http.MethodHead {
+		return l.httpClient.Do(req)
+	}
+	return l.streamClient.Do(req)
 }
 
 func (l *LocalTransport) ReadFile(_ context.Context, path string) ([]byte, error) {
@@ -114,8 +152,56 @@ func (l *LocalTransport) ReadFile(_ context.Context, path string) ([]byte, error
 	return io.ReadAll(io.LimitReader(f, maxFileSize))
 }
 
+func (l *LocalTransport) WriteFileAtomic(ctx context.Context, path string, data []byte, expectedSHA256 string) error {
+	if expectedSHA256 != "" {
+		cur, err := l.ReadFile(ctx, path)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(cur)
+		if hex.EncodeToString(sum[:]) != expectedSHA256 {
+			return ErrFileConflict
+		}
+	}
+	mode := os.FileMode(0o644)
+	if st, err := os.Stat(path); err == nil {
+		mode = st.Mode().Perm()
+	}
+	tmp := path + ".dkstore.tmp"
+	if err := os.WriteFile(tmp, data, mode); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+func (l *LocalTransport) ExecComposeService(ctx context.Context, workDir string, configFiles, envFiles []string, projectName, serviceName string, startContainer bool) (string, error) {
+	args := buildComposeArgs(workDir, configFiles, envFiles, projectName, serviceName, startContainer)
+	cmd := exec.CommandContext(ctx, "docker", append([]string{"compose"}, args...)...)
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
+	cmd.Env = append(os.Environ(), "PATH="+os.Getenv("PATH")+":/usr/local/bin:/var/packages/ContainerManager/target/usr/bin:/var/packages/Docker/target/usr/bin")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// 回退尝试 docker-compose
+		cmd2 := exec.CommandContext(ctx, "docker-compose", args...)
+		if workDir != "" {
+			cmd2.Dir = workDir
+		}
+		cmd2.Env = cmd.Env
+		if out2, err2 := cmd2.CombinedOutput(); err2 == nil {
+			return strings.TrimSpace(string(out2)), nil
+		}
+		return strings.TrimSpace(string(out)), fmt.Errorf("docker compose 执行失败: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 func (l *LocalTransport) Close() error {
 	l.httpClient.CloseIdleConnections()
+	if l.streamClient != nil {
+		l.streamClient.CloseIdleConnections()
+	}
 	return nil
 }
 
@@ -143,14 +229,15 @@ func (e *HostKeyMismatchError) Error() string {
 	return fmt.Sprintf("SSH 主机指纹不匹配：已保存 %s，远端返回 %s", e.Expected, e.Presented)
 }
 
-// SSHTransport 通过 SSH 访问远端 Docker 与只读文件。
+// SSHTransport 通过 SSH 访问远端 Docker 与配置文件。
 type SSHTransport struct {
-	cfg           SSHConfig
-	mu            sync.Mutex
-	client        *ssh.Client
-	mode          Mode
-	presentedKey  string // SHA256:... 指纹
-	httpClient    *http.Client
+	cfg          SSHConfig
+	mu           sync.Mutex
+	client       *ssh.Client
+	mode         Mode
+	presentedKey string // SHA256:... 指纹
+	httpClient   *http.Client
+	streamClient *http.Client
 }
 
 // DialSSH 建立 SSH 连接；若 PreferredMode 为空则自动按三级顺序探测 Docker 访问方式。
@@ -166,6 +253,7 @@ func DialSSH(ctx context.Context, cfg SSHConfig) (*SSHTransport, error) {
 		return nil, err
 	}
 	t.httpClient = newReadOnlyHTTPClient(t.dialDockerConn)
+	t.streamClient = newStreamingHTTPClient(t.dialDockerConn)
 	if t.mode == "" {
 		if err := t.probeDockerMode(ctx); err != nil {
 			_ = t.Close()
@@ -338,14 +426,27 @@ func (t *SSHTransport) openStdioConn(cmd string, sudoPass string) (net.Conn, err
 }
 
 func (t *SSHTransport) DoDocker(ctx context.Context, path string) (*http.Response, error) {
+	return t.RequestDocker(ctx, http.MethodGet, path, nil, nil)
+}
+
+func (t *SSHTransport) RequestDocker(ctx context.Context, method, path string, body io.Reader, headers map[string]string) (*http.Response, error) {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker"+path, nil)
+	req, err := http.NewRequestWithContext(ctx, method, "http://docker"+path, body)
 	if err != nil {
 		return nil, err
 	}
-	return t.httpClient.Do(req)
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	if method == http.MethodGet || method == http.MethodHead {
+		return t.httpClient.Do(req)
+	}
+	if t.streamClient == nil {
+		t.streamClient = newStreamingHTTPClient(t.dialDockerConn)
+	}
+	return t.streamClient.Do(req)
 }
 
 func (t *SSHTransport) ReadFile(ctx context.Context, path string) ([]byte, error) {
@@ -355,7 +456,6 @@ func (t *SSHTransport) ReadFile(ctx context.Context, path string) ([]byte, error
 	if err := t.ensureClient(ctx); err != nil {
 		return nil, err
 	}
-	// 只读白名单命令：仅执行 cat -- 'path'（若权限不足且当前为 sudo 模式，则回退只读 sudo cat）
 	baseCmd := "cat -- " + shellQuote(path)
 	out, err := t.runReadOnlyCmd(baseCmd)
 	if err != nil {
@@ -365,6 +465,54 @@ func (t *SSHTransport) ReadFile(ctx context.Context, path string) ([]byte, error
 		out = out[:maxFileSize]
 	}
 	return out, nil
+}
+
+func (t *SSHTransport) WriteFileAtomic(ctx context.Context, path string, data []byte, expectedSHA256 string) error {
+	if strings.TrimSpace(path) == "" || strings.ContainsRune(path, 0) {
+		return errors.New("文件路径不合法")
+	}
+	if err := t.ensureClient(ctx); err != nil {
+		return err
+	}
+	if expectedSHA256 != "" {
+		cur, err := t.ReadFile(ctx, path)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(cur)
+		if hex.EncodeToString(sum[:]) != expectedSHA256 {
+			return ErrFileConflict
+		}
+	}
+	b64 := base64.StdEncoding.EncodeToString(data)
+	tmpPath := path + ".dkstore.tmp"
+	inner := fmt.Sprintf("printf %%s %s | base64 -d > %s && mv -f -- %s %s",
+		shellQuote(b64), shellQuote(tmpPath), shellQuote(tmpPath), shellQuote(path))
+	_, err := t.runPrivilegedCmd("sh -c " + shellQuote(inner))
+	return err
+}
+
+func (t *SSHTransport) ExecComposeService(ctx context.Context, workDir string, configFiles, envFiles []string, projectName, serviceName string, startContainer bool) (string, error) {
+	if err := t.ensureClient(ctx); err != nil {
+		return "", err
+	}
+	args := buildComposeArgs(workDir, configFiles, envFiles, projectName, serviceName, startContainer)
+	quotedArgs := make([]string, 0, len(args))
+	for _, a := range args {
+		quotedArgs = append(quotedArgs, shellQuote(a))
+	}
+	argStr := strings.Join(quotedArgs, " ")
+	cdPart := ""
+	if workDir != "" {
+		cdPart = "cd -- " + shellQuote(workDir) + " && "
+	}
+	inner := fmt.Sprintf(`PATH="$PATH:/usr/local/bin:/var/packages/ContainerManager/target/usr/bin:/var/packages/Docker/target/usr/bin"; %s(docker compose %s 2>&1 || docker-compose %s 2>&1)`,
+		cdPart, argStr, argStr)
+	out, err := t.runPrivilegedCmd("sh -c " + shellQuote(inner))
+	if err != nil {
+		return strings.TrimSpace(string(out)), fmt.Errorf("远端 docker compose 执行失败: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // ExecSynoWebAPIProjectList 在群晖主机上通过只读 synowebapi 查询 Container Manager 原生项目列表。
@@ -399,11 +547,35 @@ func (t *SSHTransport) runReadOnlyCmd(baseCmd string) ([]byte, error) {
 	}
 }
 
+func (t *SSHTransport) runPrivilegedCmd(baseCmd string) ([]byte, error) {
+	runOnce := func(cmd string, stdinPass string) ([]byte, error) {
+		sess, err := t.client.NewSession()
+		if err != nil {
+			return nil, err
+		}
+		defer sess.Close()
+		if stdinPass != "" {
+			sess.Stdin = bytes.NewReader([]byte(stdinPass + "\n"))
+		}
+		return sess.CombinedOutput(cmd)
+	}
+	if t.mode == ModeSudoStdio {
+		return runOnce("sudo -n "+baseCmd, "")
+	}
+	if t.mode == ModeSudoPassStdio && t.cfg.Secret != "" {
+		return runOnce("sudo -k -S -p '' "+baseCmd, t.cfg.Secret)
+	}
+	return runOnce(baseCmd, "")
+}
+
 func (t *SSHTransport) Close() error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.httpClient != nil {
 		t.httpClient.CloseIdleConnections()
+	}
+	if t.streamClient != nil {
+		t.streamClient.CloseIdleConnections()
 	}
 	if t.client != nil {
 		err := t.client.Close()
@@ -411,6 +583,33 @@ func (t *SSHTransport) Close() error {
 		return err
 	}
 	return nil
+}
+
+func buildComposeArgs(workDir string, configFiles, envFiles []string, projectName, serviceName string, startContainer bool) []string {
+	var args []string
+	if projectName != "" {
+		args = append(args, "-p", projectName)
+	}
+	for _, cf := range configFiles {
+		p := cf
+		if workDir != "" && !strings.HasPrefix(p, "/") && !(len(p) >= 2 && p[1] == ':') {
+			p = filepath.ToSlash(filepath.Join(workDir, p))
+		}
+		args = append(args, "-f", p)
+	}
+	for _, ef := range envFiles {
+		p := ef
+		if workDir != "" && !strings.HasPrefix(p, "/") && !(len(p) >= 2 && p[1] == ':') {
+			p = filepath.ToSlash(filepath.Join(workDir, p))
+		}
+		args = append(args, "--env-file", p)
+	}
+	if startContainer {
+		args = append(args, "up", "-d", "--no-deps", "--", serviceName)
+	} else {
+		args = append(args, "up", "--no-start", "--no-deps", "--", serviceName)
+	}
+	return args
 }
 
 func shellQuote(s string) string {

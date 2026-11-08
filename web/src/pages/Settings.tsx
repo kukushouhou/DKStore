@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import {
+  Alert,
   Button,
   Card,
   Col,
@@ -10,10 +11,11 @@ import {
   Segmented,
   Select,
   Space,
+  Tag,
   Typography,
   message,
 } from 'antd'
-import { DeleteOutlined, PlusOutlined, SendOutlined } from '@ant-design/icons'
+import { DeleteOutlined, GithubOutlined, PlusOutlined, ReloadOutlined, SendOutlined } from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type AppSettings, type RegistryCred } from '../api/client'
 import { useI18n } from '../i18n'
@@ -26,6 +28,10 @@ export default function SettingsPage() {
 
   const settingsQuery = useQuery({ queryKey: ['settings'], queryFn: api.getSettings })
   const credsQuery = useQuery({ queryKey: ['regCreds'], queryFn: api.listRegCreds })
+  const selfUpdateQuery = useQuery({
+    queryKey: ['selfUpdate', locale],
+    queryFn: api.selfUpdateStatus,
+  })
 
   const [form] = Form.useForm<AppSettings>()
   const [credForm] = Form.useForm<RegistryCred>()
@@ -107,6 +113,58 @@ export default function SettingsPage() {
       <Typography.Title level={3} style={{ margin: 0 }}>
         {t.settings.title}
       </Typography.Title>
+
+      <Card
+        title={t.settings.selfUpdateTitle}
+        extra={
+          <Button
+            size="small"
+            icon={<ReloadOutlined />}
+            loading={selfUpdateQuery.isFetching}
+            onClick={() => selfUpdateQuery.refetch()}
+          />
+        }
+      >
+        <Space direction="vertical" size="small" style={{ width: '100%' }}>
+          <Space wrap>
+            <Typography.Text type="secondary">{t.settings.curVersionLabel}:</Typography.Text>
+            <Tag style={{ fontFamily: 'monospace' }}>
+              {selfUpdateQuery.data?.currentVersion || 'v0.2.0'}
+            </Tag>
+            <Typography.Text type="secondary">{t.settings.latestVersionLabel}:</Typography.Text>
+            <Tag color={selfUpdateQuery.data?.hasUpdate ? 'processing' : 'success'} style={{ fontFamily: 'monospace' }}>
+              {selfUpdateQuery.data?.latestVersion || selfUpdateQuery.data?.currentVersion || 'v0.2.0'}
+            </Tag>
+            <Tag color={selfUpdateQuery.data?.hasUpdate ? 'processing' : 'success'}>
+              {selfUpdateQuery.data?.hasUpdate ? t.settings.newVersionBadge : t.settings.upToDateBadge}
+            </Tag>
+            {selfUpdateQuery.data?.releaseUrl && (
+              <Button
+                size="small"
+                type="link"
+                icon={<GithubOutlined />}
+                href={selfUpdateQuery.data.releaseUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {t.settings.viewReleaseBtn}
+              </Button>
+            )}
+          </Space>
+          {selfUpdateQuery.data?.preserveNote && (
+            <Alert
+              type={selfUpdateQuery.data.hasUpdate ? 'info' : 'success'}
+              showIcon
+              title={selfUpdateQuery.data.preserveNote}
+            />
+          )}
+          {selfUpdateQuery.data?.commandHint && (
+            <Typography.Text code style={{ fontSize: 12 }}>
+              {selfUpdateQuery.data.commandHint}
+            </Typography.Text>
+          )}
+        </Space>
+      </Card>
 
       <Card title={t.settings.appearanceAndLang}>
         <Space direction="vertical" size="middle">

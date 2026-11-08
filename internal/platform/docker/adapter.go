@@ -62,6 +62,7 @@ func (a *Adapter) Probe(ctx context.Context) (*platform.HostInfo, error) {
 			PullImage:           true,
 			UpdateSingleService: true,
 			UpdateWholeProject:  true,
+			Rollback:            true,
 		},
 	}, nil
 }

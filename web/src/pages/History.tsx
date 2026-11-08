@@ -1,13 +1,45 @@
-import { Card, Empty, Space, Tag, Timeline, Typography } from 'antd'
-import { ArrowRightOutlined } from '@ant-design/icons'
-import { useQuery } from '@tanstack/react-query'
-import { api } from '../api/client'
+import { useState } from 'react'
+import {
+  Alert,
+  Button,
+  Card,
+  Collapse,
+  Descriptions,
+  Empty,
+  Flex,
+  Modal,
+  Progress,
+  Segmented,
+  Space,
+  Tag,
+  Timeline,
+  Typography,
+  message,
+} from 'antd'
+import { ArrowRightOutlined, RollbackOutlined } from '@ant-design/icons'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { api, type UpdateJobItem } from '../api/client'
 import { useI18n } from '../i18n'
 
 export default function HistoryPage() {
   const { locale, t } = useI18n()
+  const qc = useQueryClient()
+  const [tab, setTab] = useState<'updates' | 'scans'>('updates')
+  const [verifyingId, setVerifyingId] = useState<string | null>(null)
+  const [rollbackModalJob, setRollbackModalJob] = useState<UpdateJobItem | null>(null)
+  const [rollbackRef, setRollbackRef] = useState('')
+  const [dataWarning, setDataWarning] = useState('')
+  const [rollingBack, setRollingBack] = useState(false)
+
+  const updatesQuery = useQuery({
+    queryKey: ['updateJobs', locale],
+    queryFn: api.listUpdates,
+    refetchInterval: 4000,
+  })
   const runsQuery = useQuery({ queryKey: ['checkRuns', locale], queryFn: api.checkRuns })
-  const items = runsQuery.data?.items ?? []
+
+  const updateItems = updatesQuery.data?.items ?? []
+  const scanItems = runsQuery.data?.items ?? []
 
   const triggerLabel = (tr: string) => {
     if (tr === 'manual') return t.history.triggerManual
@@ -21,17 +53,196 @@ export default function HistoryPage() {
     return <Tag color="success">{t.history.changeResolved}</Tag>
   }
 
+  const statusTag = (st: string) => {
+    if (st === 'succeeded') return <Tag color="success">{t.history.statusSucceeded}</Tag>
+    if (st === 'failed') return <Tag color="error">{t.history.statusFailed}</Tag>
+    return <Tag color="processing">{t.history.statusRunning}</Tag>
+  }
+
+  const onVerifyRollback = async (job: UpdateJobItem) => {
+    setVerifyingId(job.id)
+    try {
+      const res = await api.verifyRollback(job.id)
+      qc.invalidateQueries({ queryKey: ['updateJobs'] })
+      if (!res.eligible) {
+        Modal.warning({
+          title: t.history.rollbackUnavailable,
+          content: res.reasonText || job.rollbackReasonText || t.history.rollbackUnavailable,
+        })
+        return
+      }
+      setRollbackRef(res.rollbackRef || job.rollbackRef || job.oldImageRef)
+      setDataWarning(res.dataWarning || '')
+      setRollbackModalJob(job)
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setVerifyingId(null)
+    }
+  }
+
+  const onConfirmRollback = async () => {
+    if (!rollbackModalJob) return
+    setRollingBack(true)
+    try {
+      await api.executeRollback(rollbackModalJob.id)
+      message.success(t.history.rollbackStarted)
+      setRollbackModalJob(null)
+      qc.invalidateQueries({ queryKey: ['updateJobs'] })
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setRollingBack(false)
+    }
+  }
+
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
-      <Typography.Title level={3} style={{ margin: 0 }}>
-        {t.history.title}
-      </Typography.Title>
+      <Flex justify="space-between" align="center" wrap gap={12}>
+        <Typography.Title level={3} style={{ margin: 0 }}>
+          {t.history.title}
+        </Typography.Title>
+        <Segmented
+          value={tab}
+          onChange={(v) => setTab(v as 'updates' | 'scans')}
+          options={[
+            { label: t.history.tabUpdates, value: 'updates' },
+            { label: t.history.tabChecks, value: 'scans' },
+          ]}
+        />
+      </Flex>
 
-      {items.length === 0 ? (
+      {tab === 'updates' ? (
+        updateItems.length === 0 ? (
+          <Empty description={t.history.emptyUpdates} />
+        ) : (
+          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+            {updateItems.map((job) => (
+              <Card key={job.id} size="small">
+                <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                  <Flex justify="space-between" align="center" wrap gap={8}>
+                    <Space wrap>
+                      <Tag color={job.kind === 'rollback' ? 'purple' : 'blue'}>
+                        {job.kind === 'rollback' ? t.history.kindRollback : t.history.kindUpgrade}
+                      </Tag>
+                      <Typography.Text strong>
+                        {job.appName}
+                        {job.serviceName && job.serviceName !== 'main' && job.serviceName !== job.appName
+                          ? ` / ${job.serviceName}`
+                          : ''}
+                      </Typography.Text>
+                      <Typography.Text type="secondary">({job.hostName})</Typography.Text>
+                      {statusTag(job.status)}
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        {new Date(job.startedAt * 1000).toLocaleString(locale)}
+                      </Typography.Text>
+                    </Space>
+
+                    {job.kind === 'upgrade' && job.status === 'succeeded' && (
+                      <Space wrap>
+                        {!job.rollbackEligible && job.rollbackReasonText && (
+                          <Tag color="default">
+                            {t.history.rollbackUnavailable}: {job.rollbackReasonText}
+                          </Tag>
+                        )}
+                        <Button
+                          size="small"
+                          icon={<RollbackOutlined />}
+                          loading={verifyingId === job.id}
+                          onClick={() => onVerifyRollback(job)}
+                        >
+                          {t.history.verifyRollbackBtn}
+                        </Button>
+                      </Space>
+                    )}
+                  </Flex>
+
+                  <Space size={6} wrap>
+                    <Tag style={{ fontFamily: 'monospace' }}>
+                      {job.oldVersion || job.oldImageRef || t.home.unknownCurrent}
+                    </Tag>
+                    <ArrowRightOutlined style={{ fontSize: 12 }} />
+                    <Tag color="processing" style={{ fontFamily: 'monospace', fontWeight: 600 }}>
+                      {job.targetVersion || job.targetImageRef || t.home.newImageDetected}
+                    </Tag>
+                  </Space>
+
+                  {job.status !== 'succeeded' && job.status !== 'failed' && (
+                    <div>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        {job.progress?.statusText || job.phase}
+                      </Typography.Text>
+                      <Progress percent={job.progress?.percent ?? 0} size="small" status="active" />
+                    </div>
+                  )}
+
+                  {job.errorMsg && <Alert type="error" showIcon title={job.errorMsg} />}
+
+                  <Collapse
+                    ghost
+                    size="small"
+                    items={[
+                      {
+                        key: 'details',
+                        label: t.history.logsLabel,
+                        children: (
+                          <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                            <Descriptions column={1} size="small">
+                              <Descriptions.Item label={t.detail.imageRef}>
+                                <Typography.Text code>{job.oldImageRef}</Typography.Text>{' '}
+                                <ArrowRightOutlined style={{ fontSize: 11 }} />{' '}
+                                <Typography.Text code>{job.targetImageRef}</Typography.Text>
+                              </Descriptions.Item>
+                              {job.oldRepoDigest && (
+                                <Descriptions.Item label={t.detail.localDigest}>
+                                  <Typography.Text code style={{ fontSize: 11, wordBreak: 'break-all' }}>
+                                    {job.oldRepoDigest}
+                                  </Typography.Text>
+                                </Descriptions.Item>
+                              )}
+                              {job.targetRepoDigest && (
+                                <Descriptions.Item label={t.detail.targetDigest}>
+                                  <Typography.Text code style={{ fontSize: 11, wordBreak: 'break-all' }}>
+                                    {job.targetRepoDigest}
+                                  </Typography.Text>
+                                </Descriptions.Item>
+                              )}
+                              {(job.oldMatchedTags?.length ?? 0) > 0 && (
+                                <Descriptions.Item label={t.detail.matchedTags}>
+                                  {job.oldMatchedTags?.join(', ')}
+                                </Descriptions.Item>
+                              )}
+                            </Descriptions>
+                            {job.logs && (
+                              <pre
+                                style={{
+                                  margin: 0,
+                                  padding: 8,
+                                  fontSize: 11,
+                                  background: 'rgba(127,127,127,0.08)',
+                                  borderRadius: 6,
+                                  whiteSpace: 'pre-wrap',
+                                  wordBreak: 'break-all',
+                                }}
+                              >
+                                {job.logs}
+                              </pre>
+                            )}
+                          </Space>
+                        ),
+                      },
+                    ]}
+                  />
+                </Space>
+              </Card>
+            ))}
+          </Space>
+        )
+      ) : scanItems.length === 0 ? (
         <Empty description={t.history.empty} />
       ) : (
         <Timeline
-          items={items.map((r) => ({
+          items={scanItems.map((r) => ({
             key: r.id,
             children: (
               <Card size="small" style={{ marginBottom: 8 }}>
@@ -84,6 +295,25 @@ export default function HistoryPage() {
           }))}
         />
       )}
+
+      <Modal
+        open={Boolean(rollbackModalJob)}
+        title={t.history.rollbackModalTitle}
+        okText={t.history.rollbackConfirmBtn}
+        cancelText={t.ignoreModal.cancel}
+        confirmLoading={rollingBack}
+        onOk={onConfirmRollback}
+        onCancel={() => setRollbackModalJob(null)}
+      >
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Descriptions column={1} size="small">
+            <Descriptions.Item label={t.history.rollbackTargetLabel}>
+              <Typography.Text code>{rollbackRef}</Typography.Text>
+            </Descriptions.Item>
+          </Descriptions>
+          {dataWarning && <Alert type="warning" showIcon title={dataWarning} />}
+        </Space>
+      </Modal>
     </Space>
   )
 }

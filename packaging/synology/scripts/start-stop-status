@@ -1,0 +1,33 @@
+#!/bin/sh
+# Synology DSM 7 start-stop-status script for DKStore
+PACKAGE="dkstore"
+INSTALL_DIR="/var/packages/${PACKAGE}/target"
+VAR_DIR="/var/packages/${PACKAGE}/var"
+PID_FILE="${VAR_DIR}/dkstore.pid"
+LOG_FILE="${VAR_DIR}/dkstore.log"
+BIN="${INSTALL_DIR}/bin/dkstore"
+
+case "$1" in
+  start)
+    mkdir -p "${VAR_DIR}"
+    nohup "${BIN}" --listen ":8090" --data "${VAR_DIR}" >> "${LOG_FILE}" 2>&1 &
+    echo $! > "${PID_FILE}"
+    exit 0
+    ;;
+  stop)
+    if [ -f "${PID_FILE}" ]; then
+      kill "$(cat "${PID_FILE}")" 2>/dev/null || true
+      rm -f "${PID_FILE}"
+    fi
+    exit 0
+    ;;
+  status)
+    if [ -f "${PID_FILE}" ] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null; then
+      exit 0
+    fi
+    exit 3
+    ;;
+  *)
+    exit 1
+    ;;
+esac

@@ -15,9 +15,10 @@ import {
 } from 'antd'
 import { SyncOutlined, WarningOutlined } from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type AppCardItem, type CheckProgress } from '../api/client'
+import { api, type AppCardItem, type CheckProgress, type UpdateJobItem } from '../api/client'
 import AppCard from '../components/AppCard'
 import { useI18n } from '../i18n'
+import { useUIStore } from '../store/ui'
 
 export default function HomePage() {
   const { locale, t } = useI18n()
@@ -30,7 +31,7 @@ export default function HomePage() {
     queryFn: () => api.overview(hostFilter || undefined),
   })
 
-  // 订阅 SSE 实时检查进度
+  // 订阅 SSE 实时检查与更新任务进度
   useEffect(() => {
     const es = new EventSource('/api/v1/events')
     es.addEventListener('progress', (ev) => {
@@ -40,6 +41,18 @@ export default function HomePage() {
         if (!p.running && p.phase === 'done') {
           qc.invalidateQueries({ queryKey: ['overview'] })
           qc.invalidateQueries({ queryKey: ['checkRuns'] })
+        }
+      } catch {
+        // ignore
+      }
+    })
+    es.addEventListener('update_job', (ev) => {
+      try {
+        const job = JSON.parse((ev as MessageEvent).data) as UpdateJobItem
+        useUIStore.getState().upsertUpdateJob(job)
+        if (job.status === 'succeeded' || job.status === 'failed') {
+          qc.invalidateQueries({ queryKey: ['overview'] })
+          qc.invalidateQueries({ queryKey: ['updates'] })
         }
       } catch {
         // ignore

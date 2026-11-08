@@ -65,6 +65,20 @@ func (a *Adapter) Kind() string { return "synology" }
 
 func (a *Adapter) Close() error { return a.dock.Close() }
 
+// HasLocalImage 检查群晖本地 Docker 是否仍保留指定镜像。
+func (a *Adapter) HasLocalImage(ctx context.Context, imageIDOrRef string) bool {
+	return a.dock.HasLocalImage(ctx, imageIDOrRef)
+}
+
+// UpdateService 在群晖主机上执行单服务更新（保持 DSM Project 原生路径、YAML 与 Container Manager 状态同步，立项文档 §9.2 / A13 / A14）。
+func (a *Adapter) UpdateService(
+	ctx context.Context,
+	req platform.UpdateRequest,
+	onProgress func(platform.PullProgress),
+) (*platform.UpdateResult, error) {
+	return a.dock.UpdateService(ctx, req, onProgress)
+}
+
 // Probe 探测群晖 DSM 版本、Docker 引擎信息及原生 Project 发现能力。
 func (a *Adapter) Probe(ctx context.Context) (*platform.HostInfo, error) {
 	info, err := a.dock.Probe(ctx)

@@ -1,0 +1,13 @@
+{
+  "admin/services/dkstore": {
+    "title": "DKStore Update Center",
+    "order": 85,
+    "action": {
+      "type": "view",
+      "path": "dkstore/index"
+    },
+    "depends": {
+      "acl": [ "luci-app-dkstore" ]
+    }
+  }
+}

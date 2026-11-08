@@ -321,3 +321,81 @@ func formatAppSvc(it NotifyItem) string {
 	}
 	return it.AppName + "/" + it.ServiceName
 }
+
+// FormatUpdateError 根据更新错误编码生成对应语言的可读错误消息（立项文档 §7.2）。
+func FormatUpdateError(lang Lang, code, detail string) string {
+	if lang == EnUS {
+		switch code {
+		case "external_conflict":
+			return "External change conflict detected: container or Compose YAML was modified outside DKStore. Please rescan before updating."
+		case "vendor_managed_readonly":
+			return "This container is managed by the platform's native Package Center and cannot be directly recreated by DKStore."
+		case "capability_unsupported":
+			return "The target platform does not support safe single-service updates without affecting other services."
+		case "pull_failed":
+			return "Failed to pull target image: " + detail
+		case "recreate_failed":
+			return "Failed to recreate service container: " + detail
+		case "verify_failed":
+			return "Post-update verification failed (running container image did not switch or failed health check): " + detail
+		default:
+			if detail != "" {
+				return detail
+			}
+			return "Update failed"
+		}
+	}
+	switch code {
+	case "external_conflict":
+		return "检测到外部变更冲突：目标容器或 Compose 配置文件已被其他工具修改，为避免覆盖最新配置已中止操作，请先重新扫描。"
+	case "vendor_managed_readonly":
+		return "该容器由系统套件中心托管，不支持通过更新中心直接重建，请前往宿主套件中心升级。"
+	case "capability_unsupported":
+		return "目标平台当前不支持安全地仅更新单个服务，已阻止整项目重建以避免误升级数据库。"
+	case "pull_failed":
+		return "拉取目标镜像失败：" + detail
+	case "recreate_failed":
+		return "按原配置重建服务失败：" + detail
+	case "verify_failed":
+		return "更新后状态校验未通过（运行镜像未切换或健康检查未就绪）：" + detail
+	default:
+		if detail != "" {
+			return detail
+		}
+		return "更新执行失败"
+	}
+}
+
+// FormatRollbackReason 根据回退不可用原因码生成对应语言的说明（立项文档 §8.2）。
+func FormatRollbackReason(lang Lang, code string) string {
+	if lang == EnUS {
+		switch code {
+		case "no_exact_version_tag":
+			return "Old rolling image digest could not be matched to a specific verifiable version tag; rollback is unavailable."
+		case "tag_overwritten":
+			return "The historical version tag in the remote registry now points to a different digest and no local backup image exists."
+		case "target_unreachable":
+			return "Unable to verify historical tag in the remote registry (offline or authentication required)."
+		case "compose_unwritable":
+			return "Original Compose configuration file is missing or unreadable; cannot safely roll back."
+		case "vendor_managed":
+			return "Managed by platform Package Center; rollback is not supported."
+		default:
+			return ""
+		}
+	}
+	switch code {
+	case "no_exact_version_tag":
+		return "旧镜像摘要未匹配到明确且可验证的版本号标签（如滚动 latest），按安全策略不提供回退。"
+	case "tag_overwritten":
+		return "远端仓库中该历史版本标签指向的摘要已发生变化，且本地旧镜像已清理，无法无歧义回退。"
+	case "target_unreachable":
+		return "无法连接远端仓库验证历史标签有效性，暂不可回退。"
+	case "compose_unwritable":
+		return "未找到或无法读写原始 Compose 配置文件，暂不可回退。"
+	case "vendor_managed":
+		return "由系统套件中心管理，不支持回退。"
+	default:
+		return ""
+	}
+}

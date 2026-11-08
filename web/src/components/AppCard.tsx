@@ -10,6 +10,7 @@ import {
   Flex,
   Grid,
   Modal,
+  Progress,
   Radio,
   Space,
   Tag,
@@ -18,6 +19,7 @@ import {
 } from 'antd'
 import {
   ArrowRightOutlined,
+  CloudDownloadOutlined,
   CopyOutlined,
   DatabaseOutlined,
   EyeInvisibleOutlined,
@@ -27,8 +29,21 @@ import {
   RollbackOutlined,
   WarningOutlined,
 } from '@ant-design/icons'
-import { api, type AppCardItem, type ServiceItem } from '../api/client'
+import { api, type AppCardItem, type ServiceItem, type UpdateJobItem } from '../api/client'
 import { useI18n } from '../i18n'
+import { useUIStore } from '../store/ui'
+
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let val = bytes
+  let idx = 0
+  while (val >= 1024 && idx < units.length - 1) {
+    val /= 1024
+    idx++
+  }
+  return `${val.toFixed(idx > 1 ? 1 : 0)} ${units[idx]}`
+}
 
 const avatarColors = ['#2f6bff', '#13c2c2', '#722ed1', '#eb2f96', '#fa8c16', '#52c41a']
 
@@ -48,12 +63,55 @@ interface Props {
 export default function AppCard({ app, onChanged }: Props) {
   const { t } = useI18n()
   const screens = Grid.useBreakpoint()
+  const activeUpdateJobs = useUIStore((s) => s.activeUpdateJobs)
+  const upsertUpdateJob = useUIStore((s) => s.upsertUpdateJob)
   const [ignoreOpen, setIgnoreOpen] = useState(false)
   const [ignoreMode, setIgnoreMode] = useState<'this_version' | 'forever'>('this_version')
   const [ignoreTargetKeys, setIgnoreTargetKeys] = useState<string[]>([])
   const [ignoreTargetName, setIgnoreTargetName] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [detailOpen, setDetailOpen] = useState(false)
+  const [cautionTargetSvc, setCautionTargetSvc] = useState<ServiceItem | null>(null)
+  const [updatingSvcKey, setUpdatingSvcKey] = useState('')
+
+  const activeJobsForApp: UpdateJobItem[] = app.services
+    .map((s) => activeUpdateJobs[s.key])
+    .filter((j): j is UpdateJobItem => Boolean(j))
+
+  const triggerServiceUpdate = async (svc: ServiceItem) => {
+    setUpdatingSvcKey(svc.key)
+    try {
+      const res = await api.startUpdates([svc.key])
+      if (res.items && res.items[0]) {
+        upsertUpdateJob(res.items[0])
+      }
+      message.info(t.home.updating)
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setUpdatingSvcKey('')
+      setCautionTargetSvc(null)
+    }
+  }
+
+  const onClickUpdateService = (svc: ServiceItem) => {
+    if (svc.category === 'caution' || app.group === 'caution' || app.isDatabase) {
+      setCautionTargetSvc(svc)
+      return
+    }
+    triggerServiceUpdate(svc)
+  }
+
+  const onClickUpdateCard = () => {
+    const updatable = app.services.filter(
+      (s) => (s.kind === 'digest_update' || s.kind === 'version_update') && !s.ignored,
+    )
+    if (updatable.length === 1) {
+      onClickUpdateService(updatable[0])
+    } else {
+      setDetailOpen(true)
+    }
+  }
 
   const openIgnoreForApp = () => {
     const keys = app.updateServiceKeys?.length ? app.updateServiceKeys : app.services.map((s) => s.key)
@@ -204,6 +262,27 @@ export default function AppCard({ app, onChanged }: Props) {
             />
           )}
 
+          {activeJobsForApp.map((job) => (
+            <div key={job.id} style={{ width: '100%' }}>
+              <Flex justify="space-between" align="center">
+                <Typography.Text style={{ fontSize: 12 }} type="secondary">
+                  {job.progress?.statusText || job.phase}
+                </Typography.Text>
+                {(job.progress?.totalLayers ?? 0) > 0 && (
+                  <Typography.Text style={{ fontSize: 11 }} type="secondary">
+                    {t.home.layerStat
+                      .replace('{done}', String(job.progress?.completedLayers ?? 0))
+                      .replace('{total}', String(job.progress?.totalLayers ?? 0))}
+                    {(job.progress?.totalBytes ?? 0) > 0
+                      ? ` (${formatBytes(job.progress?.downloadedBytes ?? 0)} / ${formatBytes(job.progress?.totalBytes ?? 0)})`
+                      : ''}
+                  </Typography.Text>
+                )}
+              </Flex>
+              <Progress percent={job.progress?.percent ?? 0} size="small" status="active" />
+            </div>
+          ))}
+
           <Flex
             justify="space-between"
             align="center"
@@ -235,18 +314,55 @@ export default function AppCard({ app, onChanged }: Props) {
               </Button>
             </Space>
 
-            {app.group === 'ignored' ? (
-              <Button size="small" icon={<RollbackOutlined />} onClick={restoreApp}>
-                {t.home.restoreReminder}
-              </Button>
-            ) : (
-              <Button size="small" icon={<EyeInvisibleOutlined />} onClick={openIgnoreForApp}>
-                {t.home.ignore}
-              </Button>
-            )}
+            <Space size={6} wrap>
+              {app.group === 'ignored' ? (
+                <Button size="small" icon={<RollbackOutlined />} onClick={restoreApp}>
+                  {t.home.restoreReminder}
+                </Button>
+              ) : (
+                <>
+                  <Button size="small" icon={<EyeInvisibleOutlined />} onClick={openIgnoreForApp}>
+                    {t.home.ignore}
+                  </Button>
+                  {app.source === 'vendor_managed' ? (
+                    <Tag>{t.home.vendorReadonlyTip}</Tag>
+                  ) : (
+                    <Button
+                      size="small"
+                      type="primary"
+                      danger={app.group === 'caution'}
+                      icon={<CloudDownloadOutlined />}
+                      loading={activeJobsForApp.length > 0 || Boolean(updatingSvcKey)}
+                      onClick={onClickUpdateCard}
+                    >
+                      {activeJobsForApp.length > 0 ? t.home.updating : t.home.updateNow}
+                    </Button>
+                  )}
+                </>
+              )}
+            </Space>
           </Flex>
         </Flex>
       </Card>
+
+      <Modal
+        open={Boolean(cautionTargetSvc)}
+        title={t.home.cautionConfirmTitle}
+        okText={t.home.cautionConfirmBtn}
+        cancelText={t.ignoreModal.cancel}
+        okButtonProps={{ danger: true, loading: Boolean(updatingSvcKey) }}
+        onOk={() => cautionTargetSvc && triggerServiceUpdate(cautionTargetSvc)}
+        onCancel={() => setCautionTargetSvc(null)}
+      >
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          <Alert
+            type="warning"
+            showIcon
+            title={cautionTargetSvc?.reasonText || app.reasonText || t.home.cautionConfirmTitle}
+          />
+          <Typography.Text>{t.home.cautionConfirmDesc}</Typography.Text>
+        </Space>
+      </Modal>
 
       <Modal
         open={ignoreOpen}
@@ -333,17 +449,48 @@ export default function AppCard({ app, onChanged }: Props) {
                         </Button>
                       ) : (
                         hasUpdate && (
-                          <Button
-                            size="small"
-                            icon={<EyeInvisibleOutlined />}
-                            onClick={() => openIgnoreForService(svc)}
-                          >
-                            {t.home.ignore}
-                          </Button>
+                          <>
+                            <Button
+                              size="small"
+                              icon={<EyeInvisibleOutlined />}
+                              onClick={() => openIgnoreForService(svc)}
+                            >
+                              {t.home.ignore}
+                            </Button>
+                            {app.source === 'vendor_managed' ? (
+                              <Tag>{t.home.vendorReadonlyTip}</Tag>
+                            ) : (
+                              <Button
+                                size="small"
+                                type="primary"
+                                danger={svc.category === 'caution'}
+                                icon={<CloudDownloadOutlined />}
+                                loading={
+                                  Boolean(activeUpdateJobs[svc.key]) || updatingSvcKey === svc.key
+                                }
+                                onClick={() => onClickUpdateService(svc)}
+                              >
+                                {activeUpdateJobs[svc.key] ? t.home.updating : t.home.updateNow}
+                              </Button>
+                            )}
+                          </>
                         )
                       )}
                     </Space>
                   </Flex>
+
+                  {activeUpdateJobs[svc.key] && (
+                    <div>
+                      <Typography.Text style={{ fontSize: 12 }} type="secondary">
+                        {activeUpdateJobs[svc.key].progress?.statusText || activeUpdateJobs[svc.key].phase}
+                      </Typography.Text>
+                      <Progress
+                        percent={activeUpdateJobs[svc.key].progress?.percent ?? 0}
+                        size="small"
+                        status="active"
+                      />
+                    </div>
+                  )}
 
                   {svc.reasonText && (
                     <Alert

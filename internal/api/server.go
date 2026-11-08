@@ -17,8 +17,10 @@ import (
 	"github.com/kukushouhou/DKStore/internal/ignore"
 	"github.com/kukushouhou/DKStore/internal/notify"
 	"github.com/kukushouhou/DKStore/internal/registry"
+	"github.com/kukushouhou/DKStore/internal/selfupdate"
 	"github.com/kukushouhou/DKStore/internal/store"
 	"github.com/kukushouhou/DKStore/internal/transport"
+	"github.com/kukushouhou/DKStore/internal/updater"
 	"github.com/kukushouhou/DKStore/internal/version"
 )
 
@@ -32,6 +34,7 @@ type Deps struct {
 	Ignore  *ignore.Service
 	Notify  *notify.Service
 	Checker *checker.Service
+	Updater *updater.Service
 	Assets  fs.FS
 }
 
@@ -82,6 +85,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/registry-credentials", s.requireAuth(s.handleListRegCreds))
 	mux.HandleFunc("POST /api/v1/registry-credentials", s.requireAuth(s.handleSaveRegCred))
 	mux.HandleFunc("DELETE /api/v1/registry-credentials", s.requireAuth(s.handleDeleteRegCred))
+
+	mux.HandleFunc("GET /api/v1/updates", s.requireAuth(s.handleListUpdates))
+	mux.HandleFunc("POST /api/v1/updates", s.requireAuth(s.handleStartUpdates))
+	mux.HandleFunc("GET /api/v1/updates/{id}", s.requireAuth(s.handleGetUpdateJob))
+	mux.HandleFunc("GET /api/v1/updates/{id}/rollback-check", s.requireAuth(s.handleVerifyRollback))
+	mux.HandleFunc("POST /api/v1/updates/{id}/rollback", s.requireAuth(s.handleExecuteRollback))
+	mux.HandleFunc("GET /api/v1/self-update/status", s.requireAuth(s.handleSelfUpdateStatus))
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		lang := s.langOf(r)
@@ -214,6 +224,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	ch, unsub := s.d.Checker.Subscribe()
 	defer unsub()
 
+	var upCh <-chan updater.Job
+	if s.d.Updater != nil {
+		var unsubUp func()
+		upCh, unsubUp = s.d.Updater.Subscribe()
+		defer unsubUp()
+	}
+
 	keepAlive := time.NewTicker(20 * time.Second)
 	defer keepAlive.Stop()
 
@@ -227,6 +244,14 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			}
 			b, _ := json.Marshal(p)
 			_, _ = fmt.Fprintf(w, "event: progress\ndata: %s\n\n", string(b))
+			flusher.Flush()
+		case j, ok := <-upCh:
+			if !ok {
+				upCh = nil
+				continue
+			}
+			b, _ := json.Marshal(j)
+			_, _ = fmt.Fprintf(w, "event: update_job\ndata: %s\n\n", string(b))
 			flusher.Flush()
 		case <-keepAlive.C:
 			_, _ = fmt.Fprintf(w, ": ping\n\n")
@@ -425,6 +450,74 @@ func (s *Server) handleDeleteRegCred(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleListUpdates(w http.ResponseWriter, r *http.Request) {
+	if s.d.Updater == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"items": []any{}})
+		return
+	}
+	items, err := s.d.Updater.ListJobs(r.Context(), 50, s.langOf(r))
+	if err != nil {
+		writeError(w, s.langOf(r), http.StatusInternalServerError, "db_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleStartUpdates(w http.ResponseWriter, r *http.Request) {
+	if s.d.Updater == nil {
+		writeError(w, s.langOf(r), http.StatusInternalServerError, "updater_unavailable", "")
+		return
+	}
+	var body struct {
+		ServiceKeys []string `json:"serviceKeys"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	jobs, err := s.d.Updater.StartUpdates(r.Context(), body.ServiceKeys, s.langOf(r))
+	if err != nil {
+		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": jobs})
+}
+
+func (s *Server) handleGetUpdateJob(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	job, err := s.d.Updater.GetJob(r.Context(), id, s.langOf(r))
+	if err != nil {
+		writeError(w, s.langOf(r), http.StatusNotFound, "not_found", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *Server) handleVerifyRollback(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	res, err := s.d.Updater.VerifyRollback(r.Context(), id, s.langOf(r))
+	if err != nil {
+		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleExecuteRollback(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	job, err := s.d.Updater.ExecuteRollback(r.Context(), id, s.langOf(r))
+	if err != nil {
+		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *Server) handleSelfUpdateStatus(w http.ResponseWriter, r *http.Request) {
+	st := selfupdate.Check(r.Context(), s.langOf(r))
+	writeJSON(w, http.StatusOK, st)
 }
 
 func (s *Server) staticHandler() http.Handler {

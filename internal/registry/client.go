@@ -4,6 +4,7 @@ package registry
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -696,4 +697,18 @@ func (c *Client) getCredential(ctx context.Context, reg string) (*Creds, error) 
 		return nil, err
 	}
 	return &Creds{Registry: reg, Username: user, Secret: string(plain)}, nil
+}
+
+// DockerAuthHeader 生成供 Docker Engine POST /images/create 使用的 X-Registry-Auth Base64 编码字符串。
+func (c *Client) DockerAuthHeader(ctx context.Context, reg string) string {
+	creds, err := c.getCredential(ctx, reg)
+	if err != nil || creds == nil || creds.Username == "" {
+		return ""
+	}
+	b, _ := json.Marshal(map[string]string{
+		"username":      creds.Username,
+		"password":      creds.Secret,
+		"serveraddress": reg,
+	})
+	return base64.URLEncoding.EncodeToString(b)
 }

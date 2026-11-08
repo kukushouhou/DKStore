@@ -23,6 +23,7 @@ import (
 	"github.com/kukushouhou/DKStore/internal/registry"
 	"github.com/kukushouhou/DKStore/internal/secret"
 	"github.com/kukushouhou/DKStore/internal/store"
+	"github.com/kukushouhou/DKStore/internal/updater"
 	"github.com/kukushouhou/DKStore/internal/version"
 	"github.com/kukushouhou/DKStore/web"
 )
@@ -65,6 +66,7 @@ func run() error {
 	ignSvc := ignore.New(st)
 	ntfSvc := notify.New(st)
 	chkSvc := checker.New(log, st, hostReg, invSvc, regCli, ignSvc, ntfSvc)
+	upSvc := updater.New(log, st, hostReg, invSvc, regCli)
 
 	chkSvc.StartScheduler(ctx)
 	// 启动时若从未检查过且存在主机，自动后台触发一次初始检查
@@ -97,6 +99,7 @@ func run() error {
 			Ignore:  ignSvc,
 			Notify:  ntfSvc,
 			Checker: chkSvc,
+			Updater: upSvc,
 			Assets:  assets,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,

@@ -203,6 +203,72 @@ export interface RegistryCred {
   secret?: string
 }
 
+export interface PullProgress {
+  phase: 'precheck' | 'pulling' | 'recreating' | 'verifying' | 'done' | string
+  statusText: string
+  totalLayers: number
+  completedLayers: number
+  downloadedBytes: number
+  totalBytes: number
+  percent: number
+}
+
+export interface UpdateJobItem {
+  id: string
+  kind: 'upgrade' | 'rollback'
+  hostId: string
+  hostName: string
+  appKey: string
+  appName: string
+  serviceKey: string
+  serviceName: string
+  source: string
+  status: 'queued' | 'running' | 'succeeded' | 'failed'
+  phase: string
+  progress: PullProgress
+  oldImageRef: string
+  oldImageId?: string
+  oldRepoDigest?: string
+  oldVersion?: string
+  oldMatchedTags?: string[]
+  targetImageRef: string
+  targetRepoDigest?: string
+  targetVersion?: string
+  targetMatchedTags?: string[]
+  newImageId?: string
+  newRepoDigest?: string
+  rollbackEligible: boolean
+  rollbackRef?: string
+  rollbackReason?: string
+  rollbackReasonText?: string
+  errorCode?: string
+  errorMsg?: string
+  logs?: string
+  startedAt: number
+  finishedAt?: number
+}
+
+export interface RollbackVerifyResult {
+  eligible: boolean
+  rollbackRef?: string
+  oldVersion?: string
+  oldDigest?: string
+  reasonCode?: string
+  reasonText?: string
+  dataWarning?: string
+}
+
+export interface SelfUpdateStatus {
+  currentVersion: string
+  commit: string
+  latestVersion: string
+  hasUpdate: boolean
+  installMode: string
+  releaseUrl: string
+  preserveNote: string
+  commandHint: string
+}
+
 export const api = {
   health: () => request<Health>('/health'),
   authStatus: () => request<{ passwordEnabled: boolean; authenticated: boolean }>('/auth/status'),
@@ -258,4 +324,17 @@ export const api = {
     request<{ ok: boolean }>(`/registry-credentials?registry=${encodeURIComponent(registry)}`, {
       method: 'DELETE',
     }),
+
+  listUpdates: () => request<{ items: UpdateJobItem[] }>('/updates'),
+  startUpdates: (serviceKeys: string[]) =>
+    request<{ items: UpdateJobItem[] }>('/updates', {
+      method: 'POST',
+      body: JSON.stringify({ serviceKeys }),
+    }),
+  getUpdateJob: (id: string) => request<UpdateJobItem>(`/updates/${encodeURIComponent(id)}`),
+  verifyRollback: (id: string) =>
+    request<RollbackVerifyResult>(`/updates/${encodeURIComponent(id)}/rollback-check`),
+  executeRollback: (id: string) =>
+    request<UpdateJobItem>(`/updates/${encodeURIComponent(id)}/rollback`, { method: 'POST' }),
+  selfUpdateStatus: () => request<SelfUpdateStatus>('/self-update/status'),
 }

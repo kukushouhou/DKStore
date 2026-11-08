@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import type { UpdateJobItem } from '../api/client'
 
 export type ThemeMode = 'system' | 'light' | 'dark'
 export type Locale = 'zh-CN' | 'en-US'
@@ -15,13 +16,16 @@ function detectInitialLocale(): Locale {
 interface UIState {
   themeMode: ThemeMode
   locale: Locale
+  activeUpdateJobs: Record<string, UpdateJobItem>
   setThemeMode: (m: ThemeMode) => void
   setLocale: (l: Locale) => void
+  upsertUpdateJob: (job: UpdateJobItem) => void
 }
 
 export const useUIStore = create<UIState>((set) => ({
   themeMode: (localStorage.getItem('dkstore.theme') as ThemeMode) || 'system',
   locale: detectInitialLocale(),
+  activeUpdateJobs: {},
   setThemeMode: (m) => {
     localStorage.setItem('dkstore.theme', m)
     set({ themeMode: m })
@@ -30,4 +34,8 @@ export const useUIStore = create<UIState>((set) => ({
     localStorage.setItem('dkstore.locale', l)
     set({ locale: l })
   },
+  upsertUpdateJob: (job) =>
+    set((s) => ({
+      activeUpdateJobs: { ...s.activeUpdateJobs, [job.serviceKey]: job },
+    })),
 }))
