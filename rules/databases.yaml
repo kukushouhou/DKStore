@@ -1,0 +1,58 @@
+# 数据库类镜像识别与发行系列规则（实施文档 §6.2）
+databases:
+  - name: MySQL
+    images:
+      - library/mysql
+      - mysql/mysql-server
+      - bitnami/mysql
+    pattern: '(^|/)mysql(-server)?$'
+    series: minor
+    docs: https://dev.mysql.com/doc/relnotes/mysql/
+  - name: PostgreSQL
+    images:
+      - library/postgres
+      - bitnami/postgresql
+      - postgis/postgis
+      - tensorchord/pgvecto-rs
+      - immich-app/postgres
+    pattern: '(^|/)(postgres(ql)?|postgis)$'
+    series: major
+    docs: https://www.postgresql.org/docs/release/
+  - name: MariaDB
+    images:
+      - library/mariadb
+      - linuxserver/mariadb
+      - bitnami/mariadb
+    pattern: '(^|/)mariadb$'
+    series: minor
+    docs: https://mariadb.com/kb/en/release-notes/
+  - name: Redis
+    images:
+      - library/redis
+      - bitnami/redis
+      - redis/redis-stack-server
+      - redis/redis-stack
+    pattern: '(^|/)redis(-stack(-server)?)?$'
+    series: minor
+    docs: https://github.com/redis/redis/releases
+  - name: Valkey
+    images:
+      - valkey/valkey
+      - library/valkey
+    pattern: '(^|/)valkey$'
+    series: minor
+    docs: https://github.com/valkey-io/valkey/releases
+  - name: MongoDB
+    images:
+      - library/mongo
+      - mongodb/mongodb-community-server
+      - bitnami/mongodb
+    pattern: '(^|/)mongo(db)?$'
+    series: minor
+    docs: https://www.mongodb.com/docs/manual/release-notes/
+  - name: InfluxDB
+    images:
+      - library/influxdb
+    pattern: '(^|/)influxdb$'
+    series: major
+    docs: https://docs.influxdata.com/influxdb/

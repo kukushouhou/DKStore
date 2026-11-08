@@ -1,0 +1,18 @@
+# 示例：在 Docker 主机上部署 DKStore
+services:
+  dkstore:
+    image: ghcr.io/kukushouhou/dkstore:latest
+    container_name: dkstore
+    restart: unless-stopped
+    ports:
+      - "8780:8780"
+    volumes:
+      - ./data:/data
+      # 管理本机 Docker 时需要（第一阶段由代码保证只读访问）
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # 如需读取本机 Compose 源文件，按宿主原路径只读挂载，例如群晖：
+      # - /volume1/docker:/volume1/docker:ro
+    labels:
+      dkstore.self: "true"
+    environment:
+      - TZ=Asia/Shanghai

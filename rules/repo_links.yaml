@@ -1,0 +1,59 @@
+# 常见镜像的官方仓库与更新说明入口映射（实施文档 §6.4）
+links:
+  library/nginx:
+    repo: https://github.com/nginx/nginx
+    releases: https://nginx.org/en/CHANGES
+  library/redis:
+    repo: https://github.com/redis/redis
+    releases: https://github.com/redis/redis/releases
+  library/postgres:
+    repo: https://github.com/postgres/postgres
+    releases: https://www.postgresql.org/docs/release/
+  library/mysql:
+    repo: https://github.com/mysql/mysql-server
+    releases: https://dev.mysql.com/doc/relnotes/mysql/
+  library/mariadb:
+    repo: https://github.com/MariaDB/server
+    releases: https://mariadb.com/kb/en/release-notes/
+  library/caddy:
+    repo: https://github.com/caddyserver/caddy
+    releases: https://github.com/caddyserver/caddy/releases
+  library/traefik:
+    repo: https://github.com/traefik/traefik
+    releases: https://github.com/traefik/traefik/releases
+  library/alpine:
+    repo: https://alpinelinux.org
+    releases: https://alpinelinux.org/releases/
+  library/busybox:
+    repo: https://busybox.net
+    releases: https://busybox.net/news.html
+  homeassistant/home-assistant:
+    repo: https://github.com/home-assistant/core
+    releases: https://github.com/home-assistant/core/releases
+  ghcr.io/home-assistant/home-assistant:
+    repo: https://github.com/home-assistant/core
+    releases: https://github.com/home-assistant/core/releases
+  jellyfin/jellyfin:
+    repo: https://github.com/jellyfin/jellyfin
+    releases: https://github.com/jellyfin/jellyfin/releases
+  lscr.io/linuxserver/jellyfin:
+    repo: https://github.com/jellyfin/jellyfin
+    releases: https://github.com/linuxserver/docker-jellyfin/releases
+  immich-app/immich-server:
+    repo: https://github.com/immich-app/immich
+    releases: https://github.com/immich-app/immich/releases
+  ghcr.io/immich-app/immich-server:
+    repo: https://github.com/immich-app/immich
+    releases: https://github.com/immich-app/immich/releases
+  vaultwarden/server:
+    repo: https://github.com/dani-garcia/vaultwarden
+    releases: https://github.com/dani-garcia/vaultwarden/releases
+  adguard/adguardhome:
+    repo: https://github.com/AdguardTeam/AdGuardHome
+    releases: https://github.com/AdguardTeam/AdGuardHome/releases
+  portainer/portainer-ce:
+    repo: https://github.com/portainer/portainer
+    releases: https://github.com/portainer/portainer/releases
+  gitea/gitea:
+    repo: https://github.com/go-gitea/gitea
+    releases: https://github.com/go-gitea/gitea/releases

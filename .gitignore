@@ -1,0 +1,9 @@
+/data/
+/bin/
+/docs/
+*.exe
+*.db
+*.db-wal
+*.db-shm
+.idea/
+.vscode/

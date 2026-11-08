@@ -1,0 +1,22 @@
+# 滚动标签与特殊标签格式（实施文档 §5.3 / §5.6）
+rolling_tags:
+  - latest
+  - stable
+  - release
+  - prod
+  - production
+  - main
+  - master
+  - edge
+  - nightly
+
+prerelease_keywords:
+  - alpha
+  - beta
+  - rc
+  - dev
+  - preview
+  - snapshot
+  - nightly
+  - canary
+  - test
