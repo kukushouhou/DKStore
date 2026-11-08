@@ -78,7 +78,7 @@ export default function HomePage() {
     return (
       <Row gutter={[16, 16]}>
         {items.map((item) => (
-          <Col key={item.key} xs={24} md={12} lg={8}>
+          <Col key={`${item.group}-${item.key}`} xs={24} md={12} lg={8}>
             <AppCard
               app={item}
               onChanged={() => qc.invalidateQueries({ queryKey: ['overview'] })}

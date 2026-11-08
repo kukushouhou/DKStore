@@ -329,17 +329,19 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 
 	for _, key := range appOrder {
 		card := appMap[key]
-		finalizeAppCard(card)
 		resp.TotalAppCount++
-		switch card.Group {
-		case "normal":
-			resp.Normal = append(resp.Normal, *card)
-		case "caution":
-			resp.Caution = append(resp.Caution, *card)
-		case "ignored":
-			resp.Ignored = append(resp.Ignored, *card)
-		default:
+		normalCard, cautionCard, ignoredCard, isUpToDate := splitAppCards(card)
+		if isUpToDate {
 			resp.UpToDateCount++
+		}
+		if normalCard != nil {
+			resp.Normal = append(resp.Normal, *normalCard)
+		}
+		if cautionCard != nil {
+			resp.Caution = append(resp.Caution, *cautionCard)
+		}
+		if ignoredCard != nil {
+			resp.Ignored = append(resp.Ignored, *ignoredCard)
 		}
 	}
 	return resp, nil
@@ -361,63 +363,92 @@ func (s *Service) GetApp(ctx context.Context, appKey string, lang i18n.Lang) (*A
 	return nil, nil
 }
 
-func finalizeAppCard(card *AppCard) {
-	var activeUpdates []ServiceItem
-	var ignoredUpdates []ServiceItem
-	hasCaution := false
-
-	for _, svc := range card.Services {
-		if card.Links.Repo == "" && svc.Links.Repo != "" {
-			card.Links = svc.Links
-		}
+// splitAppCards 将一个 App 下的服务按 (normal / caution / ignored) 切分为对应分组的卡片，
+// 避免同一个 Compose 项目里的 Redis/MySQL 把同项目的普通 Web 服务也拖入默认收起的“需谨慎更新”而使“可更新”列表变空。
+func splitAppCards(base *AppCard) (normalCard, cautionCard, ignoredCard *AppCard, upToDate bool) {
+	var normalSvcs, cautionSvcs, ignoredSvcs []ServiceItem
+	for _, svc := range base.Services {
 		isUpd := svc.Kind == string(classify.KindDigestUpdate) || svc.Kind == string(classify.KindVersionUpdate)
 		if svc.Ignored && (isUpd || svc.IgnoreMode == ignore.ModeForever) {
-			ignoredUpdates = append(ignoredUpdates, svc)
+			ignoredSvcs = append(ignoredSvcs, svc)
 			continue
 		}
 		if isUpd {
-			activeUpdates = append(activeUpdates, svc)
-			card.UpdateSvcKeys = append(card.UpdateSvcKeys, svc.Key)
 			if svc.Category == string(classify.CategoryCaution) {
-				hasCaution = true
+				cautionSvcs = append(cautionSvcs, svc)
+			} else {
+				normalSvcs = append(normalSvcs, svc)
 			}
 		}
 	}
 
-	if len(activeUpdates) > 0 {
-		primary := activeUpdates[0]
-		card.SummaryCurrent = primary.CurrentVersion
-		card.SummaryTarget = primary.TargetVersion
-		card.Links = primary.Links
-		if hasCaution {
-			card.Group = "caution"
-			for _, u := range activeUpdates {
-				if u.Category == string(classify.CategoryCaution) {
-					card.ReasonText = u.ReasonText
-					card.DatabaseName = u.DatabaseName
-					card.IsDatabase = u.DatabaseName != ""
-					break
-				}
-			}
-		} else {
-			card.Group = "normal"
-			card.ReasonText = primary.ReasonText
+	multiGroup := b2i(len(normalSvcs) > 0) + b2i(len(cautionSvcs) > 0) + b2i(len(ignoredSvcs) > 0) > 1
+	formatCardName := func(svcs []ServiceItem) string {
+		if !multiGroup && len(base.Services) == 1 {
+			return base.Name
 		}
-		return
+		if len(svcs) == 1 && svcs[0].Name != "main" && svcs[0].Name != base.Name {
+			return base.Name + " / " + svcs[0].Name
+		}
+		return base.Name
 	}
 
-	if len(ignoredUpdates) > 0 {
-		primary := ignoredUpdates[0]
-		card.Group = "ignored"
-		card.IgnoreMode = primary.IgnoreMode
-		card.SummaryCurrent = primary.CurrentVersion
-		card.SummaryTarget = primary.TargetVersion
-		card.ReasonText = primary.ReasonText
-		card.Links = primary.Links
-		return
+	if len(normalSvcs) > 0 {
+		primary := normalSvcs[0]
+		c := *base
+		c.Name = formatCardName(normalSvcs)
+		c.Group = "normal"
+		c.SummaryCurrent = primary.CurrentVersion
+		c.SummaryTarget = primary.TargetVersion
+		c.ReasonText = primary.ReasonText
+		c.Links = primary.Links
+		c.UpdateSvcKeys = nil
+		for _, s := range normalSvcs {
+			c.UpdateSvcKeys = append(c.UpdateSvcKeys, s.Key)
+		}
+		normalCard = &c
 	}
 
-	card.Group = "up_to_date"
+	if len(cautionSvcs) > 0 {
+		primary := cautionSvcs[0]
+		c := *base
+		c.Name = formatCardName(cautionSvcs)
+		c.Group = "caution"
+		c.SummaryCurrent = primary.CurrentVersion
+		c.SummaryTarget = primary.TargetVersion
+		c.ReasonText = primary.ReasonText
+		c.DatabaseName = primary.DatabaseName
+		c.IsDatabase = primary.DatabaseName != ""
+		c.Links = primary.Links
+		c.UpdateSvcKeys = nil
+		for _, s := range cautionSvcs {
+			c.UpdateSvcKeys = append(c.UpdateSvcKeys, s.Key)
+		}
+		cautionCard = &c
+	}
+
+	if len(ignoredSvcs) > 0 {
+		primary := ignoredSvcs[0]
+		c := *base
+		c.Name = formatCardName(ignoredSvcs)
+		c.Group = "ignored"
+		c.IgnoreMode = primary.IgnoreMode
+		c.SummaryCurrent = primary.CurrentVersion
+		c.SummaryTarget = primary.TargetVersion
+		c.ReasonText = primary.ReasonText
+		c.Links = primary.Links
+		ignoredCard = &c
+	}
+
+	upToDate = len(normalSvcs) == 0 && len(cautionSvcs) == 0 && len(ignoredSvcs) == 0
+	return
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // CheckRunItem 是检测历史记录。
