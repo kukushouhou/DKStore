@@ -3,5 +3,5 @@
     "run-as": "package"
   },
   "username": "dkstore",
-  "join-groupname": "docker"
+  "join-groupname": "system"
 }

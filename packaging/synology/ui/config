@@ -1,0 +1,14 @@
+{
+  ".url": {
+    "SYNO.SDS.DKStore.Application": {
+      "title": "DKStore 容器更新中心",
+      "desc": "DKStore Docker App Update Center",
+      "icon": "images/icon_{0}.png",
+      "type": "url",
+      "protocol": "http",
+      "port": "8090",
+      "url": "/",
+      "allUsers": false
+    }
+  }
+}
