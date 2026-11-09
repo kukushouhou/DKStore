@@ -3,6 +3,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -57,6 +58,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/auth/status", s.handleAuthStatus)
 	mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
+	mux.HandleFunc("POST /api/v1/auth/setup", s.handleSetup)
 
 	// 需要认证的业务端点
 	mux.HandleFunc("POST /api/v1/auth/password", s.requireAuth(s.handleSetPassword))
@@ -76,7 +78,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/hosts/{id}", s.requireAuth(s.handleDeleteHost))
 	mux.HandleFunc("POST /api/v1/hosts/test", s.requireAuth(s.handleTestHost))
 	mux.HandleFunc("POST /api/v1/hosts/keygen", s.requireAuth(s.handleKeygen))
-	mux.HandleFunc("POST /api/v1/hosts/{id}/trust-hostkey", s.requireAuth(s.handleTrustHostKey))
 
 	mux.HandleFunc("GET /api/v1/settings", s.requireAuth(s.handleGetSettings))
 	mux.HandleFunc("PUT /api/v1/settings", s.requireAuth(s.handleSaveSettings))
@@ -108,8 +109,9 @@ func (s *Server) langOf(r *http.Request) i18n.Lang {
 
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.d.Auth.IsAuthenticated(r.Context(), r) {
-			writeError(w, s.langOf(r), http.StatusUnauthorized, "unauthorized", "")
+		// 已设密码 → 校验 DKStore 会话；未设密码 → 仅宿主管理员登录态核验通过时放行，否则 setup_required。
+		if ok, code := s.d.Auth.Authorize(r.Context(), r); !ok {
+			writeError(w, s.langOf(r), http.StatusUnauthorized, code, "")
 			return
 		}
 		next(w, r)
@@ -132,11 +134,35 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
-	pwEnabled, authed := s.d.Auth.Status(r.Context(), r)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"passwordEnabled": pwEnabled,
-		"authenticated":   authed,
-	})
+	st := s.d.Auth.Status(r.Context(), r)
+	resp := map[string]any{
+		"mode":          st.Mode,
+		"authenticated": st.Authenticated,
+		"installMode":   st.InstallMode,
+	}
+	if st.Mode == auth.ModeSetupRequired && st.HintCode != "" {
+		if hint := i18n.HostAuthHint(s.langOf(r), st.HintCode); hint != "" {
+			resp["deviceAuthHint"] = hint
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// writeAuthError 将 auth 包的错误映射为 API 错误码与 HTTP 状态。
+func (s *Server) writeAuthError(w http.ResponseWriter, r *http.Request, err error) {
+	lang := s.langOf(r)
+	switch {
+	case errors.Is(err, auth.ErrInvalidCredentials):
+		writeError(w, lang, http.StatusUnauthorized, "invalid_credentials", "")
+	case errors.Is(err, auth.ErrSetupRequired):
+		writeError(w, lang, http.StatusConflict, "setup_required", "")
+	case errors.Is(err, auth.ErrPasswordSet):
+		writeError(w, lang, http.StatusConflict, "password_already_set", "")
+	case errors.Is(err, auth.ErrPasswordTooShort):
+		writeError(w, lang, http.StatusBadRequest, "password_too_short", "")
+	default:
+		writeError(w, lang, http.StatusInternalServerError, "db_error", "")
+	}
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -145,7 +171,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if err := s.d.Auth.Login(r.Context(), w, body.Password); err != nil {
-		writeError(w, s.langOf(r), http.StatusUnauthorized, "invalid_credentials", "")
+		s.writeAuthError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -156,6 +182,20 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// handleSetup 首次设置管理员密码（仅未设置密码时可用），成功后直接登录。
+func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Password string `json:"password"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := s.d.Auth.Setup(r.Context(), w, body.Password); err != nil {
+		s.writeAuthError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleSetPassword 修改管理员密码（必须已设置密码并提供旧密码；首次设置走 /auth/setup）。
 func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		OldPassword string `json:"oldPassword"`
@@ -163,7 +203,12 @@ func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if err := s.d.Auth.SetPassword(r.Context(), w, body.OldPassword, body.NewPassword); err != nil {
-		writeError(w, s.langOf(r), http.StatusBadRequest, "invalid_credentials", "")
+		if errors.Is(err, auth.ErrInvalidCredentials) {
+			// 旧密码错误不应让前端误判为会话失效（401），用 400 返回
+			writeError(w, s.langOf(r), http.StatusBadRequest, "invalid_credentials", "")
+			return
+		}
+		s.writeAuthError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -280,7 +325,8 @@ func (s *Server) handleSetIgnore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.d.Ignore.Set(r.Context(), body.ServiceKeys, body.Mode, body.Note); err != nil {
-		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
+		lang := s.langOf(r)
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -320,9 +366,18 @@ func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	h, err := s.d.Hosts.Create(r.Context(), in)
+	lang := s.langOf(r)
+	h, err := s.d.Hosts.Create(r.Context(), in, lang)
 	if err != nil {
-		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
+		var ve *host.SaveVerifyError
+		if errors.As(err, &ve) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":      map[string]string{"code": ve.Code, "message": ve.Message},
+				"testResult": ve.TestResult,
+			})
+			return
+		}
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeErr(lang, err))
 		return
 	}
 	// 新增设备后自动触发对该设备的检查
@@ -337,11 +392,22 @@ func (s *Server) handleUpdateHost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	h, err := s.d.Hosts.Update(r.Context(), id, in)
+	lang := s.langOf(r)
+	h, err := s.d.Hosts.Update(r.Context(), id, in, lang)
 	if err != nil {
-		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
+		var ve *host.SaveVerifyError
+		if errors.As(err, &ve) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":      map[string]string{"code": ve.Code, "message": ve.Message},
+				"testResult": ve.TestResult,
+			})
+			return
+		}
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeErr(lang, err))
 		return
 	}
+	// 编辑保存并重连校验成功后，自动触发对该设备的检查
+	s.d.Checker.Trigger("manual", h.ID, false)
 	writeJSON(w, http.StatusOK, h)
 }
 
@@ -360,9 +426,10 @@ func (s *Server) handleTestHost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	res, err := s.d.Hosts.TestConnection(r.Context(), in, s.langOf(r))
+	lang := s.langOf(r)
+	res, err := s.d.Hosts.TestConnection(r.Context(), in, lang)
 	if err != nil {
-		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeErr(lang, err))
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
@@ -378,19 +445,6 @@ func (s *Server) handleKeygen(w http.ResponseWriter, r *http.Request) {
 		"privateKey":    priv,
 		"authorizedKey": pub,
 	})
-}
-
-func (s *Server) handleTrustHostKey(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	var body struct {
-		HostKey string `json:"hostKey"`
-	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
-	if err := s.d.Hosts.TrustHostKey(r.Context(), id, body.HostKey); err != nil {
-		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
@@ -437,7 +491,8 @@ func (s *Server) handleSaveRegCred(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.d.Reg.SaveCredential(r.Context(), in); err != nil {
-		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
+		lang := s.langOf(r)
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -477,39 +532,55 @@ func (s *Server) handleStartUpdates(w http.ResponseWriter, r *http.Request) {
 		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	jobs, err := s.d.Updater.StartUpdates(r.Context(), body.ServiceKeys, s.langOf(r))
+	lang := s.langOf(r)
+	jobs, err := s.d.Updater.StartUpdates(r.Context(), body.ServiceKeys, lang)
 	if err != nil {
-		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": jobs})
 }
 
 func (s *Server) handleGetUpdateJob(w http.ResponseWriter, r *http.Request) {
+	if s.d.Updater == nil {
+		writeError(w, s.langOf(r), http.StatusInternalServerError, "updater_unavailable", "")
+		return
+	}
 	id := r.PathValue("id")
-	job, err := s.d.Updater.GetJob(r.Context(), id, s.langOf(r))
+	lang := s.langOf(r)
+	job, err := s.d.Updater.GetJob(r.Context(), id, lang)
 	if err != nil {
-		writeError(w, s.langOf(r), http.StatusNotFound, "not_found", err.Error())
+		writeError(w, lang, http.StatusNotFound, "not_found", i18n.LocalizeError(lang, err))
 		return
 	}
 	writeJSON(w, http.StatusOK, job)
 }
 
 func (s *Server) handleVerifyRollback(w http.ResponseWriter, r *http.Request) {
+	if s.d.Updater == nil {
+		writeError(w, s.langOf(r), http.StatusInternalServerError, "updater_unavailable", "")
+		return
+	}
 	id := r.PathValue("id")
-	res, err := s.d.Updater.VerifyRollback(r.Context(), id, s.langOf(r))
+	lang := s.langOf(r)
+	res, err := s.d.Updater.VerifyRollback(r.Context(), id, lang)
 	if err != nil {
-		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleExecuteRollback(w http.ResponseWriter, r *http.Request) {
+	if s.d.Updater == nil {
+		writeError(w, s.langOf(r), http.StatusInternalServerError, "updater_unavailable", "")
+		return
+	}
 	id := r.PathValue("id")
-	job, err := s.d.Updater.ExecuteRollback(r.Context(), id, s.langOf(r))
+	lang := s.langOf(r)
+	job, err := s.d.Updater.ExecuteRollback(r.Context(), id, lang)
 	if err != nil {
-		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
 		return
 	}
 	writeJSON(w, http.StatusOK, job)

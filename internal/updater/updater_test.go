@@ -141,3 +141,105 @@ func TestVerifyRollback_RemoteTagMatchesVsOverwritten(t *testing.T) {
 		t.Fatalf("expected reasonCode=tag_overwritten, got %s", res2.ReasonCode)
 	}
 }
+
+func TestVerifyRollback_EmptyRepoDigestRequiresConfigDigestMatch(t *testing.T) {
+	configDigest := "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+		w.Header().Set("Docker-Content-Digest", "sha256:2222222222222222222222222222222222222222222222222222222222222222")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"schemaVersion":2,"config":{"digest":"` + configDigest + `"}}`))
+	}))
+	defer srv.Close()
+
+	up, _ := newTestUpdater(t, map[string]string{
+		"ghcr.io": srv.URL,
+	})
+	ctx := context.Background()
+
+	// 1. OldRepoDigest is empty and OldImageID matches remote ConfigDigest -> Eligible = true
+	jobMatch := Job{
+		ID:               "up_test_empty_digest_match",
+		Kind:             "upgrade",
+		HostID:           "local",
+		HostName:         "Local",
+		AppKey:           "local:dsm_project:myapp",
+		AppName:          "myapp",
+		ServiceKey:       "local:dsm_project:myapp:web",
+		ServiceName:      "web",
+		Source:           "dsm_project",
+		Status:           "succeeded",
+		Phase:            "done",
+		OldImageRef:      "ghcr.io/myorg/myapp:1.4.2",
+		OldImageID:       configDigest,
+		OldRepoDigest:    "",
+		OldVersion:       "1.4.2",
+		TargetImageRef:   "ghcr.io/myorg/myapp:1.4.2",
+		RollbackEligible: true,
+		RollbackRef:      "ghcr.io/myorg/myapp:1.4.2",
+		StartedAt:        1700000200,
+	}
+	if err := up.insertJob(ctx, jobMatch); err != nil {
+		t.Fatalf("insertJob: %v", err)
+	}
+	resMatch, err := up.VerifyRollback(ctx, jobMatch.ID, i18n.ZhCN)
+	if err != nil {
+		t.Fatalf("VerifyRollback match: %v", err)
+	}
+	if !resMatch.Eligible {
+		t.Fatalf("expected Eligible=true when OldImageID matches remote ConfigDigest, got %+v", resMatch)
+	}
+
+	// 2. OldRepoDigest is empty and OldImageID does NOT match remote ConfigDigest -> Eligible = false
+	jobMismatch := jobMatch
+	jobMismatch.ID = "up_test_empty_digest_mismatch"
+	jobMismatch.OldImageID = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+	if err := up.insertJob(ctx, jobMismatch); err != nil {
+		t.Fatalf("insertJob mismatch: %v", err)
+	}
+	resMismatch, err := up.VerifyRollback(ctx, jobMismatch.ID, i18n.ZhCN)
+	if err != nil {
+		t.Fatalf("VerifyRollback mismatch: %v", err)
+	}
+	if resMismatch.Eligible {
+		t.Fatalf("expected Eligible=false when OldRepoDigest is empty and OldImageID mismatches ConfigDigest")
+	}
+	if resMismatch.ReasonCode != "tag_overwritten" {
+		t.Fatalf("expected reasonCode=tag_overwritten, got %s", resMismatch.ReasonCode)
+	}
+}
+
+func TestNew_RecoversInterruptedJobs(t *testing.T) {
+	up, st := newTestUpdater(t, nil)
+	ctx := context.Background()
+
+	job := Job{
+		ID:             "up_test_interrupted",
+		Kind:           "upgrade",
+		HostID:         "local",
+		HostName:       "Local",
+		AppKey:         "local:standalone:app1",
+		AppName:        "app1",
+		ServiceKey:     "local:standalone:app1:main",
+		ServiceName:    "main",
+		Source:         "standalone",
+		Status:         "running",
+		Phase:          "pulling",
+		OldImageRef:    "nginx:1.26",
+		TargetImageRef: "nginx:1.27",
+		StartedAt:      1700000300,
+	}
+	if err := up.insertJob(ctx, job); err != nil {
+		t.Fatalf("insertJob: %v", err)
+	}
+
+	// Re-initialize updater service to simulate restart recovery
+	up2 := New(slog.Default(), st, up.hosts, up.inv, up.reg)
+	got, err := up2.GetJob(ctx, job.ID, i18n.EnUS)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.Status != "failed" || got.ErrorCode != "interrupted" {
+		t.Fatalf("expected status=failed and errorCode=interrupted, got status=%s code=%s", got.Status, got.ErrorCode)
+	}
+}

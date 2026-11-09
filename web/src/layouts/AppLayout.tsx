@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Button, Card, Flex, Grid, Input, Layout, Menu, Segmented, Space, Typography, message, theme } from 'antd'
+import { useEffect, useState } from 'react'
+import { Button, Card, Flex, Grid, Input, Layout, Menu, Segmented, Space, Spin, Typography, message, theme } from 'antd'
 import {
   AppstoreOutlined,
   CloudServerOutlined,
@@ -10,8 +10,10 @@ import {
 } from '@ant-design/icons'
 import { Outlet, useLocation, useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { api } from '../api/client'
+import { ApiError, api } from '../api/client'
+import { useEvents } from '../hooks/useEvents'
 import { useI18n } from '../i18n'
+import SetupPage from '../pages/Setup'
 import type { Locale } from '../store/ui'
 
 export default function AppLayout() {
@@ -25,6 +27,22 @@ export default function AppLayout() {
   const auth = useQuery({ queryKey: ['authStatus'], queryFn: api.authStatus })
   const [pw, setPw] = useState('')
   const [loggingIn, setLoggingIn] = useState(false)
+
+  const canSubscribeEvents =
+    Boolean(auth.data) &&
+    auth.data?.mode !== 'setup_required' &&
+    (auth.data?.mode !== 'password' || auth.data.authenticated)
+  useEvents(canSubscribeEvents)
+
+  // 任一业务请求返回 401（会话过期 / 需要初始化 / 设备登录态失效）时重新获取访问状态，切换到对应页面
+  useEffect(() => {
+    return qc.getQueryCache().subscribe((ev) => {
+      const err = ev.query.state.error
+      if (ev.type === 'updated' && err instanceof ApiError && err.status === 401 && ev.query.queryKey[0] !== 'authStatus') {
+        qc.invalidateQueries({ queryKey: ['authStatus'] })
+      }
+    })
+  }, [qc])
 
   const items = [
     { key: '/', icon: <AppstoreOutlined />, label: t.nav.updates },
@@ -59,7 +77,19 @@ export default function AppLayout() {
     }
   }
 
-  if (auth.data && auth.data.passwordEnabled && !auth.data.authenticated) {
+  if (auth.isPending) {
+    return (
+      <Flex align="center" justify="center" style={{ minHeight: '100vh' }}>
+        <Spin />
+      </Flex>
+    )
+  }
+
+  if (auth.data?.mode === 'setup_required') {
+    return <SetupPage deviceAuthHint={auth.data.deviceAuthHint} />
+  }
+
+  if (auth.data?.mode === 'password' && !auth.data.authenticated) {
     return (
       <Flex align="center" justify="center" style={{ minHeight: '100vh', padding: 16 }}>
         <Card style={{ width: 380 }}>
@@ -125,7 +155,7 @@ export default function AppLayout() {
               { label: 'EN', value: 'en-US' },
             ]}
           />
-          {auth.data?.passwordEnabled && (
+          {auth.data?.mode === 'password' && (
             <Button
               size="small"
               onClick={async () => {

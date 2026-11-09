@@ -64,6 +64,7 @@ export default function AppCard({ app, onChanged }: Props) {
   const { t } = useI18n()
   const screens = Grid.useBreakpoint()
   const activeUpdateJobs = useUIStore((s) => s.activeUpdateJobs)
+  const lastFinishedJobs = useUIStore((s) => s.lastFinishedJobs)
   const upsertUpdateJob = useUIStore((s) => s.upsertUpdateJob)
   const [ignoreOpen, setIgnoreOpen] = useState(false)
   const [ignoreMode, setIgnoreMode] = useState<'this_version' | 'forever'>('this_version')
@@ -77,6 +78,27 @@ export default function AppCard({ app, onChanged }: Props) {
   const activeJobsForApp: UpdateJobItem[] = app.services
     .map((s) => activeUpdateJobs[s.key])
     .filter((j): j is UpdateJobItem => Boolean(j))
+
+  const failedJobsForApp: UpdateJobItem[] = app.services
+    .map((s) => lastFinishedJobs[s.key])
+    .filter((j): j is UpdateJobItem => Boolean(j && j.status === 'failed'))
+
+  const formatPhaseText = (job: UpdateJobItem): string => {
+    switch (job.phase || job.progress?.phase) {
+      case 'precheck':
+        return t.home.phasePrecheck
+      case 'pulling':
+        return t.home.phasePulling
+      case 'recreating':
+        return t.home.phaseRecreating
+      case 'verifying':
+        return t.home.phaseVerifying
+      case 'done':
+        return t.home.phaseDone
+      default:
+        return job.progress?.statusText || job.phase
+    }
+  }
 
   const triggerServiceUpdate = async (svc: ServiceItem) => {
     setUpdatingSvcKey(svc.key)
@@ -266,7 +288,7 @@ export default function AppCard({ app, onChanged }: Props) {
             <div key={job.id} style={{ width: '100%' }}>
               <Flex justify="space-between" align="center">
                 <Typography.Text style={{ fontSize: 12 }} type="secondary">
-                  {job.progress?.statusText || job.phase}
+                  {formatPhaseText(job)}
                 </Typography.Text>
                 {(job.progress?.totalLayers ?? 0) > 0 && (
                   <Typography.Text style={{ fontSize: 11 }} type="secondary">
@@ -281,6 +303,21 @@ export default function AppCard({ app, onChanged }: Props) {
               </Flex>
               <Progress percent={job.progress?.percent ?? 0} size="small" status="active" />
             </div>
+          ))}
+
+          {failedJobsForApp.map((job) => (
+            <Alert
+              key={job.id}
+              type="error"
+              showIcon
+              title={
+                <span style={{ fontSize: 12 }}>
+                  {t.home.updateFailed}
+                  {job.errorMsg || job.errorCode}
+                </span>
+              }
+              style={{ padding: '6px 10px' }}
+            />
           ))}
 
           <Flex
@@ -482,7 +519,7 @@ export default function AppCard({ app, onChanged }: Props) {
                   {activeUpdateJobs[svc.key] && (
                     <div>
                       <Typography.Text style={{ fontSize: 12 }} type="secondary">
-                        {activeUpdateJobs[svc.key].progress?.statusText || activeUpdateJobs[svc.key].phase}
+                        {formatPhaseText(activeUpdateJobs[svc.key])}
                       </Typography.Text>
                       <Progress
                         percent={activeUpdateJobs[svc.key].progress?.percent ?? 0}
@@ -490,6 +527,14 @@ export default function AppCard({ app, onChanged }: Props) {
                         status="active"
                       />
                     </div>
+                  )}
+
+                  {lastFinishedJobs[svc.key]?.status === 'failed' && (
+                    <Alert
+                      type="error"
+                      showIcon
+                      title={`${t.home.updateFailed}${lastFinishedJobs[svc.key].errorMsg || lastFinishedJobs[svc.key].errorCode || ''}`}
+                    />
                   )}
 
                   {svc.reasonText && (

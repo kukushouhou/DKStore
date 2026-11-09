@@ -32,11 +32,11 @@ export default function HistoryPage() {
   const [rollingBack, setRollingBack] = useState(false)
 
   const updatesQuery = useQuery({
-    queryKey: ['updateJobs', locale],
+    queryKey: ['updates', locale],
     queryFn: api.listUpdates,
     refetchInterval: 4000,
   })
-  const runsQuery = useQuery({ queryKey: ['checkRuns', locale], queryFn: api.checkRuns })
+  const runsQuery = useQuery({ queryKey: ['check-runs', locale], queryFn: api.checkRuns })
 
   const updateItems = updatesQuery.data?.items ?? []
   const scanItems = runsQuery.data?.items ?? []
@@ -63,7 +63,7 @@ export default function HistoryPage() {
     setVerifyingId(job.id)
     try {
       const res = await api.verifyRollback(job.id)
-      qc.invalidateQueries({ queryKey: ['updateJobs'] })
+      qc.invalidateQueries({ queryKey: ['updates'] })
       if (!res.eligible) {
         Modal.warning({
           title: t.history.rollbackUnavailable,
@@ -88,7 +88,7 @@ export default function HistoryPage() {
       await api.executeRollback(rollbackModalJob.id)
       message.success(t.history.rollbackStarted)
       setRollbackModalJob(null)
-      qc.invalidateQueries({ queryKey: ['updateJobs'] })
+      qc.invalidateQueries({ queryKey: ['updates'] })
     } catch (e) {
       message.error((e as Error).message)
     } finally {

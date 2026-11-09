@@ -37,14 +37,24 @@ func (s *Service) saveFinding(
 		&prevKind, &prevTargetDigest, &prevTargetVer, &firstSeen, &notifiedAt,
 	)
 
+	isUpdate := out.Kind == classify.KindDigestUpdate || out.Kind == classify.KindVersionUpdate
 	targetChanged := err != nil || prevKind != string(out.Kind) ||
 		prevTargetDigest != out.TargetDigest || prevTargetVer != out.TargetVersion
 
-	if targetChanged || firstSeen == 0 {
+	// 审计 M13：短暂网络抖动（check_failed）不应抹掉已有更新的 notified_at 或写入假 resolved；
+	// 从 check_failed 恢复时，若之前已通知过则保留 notified_at 避免重复推送。
+	if out.Kind == classify.KindCheckFailed && err == nil {
+		if firstSeen == 0 {
+			firstSeen = now
+		}
+	} else if prevKind == string(classify.KindCheckFailed) && isUpdate && notifiedAt.Valid {
+		if firstSeen == 0 {
+			firstSeen = now
+		}
+	} else if targetChanged || firstSeen == 0 {
 		firstSeen = now
 		notifiedAt = sql.NullInt64{}
 	}
-	isUpdate := out.Kind == classify.KindDigestUpdate || out.Kind == classify.KindVersionUpdate
 	if isUpdate && !notifiedAt.Valid {
 		isNewUpdate = true
 	}
@@ -85,12 +95,14 @@ func (s *Service) saveFinding(
 		firstSeen, now, notifiedAt,
 	)
 
-	// 若状态发生变化，记录到 finding_history
-	if runID > 0 && targetChanged && (isUpdate || prevKind == string(classify.KindDigestUpdate) || prevKind == string(classify.KindVersionUpdate)) {
+	// 若状态发生变化，记录到 finding_history（排除 check_failed 造成的假 resolved 与已通知过的恢复）
+	if runID > 0 && targetChanged && out.Kind != classify.KindCheckFailed &&
+		!(prevKind == string(classify.KindCheckFailed) && notifiedAt.Valid) &&
+		(isUpdate || prevKind == string(classify.KindDigestUpdate) || prevKind == string(classify.KindVersionUpdate)) {
 		change := "appeared"
 		if !isUpdate {
 			change = "resolved"
-		} else if prevKind != "" && prevKind != string(classify.KindNone) {
+		} else if prevKind != "" && prevKind != string(classify.KindNone) && prevKind != string(classify.KindCheckFailed) {
 			change = "changed"
 		}
 		snap, _ := json.Marshal(map[string]any{
@@ -347,20 +359,144 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 	return resp, nil
 }
 
-// GetApp 按请求语言返回单个 App 的完整详情。
+// GetApp 按请求语言返回单个 App 的完整详情（含所有服务，即使应用已是最新或被拆分为多张卡片，审计 L7）。
 func (s *Service) GetApp(ctx context.Context, appKey string, lang i18n.Lang) (*AppCard, error) {
-	ov, err := s.Overview(ctx, "", lang)
+	hosts, err := s.hosts.List(ctx)
 	if err != nil {
 		return nil, err
 	}
-	for _, list := range [][]AppCard{ov.Normal, ov.Caution, ov.Ignored} {
-		for i := range list {
-			if list[i].Key == appKey {
-				return &list[i], nil
+	hostMap := make(map[string]host.Host, len(hosts))
+	for _, h := range hosts {
+		hostMap[h.ID] = h
+	}
+	ignoreRules, _ := s.ign.ListAll(ctx)
+
+	rows, err := s.st.DB.QueryContext(ctx, `
+		SELECT a.key, a.host_id, a.name, a.source,
+		       s.key, s.name, COALESCE(s.state,''), COALESCE(s.image_ref,''), COALESCE(s.repo_digest,''), COALESCE(s.current_tags_json,''),
+		       COALESCE(f.kind,'none'), COALESCE(f.category,''), COALESCE(f.reason,''),
+		       COALESCE(f.current_version,''), COALESCE(f.target_version,''), COALESCE(f.target_ref,''),
+		       COALESCE(f.target_digest,''), COALESCE(f.target_tags_json,''), COALESCE(f.hint,''),
+		       COALESCE(f.error_kind,''), COALESCE(f.error_msg,''), COALESCE(f.links_json,''), COALESCE(f.checked_at,0)
+		FROM app a
+		JOIN service s ON s.app_key = a.key
+		LEFT JOIN finding f ON f.service_key = s.key
+		WHERE a.key = ? AND a.gone_at IS NULL AND s.gone_at IS NULL
+		ORDER BY s.name ASC`, appKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var card *AppCard
+	for rows.Next() {
+		var (
+			aKey, hostID, appName, appSource                       string
+			svcKey, svcName, state, imageRef, repoDigest, curTagsJ string
+			fKind, fCat, fReason, curVer, tgtVer, tgtRef           string
+			tgtDigest, tgtTagsJ, fHint, errKind, errMsg, linksJ    string
+			checkedAt                                              int64
+		)
+		if err := rows.Scan(
+			&aKey, &hostID, &appName, &appSource,
+			&svcKey, &svcName, &state, &imageRef, &repoDigest, &curTagsJ,
+			&fKind, &fCat, &fReason, &curVer, &tgtVer, &tgtRef,
+			&tgtDigest, &tgtTagsJ, &fHint, &errKind, &errMsg, &linksJ, &checkedAt,
+		); err != nil {
+			continue
+		}
+		h := hostMap[hostID]
+		if card == nil {
+			card = &AppCard{
+				Key:        aKey,
+				HostID:     hostID,
+				HostName:   h.Name,
+				HostStatus: h.Status,
+				Name:       appName,
+				Source:     appSource,
+				Group:      "up_to_date",
 			}
 		}
+		reasonCode, dbName, _ := strings.Cut(fReason, "|")
+		displayTarget := i18n.FormatTargetVersion(lang, tgtVer)
+		reasonText := i18n.FormatReason(lang, reasonCode, dbName, curVer, displayTarget)
+		hintText := i18n.FormatHint(lang, fHint)
+		localErrMsg := i18n.FormatRegistryError(lang, errKind, errMsg)
+
+		var curTags, tgtTags []string
+		_ = json.Unmarshal([]byte(curTagsJ), &curTags)
+		_ = json.Unmarshal([]byte(tgtTagsJ), &tgtTags)
+		var links rules.RepoLink
+		_ = json.Unmarshal([]byte(linksJ), &links)
+
+		rule, hasRule := ignoreRules[svcKey]
+		isIgnored := hasRule && (rule.Mode == ignore.ModeForever || ignore.Matches(rule, fKind, tgtDigest, tgtVer))
+
+		item := ServiceItem{
+			Key:            svcKey,
+			Name:           svcName,
+			State:          state,
+			ImageRef:       imageRef,
+			RepoDigest:     repoDigest,
+			CurrentTags:    curTags,
+			Kind:           fKind,
+			Category:       fCat,
+			Reason:         reasonCode,
+			DatabaseName:   dbName,
+			ReasonText:     reasonText,
+			CurrentVersion: curVer,
+			TargetVersion:  displayTarget,
+			RawTargetVer:   tgtVer,
+			TargetRef:      tgtRef,
+			TargetDigest:   tgtDigest,
+			TargetTags:     tgtTags,
+			Hint:           hintText,
+			ErrorKind:      errKind,
+			ErrorMsg:       localErrMsg,
+			Links:          links,
+			Ignored:        isIgnored,
+			CheckedAt:      checkedAt,
+		}
+		if isIgnored {
+			item.IgnoreMode = rule.Mode
+		}
+		card.Services = append(card.Services, item)
 	}
-	return nil, nil
+	if card == nil {
+		return nil, nil
+	}
+
+	normalCard, cautionCard, ignoredCard, _ := splitAppCards(card)
+	switch {
+	case cautionCard != nil:
+		card.Group = "caution"
+		card.SummaryCurrent = cautionCard.SummaryCurrent
+		card.SummaryTarget = cautionCard.SummaryTarget
+		card.ReasonText = cautionCard.ReasonText
+		card.IsDatabase = cautionCard.IsDatabase
+		card.DatabaseName = cautionCard.DatabaseName
+		card.Links = cautionCard.Links
+	case normalCard != nil:
+		card.Group = "normal"
+		card.SummaryCurrent = normalCard.SummaryCurrent
+		card.SummaryTarget = normalCard.SummaryTarget
+		card.ReasonText = normalCard.ReasonText
+		card.Links = normalCard.Links
+	case ignoredCard != nil:
+		card.Group = "ignored"
+		card.IgnoreMode = ignoredCard.IgnoreMode
+		card.SummaryCurrent = ignoredCard.SummaryCurrent
+		card.SummaryTarget = ignoredCard.SummaryTarget
+		card.ReasonText = ignoredCard.ReasonText
+		card.Links = ignoredCard.Links
+	}
+	if normalCard != nil {
+		card.UpdateSvcKeys = append(card.UpdateSvcKeys, normalCard.UpdateSvcKeys...)
+	}
+	if cautionCard != nil {
+		card.UpdateSvcKeys = append(card.UpdateSvcKeys, cautionCard.UpdateSvcKeys...)
+	}
+	return card, nil
 }
 
 // splitAppCards 将一个 App 下的服务按 (normal / caution / ignored) 切分为对应分组的卡片，

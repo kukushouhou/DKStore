@@ -37,6 +37,8 @@ export default function SettingsPage() {
   const [credForm] = Form.useForm<RegistryCred>()
   const [oldPw, setOldPw] = useState('')
   const [newPw, setNewPw] = useState('')
+  const [confirmPw, setConfirmPw] = useState('')
+  const authQuery = useQuery({ queryKey: ['authStatus'], queryFn: api.authStatus })
   const [saving, setSaving] = useState(false)
   const [testingNotify, setTestingNotify] = useState(false)
 
@@ -90,10 +92,29 @@ export default function SettingsPage() {
   }
 
   const onUpdatePw = async () => {
+    const deviceMode = authQuery.data?.mode === 'device'
+    if ((!deviceMode && !oldPw) || !newPw) {
+      message.error(t.settings.pwRequired)
+      return
+    }
+    if ([...newPw].length < 6) {
+      message.error(t.settings.pwTooShort)
+      return
+    }
+    if (newPw !== confirmPw) {
+      message.error(t.settings.pwMismatch)
+      return
+    }
     try {
-      await api.setPassword(oldPw, newPw)
+      if (deviceMode) {
+        // 设备登录模式下尚未设置 DKStore 密码：走首次设置接口
+        await api.setupPassword(newPw)
+      } else {
+        await api.setPassword(oldPw, newPw)
+      }
       setOldPw('')
       setNewPw('')
+      setConfirmPw('')
       qc.invalidateQueries({ queryKey: ['authStatus'] })
       message.success(t.settings.pwUpdated)
     } catch (e) {
@@ -311,23 +332,42 @@ export default function SettingsPage() {
       </Card>
 
       <Card title={t.settings.securityTitle}>
-        <Row gutter={12} style={{ maxWidth: 640 }}>
-          <Col xs={24} md={10}>
-            <Input.Password
-              placeholder={t.settings.oldPw}
-              value={oldPw}
-              onChange={(e) => setOldPw(e.target.value)}
-            />
-          </Col>
-          <Col xs={24} md={10}>
+        {authQuery.data?.mode === 'device' && (
+          <Alert type="info" showIcon title={t.settings.deviceModeDesc} style={{ marginBottom: 12 }} />
+        )}
+        <Row gutter={[12, 12]} style={{ maxWidth: 860 }}>
+          {authQuery.data?.mode !== 'device' && (
+            <Col xs={24} md={7}>
+              <Input.Password
+                placeholder={t.settings.oldPw}
+                value={oldPw}
+                onChange={(e) => setOldPw(e.target.value)}
+                autoComplete="current-password"
+              />
+            </Col>
+          )}
+          <Col xs={24} md={7}>
             <Input.Password
               placeholder={t.settings.newPw}
               value={newPw}
               onChange={(e) => setNewPw(e.target.value)}
+              autoComplete="new-password"
             />
           </Col>
-          <Col xs={24} md={4}>
-            <Button onClick={onUpdatePw}>{t.settings.updatePw}</Button>
+          <Col xs={24} md={7}>
+            <Input.Password
+              placeholder={t.settings.confirmPw}
+              value={confirmPw}
+              status={confirmPw && confirmPw !== newPw ? 'error' : undefined}
+              onChange={(e) => setConfirmPw(e.target.value)}
+              onPressEnter={onUpdatePw}
+              autoComplete="new-password"
+            />
+          </Col>
+          <Col xs={24} md={3}>
+            <Button onClick={onUpdatePw}>
+              {authQuery.data?.mode === 'device' ? t.settings.setPwBtn : t.settings.updatePw}
+            </Button>
           </Col>
         </Row>
       </Card>

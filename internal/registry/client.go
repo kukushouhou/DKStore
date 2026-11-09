@@ -11,10 +11,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/secret"
 	"github.com/kukushouhou/DKStore/internal/store"
 	"github.com/kukushouhou/DKStore/internal/version"
@@ -37,7 +40,8 @@ type RegistryError struct {
 	Message string
 }
 
-func (e *RegistryError) Error() string { return e.Message }
+// Error 返回默认语言（zh-CN）文案；Message 可能是 i18n.EngineDetail 编码，展示时应使用 i18n.LocalizeDetail 按请求语言还原。
+func (e *RegistryError) Error() string { return i18n.LocalizeDetail(i18n.ZhCN, e.Message) }
 
 // ManifestResult 是对远端 tag 的 Manifest/Index 检查结果。
 type ManifestResult struct {
@@ -130,7 +134,7 @@ func (c *Client) CheckManifest(ctx context.Context, ref version.ParsedRef, hostP
 		return nil, err
 	}
 	res := &ManifestResult{
-		RepoDigest: strings.TrimSpace(resp.Header.Get("Docker-Content-Digest")),
+		RepoDigest: NormalizeDigest(resp.Header.Get("Docker-Content-Digest")),
 	}
 	ct := strings.ToLower(resp.Header.Get("Content-Type"))
 
@@ -145,24 +149,25 @@ func (c *Client) CheckManifest(ctx context.Context, ref version.ParsedRef, hostP
 				} `json:"platform"`
 			} `json:"manifests"`
 		}
-		if json.Unmarshal(body, &idx) == nil {
-			for _, m := range idx.Manifests {
-				plat := formatPlatform(m.Platform.OS, m.Platform.Arch, m.Platform.Variant)
-				if plat == hostPlatform {
-					res.PlatformDigest = m.Digest
-					break
-				}
+		// 平台未知时跳过平台级比对（不默认 amd64，审计 M2/H5）
+		if hostPlatform != "" && json.Unmarshal(body, &idx) == nil {
+			plats := make([]string, len(idx.Manifests))
+			for i, m := range idx.Manifests {
+				plats[i] = formatPlatform(m.Platform.OS, m.Platform.Arch, m.Platform.Variant)
+			}
+			if i := selectPlatformIndex(hostPlatform, plats); i >= 0 {
+				res.PlatformDigest = NormalizeDigest(idx.Manifests[i].Digest)
+			}
+		}
+		// 多架构 Index：再取对应平台的 Manifest 以获得 ConfigDigest（可与本地 ImageID 比对）
+		if res.PlatformDigest != "" {
+			pURL := fmt.Sprintf("%s/v2/%s/manifests/%s", baseURL, ref.Repository, res.PlatformDigest)
+			if _, pBody, pErr := c.doRegistryRequest(ctx, ref.Registry, ref.Repository, http.MethodGet, pURL, acceptManifestHeaders); pErr == nil {
+				res.ConfigDigest = parseConfigDigest(pBody)
 			}
 		}
 	} else {
-		var mf struct {
-			Config struct {
-				Digest string `json:"digest"`
-			} `json:"config"`
-		}
-		if json.Unmarshal(body, &mf) == nil {
-			res.ConfigDigest = mf.Config.Digest
-		}
+		res.ConfigDigest = parseConfigDigest(body)
 	}
 
 	if res.RepoDigest != "" {
@@ -246,7 +251,7 @@ func (c *Client) LookupTagsByDigest(
 			add(e.Name)
 			continue
 		}
-		if pd, ok := e.PlatformDigests[hostPlatform]; ok && pd != "" {
+		if pd := lookupPlatformDigest(e.PlatformDigests, hostPlatform); pd != "" {
 			if pd == targetDigest || pd == targetPlatformDigest {
 				add(e.Name)
 			}
@@ -263,7 +268,7 @@ func (c *Client) LookupTagsByDigest(
 			if err != nil {
 				continue
 			}
-			dig := strings.TrimSpace(resp.Header.Get("Docker-Content-Digest"))
+			dig := NormalizeDigest(resp.Header.Get("Docker-Content-Digest"))
 			if dig != "" && (dig == targetDigest || dig == targetPlatformDigest) {
 				add(tagName)
 			}
@@ -303,11 +308,11 @@ func (c *Client) fetchDockerHubTagManifest(ctx context.Context, repository, tag,
 	u := fmt.Sprintf("%s/v2/repositories/%s/tags/%s", c.hubAPIBase(), repository, url.PathEscape(tag))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, &RegistryError{Kind: ErrNetwork, Message: err.Error()}
+		return nil, &RegistryError{Kind: ErrNetwork, Message: i18n.EngineDetail(i18n.MsgRegistryNetwork, "Docker Hub", err.Error())}
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, &RegistryError{Kind: ErrNetwork, Message: err.Error()}
+		return nil, &RegistryError{Kind: ErrNetwork, Message: i18n.EngineDetail(i18n.MsgRegistryNetwork, "Docker Hub", err.Error())}
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	_ = resp.Body.Close()
@@ -324,16 +329,19 @@ func (c *Client) fetchDockerHubTagManifest(ctx context.Context, repository, tag,
 		} `json:"images"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, err
+		return nil, &RegistryError{Kind: ErrRegistry, Message: i18n.EngineDetail(i18n.MsgRegistryParse, "Docker Hub")}
 	}
-	res := &ManifestResult{RepoDigest: strings.TrimSpace(payload.Digest)}
-	for _, im := range payload.Images {
-		if formatPlatform(im.OS, im.Arch, im.Variant) == hostPlatform && im.Digest != "" {
-			res.PlatformDigest = im.Digest
+	res := &ManifestResult{RepoDigest: NormalizeDigest(payload.Digest)}
+	if hostPlatform != "" {
+		plats := make([]string, len(payload.Images))
+		for i, im := range payload.Images {
+			plats[i] = formatPlatform(im.OS, im.Arch, im.Variant)
+		}
+		if i := selectPlatformIndex(hostPlatform, plats); i >= 0 && payload.Images[i].Digest != "" {
+			res.PlatformDigest = NormalizeDigest(payload.Images[i].Digest)
 			if res.RepoDigest == "" {
-				res.RepoDigest = im.Digest
+				res.RepoDigest = res.PlatformDigest
 			}
-			break
 		}
 	}
 	return res, nil
@@ -347,11 +355,11 @@ func (c *Client) fetchDockerHubTags(ctx context.Context, repository string, maxP
 	for page := 0; page < maxPages && nextURL != ""; page++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, nextURL, nil)
 		if err != nil {
-			return nil, &RegistryError{Kind: ErrNetwork, Message: err.Error()}
+			return nil, &RegistryError{Kind: ErrNetwork, Message: i18n.EngineDetail(i18n.MsgRegistryNetwork, "Docker Hub", err.Error())}
 		}
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			return nil, &RegistryError{Kind: ErrNetwork, Message: fmt.Sprintf("连接 Docker Hub 失败: %v", err)}
+			return nil, &RegistryError{Kind: ErrNetwork, Message: i18n.EngineDetail(i18n.MsgRegistryNetwork, "Docker Hub", err.Error())}
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 		_ = resp.Body.Close()
@@ -372,18 +380,18 @@ func (c *Client) fetchDockerHubTags(ctx context.Context, repository string, maxP
 			} `json:"results"`
 		}
 		if err := json.Unmarshal(body, &payload); err != nil {
-			return nil, &RegistryError{Kind: ErrRegistry, Message: "解析 Docker Hub 标签响应失败"}
+			return nil, &RegistryError{Kind: ErrRegistry, Message: i18n.EngineDetail(i18n.MsgRegistryParse, "Docker Hub")}
 		}
 		for _, r := range payload.Results {
 			pMap := make(map[string]string, len(r.Images))
 			for _, im := range r.Images {
 				if im.Digest != "" {
-					pMap[formatPlatform(im.OS, im.Arch, im.Variant)] = im.Digest
+					pMap[formatPlatform(im.OS, im.Arch, im.Variant)] = NormalizeDigest(im.Digest)
 				}
 			}
 			out = append(out, TagDigestEntry{
 				Name:            r.Name,
-				RepoDigest:      r.Digest,
+				RepoDigest:      NormalizeDigest(r.Digest),
 				PlatformDigests: pMap,
 			})
 		}
@@ -403,7 +411,7 @@ func (c *Client) fetchOCITagsList(ctx context.Context, reg, repo string) ([]TagD
 		Tags []string `json:"tags"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, &RegistryError{Kind: ErrRegistry, Message: "解析仓库标签列表失败"}
+		return nil, &RegistryError{Kind: ErrRegistry, Message: i18n.EngineDetail(i18n.MsgRegistryParse, reg)}
 	}
 	out := make([]TagDigestEntry, 0, len(payload.Tags))
 	for _, t := range payload.Tags {
@@ -420,7 +428,7 @@ func (c *Client) doRegistryRequest(ctx context.Context, reg, repo, method, targe
 	send := func(bearer string, basic *Creds) (*http.Response, []byte, error) {
 		req, err := http.NewRequestWithContext(ctx, method, targetURL, nil)
 		if err != nil {
-			return nil, nil, &RegistryError{Kind: ErrNetwork, Message: err.Error()}
+			return nil, nil, &RegistryError{Kind: ErrNetwork, Message: i18n.EngineDetail(i18n.MsgRegistryNetwork, reg, err.Error())}
 		}
 		if accept != "" {
 			req.Header.Set("Accept", accept)
@@ -432,7 +440,7 @@ func (c *Client) doRegistryRequest(ctx context.Context, reg, repo, method, targe
 		}
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			return nil, nil, &RegistryError{Kind: ErrNetwork, Message: fmt.Sprintf("网络请求失败 (%s): %v", reg, err)}
+			return nil, nil, &RegistryError{Kind: ErrNetwork, Message: i18n.EngineDetail(i18n.MsgRegistryNetwork, reg, err.Error())}
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 		_ = resp.Body.Close()
@@ -526,13 +534,13 @@ func parseAuthHeaderParams(s string) map[string]string {
 func classifyHTTPStatus(reg string, status int) *RegistryError {
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return &RegistryError{Kind: ErrAuthRequired, Message: fmt.Sprintf("仓库 %s 需要认证或无权限访问（HTTP %d）", reg, status)}
+		return &RegistryError{Kind: ErrAuthRequired, Message: i18n.EngineDetail(i18n.MsgRegistryAuth, reg, strconv.Itoa(status))}
 	case http.StatusNotFound:
-		return &RegistryError{Kind: ErrNotFound, Message: fmt.Sprintf("仓库 %s 中未找到该镜像或标签（HTTP 404）", reg)}
+		return &RegistryError{Kind: ErrNotFound, Message: i18n.EngineDetail(i18n.MsgRegistryNotFound, reg)}
 	case http.StatusTooManyRequests:
-		return &RegistryError{Kind: ErrRateLimited, Message: fmt.Sprintf("仓库 %s 请求触发限流（HTTP 429），请稍后重试或配置仓库账号", reg)}
+		return &RegistryError{Kind: ErrRateLimited, Message: i18n.EngineDetail(i18n.MsgRegistryRateLimited, reg)}
 	default:
-		return &RegistryError{Kind: ErrRegistry, Message: fmt.Sprintf("仓库 %s 返回异常状态（HTTP %d）", reg, status)}
+		return &RegistryError{Kind: ErrRegistry, Message: i18n.EngineDetail(i18n.MsgRegistryStatus, reg, strconv.Itoa(status))}
 	}
 }
 
@@ -651,7 +659,7 @@ func (c *Client) ListCredentials(ctx context.Context) ([]Creds, error) {
 func (c *Client) SaveCredential(ctx context.Context, in Creds) error {
 	reg := strings.ToLower(strings.TrimSpace(in.Registry))
 	if reg == "" || in.Username == "" || in.Secret == "" {
-		return errors.New("请填写完整的仓库域名、用户名与密码/Token")
+		return i18n.NewEngineError(i18n.MsgRegistryCredIncomplete)
 	}
 	nonce, sealed, err := c.box.Seal([]byte(in.Secret))
 	if err != nil {
@@ -711,4 +719,110 @@ func (c *Client) DockerAuthHeader(ctx context.Context, reg string) string {
 		"serveraddress": reg,
 	})
 	return base64.URLEncoding.EncodeToString(b)
+}
+
+// NormalizeDigest 统一摘要格式：去除空白并在 64 位十六进制摘要前补全 "sha256:" 前缀（审计 M2）。
+func NormalizeDigest(d string) string {
+	d = strings.TrimSpace(d)
+	if d == "" || strings.Contains(d, ":") {
+		return d
+	}
+	if len(d) == 64 && isHex(d) {
+		return "sha256:" + strings.ToLower(d)
+	}
+	return d
+}
+
+func isHex(s string) bool {
+	for _, r := range s {
+		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func parseConfigDigest(body []byte) string {
+	var mf struct {
+		Config struct {
+			Digest string `json:"digest"`
+		} `json:"config"`
+	}
+	if json.Unmarshal(body, &mf) != nil {
+		return ""
+	}
+	return NormalizeDigest(mf.Config.Digest)
+}
+
+type platformParts struct{ os, arch, variant string }
+
+func splitPlatform(p string) platformParts {
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(p)), "/")
+	var pp platformParts
+	if len(parts) > 0 {
+		pp.os = parts[0]
+	}
+	if len(parts) > 1 {
+		pp.arch = parts[1]
+	}
+	if len(parts) > 2 {
+		pp.variant = parts[2]
+	}
+	if pp.arch == "arm64" && pp.variant == "v8" {
+		pp.variant = "" // linux/arm64 与 linux/arm64/v8 视为同一平台（审计 L6）
+	}
+	return pp
+}
+
+// IsKnownPlatform 判断平台字符串是否可用于平台级比对（为空或架构未知时返回 false）。
+func IsKnownPlatform(p string) bool {
+	pp := splitPlatform(p)
+	return pp.os != "" && pp.arch != "" && pp.arch != "unknown"
+}
+
+// PlatformMatches 判断候选平台是否与主机平台精确匹配（arm64 兼容 v8 变体）。
+func PlatformMatches(host, cand string) bool {
+	if !IsKnownPlatform(host) {
+		return false
+	}
+	h, c := splitPlatform(host), splitPlatform(cand)
+	return h.os == c.os && h.arch == c.arch && h.variant == c.variant
+}
+
+// selectPlatformIndex 返回与主机平台最匹配的候选下标：优先精确匹配，其次同 os/arch 而变体缺省的候选；无匹配返回 -1。
+func selectPlatformIndex(host string, cands []string) int {
+	if !IsKnownPlatform(host) {
+		return -1
+	}
+	for i, c := range cands {
+		if PlatformMatches(host, c) {
+			return i
+		}
+	}
+	h := splitPlatform(host)
+	for i, c := range cands {
+		cp := splitPlatform(c)
+		if cp.os == h.os && cp.arch == h.arch && (cp.variant == "" || h.variant == "") {
+			return i
+		}
+	}
+	return -1
+}
+
+func lookupPlatformDigest(m map[string]string, host string) string {
+	if len(m) == 0 {
+		return ""
+	}
+	if d, ok := m[host]; ok && IsKnownPlatform(host) {
+		return d
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if i := selectPlatformIndex(host, keys); i >= 0 {
+		return m[keys[i]]
+	}
+	return ""
 }

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { UpdateJobItem } from '../api/client'
+import type { CheckProgress, UpdateJobItem } from '../api/client'
 
 export type ThemeMode = 'system' | 'light' | 'dark'
 export type Locale = 'zh-CN' | 'en-US'
@@ -16,16 +16,21 @@ function detectInitialLocale(): Locale {
 interface UIState {
   themeMode: ThemeMode
   locale: Locale
+  liveProgress: CheckProgress | null
   activeUpdateJobs: Record<string, UpdateJobItem>
+  lastFinishedJobs: Record<string, UpdateJobItem>
   setThemeMode: (m: ThemeMode) => void
   setLocale: (l: Locale) => void
+  setLiveProgress: (p: CheckProgress | null) => void
   upsertUpdateJob: (job: UpdateJobItem) => void
 }
 
 export const useUIStore = create<UIState>((set) => ({
   themeMode: (localStorage.getItem('dkstore.theme') as ThemeMode) || 'system',
   locale: detectInitialLocale(),
+  liveProgress: null,
   activeUpdateJobs: {},
+  lastFinishedJobs: {},
   setThemeMode: (m) => {
     localStorage.setItem('dkstore.theme', m)
     set({ themeMode: m })
@@ -34,8 +39,22 @@ export const useUIStore = create<UIState>((set) => ({
     localStorage.setItem('dkstore.locale', l)
     set({ locale: l })
   },
+  setLiveProgress: (p) => set({ liveProgress: p }),
   upsertUpdateJob: (job) =>
-    set((s) => ({
-      activeUpdateJobs: { ...s.activeUpdateJobs, [job.serviceKey]: job },
-    })),
+    set((s) => {
+      if (job.status === 'succeeded' || job.status === 'failed') {
+        const nextActive = { ...s.activeUpdateJobs }
+        delete nextActive[job.serviceKey]
+        return {
+          activeUpdateJobs: nextActive,
+          lastFinishedJobs: { ...s.lastFinishedJobs, [job.serviceKey]: job },
+        }
+      }
+      const nextFinished = { ...s.lastFinishedJobs }
+      delete nextFinished[job.serviceKey]
+      return {
+        activeUpdateJobs: { ...s.activeUpdateJobs, [job.serviceKey]: job },
+        lastFinishedJobs: nextFinished,
+      }
+    }),
 }))

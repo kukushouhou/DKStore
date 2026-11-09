@@ -148,6 +148,9 @@ func FormatTargetVersion(lang Lang, targetVer string) string {
 
 // FormatRegistryError 将 Registry 错误分类格式化为对应语言的说明。
 func FormatRegistryError(lang Lang, errKind, rawMsg string) string {
+	if strings.HasPrefix(rawMsg, detailPrefix) {
+		return LocalizeDetail(lang, rawMsg)
+	}
 	switch errKind {
 	case "auth_required":
 		if lang == EnUS {
@@ -198,6 +201,21 @@ func APIErrorMessage(lang Lang, code, fallback string) string {
 			return "Database error"
 		case "check_failed":
 			return "Update check failed"
+		case "setup_required":
+			return "Please set an administrator password for DKStore first"
+		case "password_already_set":
+			return "Administrator password is already set; please sign in or change it in Settings"
+		case "password_too_short":
+			return "Password must be at least 6 characters"
+		case "sse_unsupported":
+			return "Server does not support event streaming (SSE)"
+		case "updater_unavailable":
+			return "Update module is not available"
+		case "keygen_failed":
+			if fallback != "" {
+				return "Failed to generate SSH key: " + fallback
+			}
+			return "Failed to generate SSH key"
 		}
 	} else {
 		switch code {
@@ -216,9 +234,57 @@ func APIErrorMessage(lang Lang, code, fallback string) string {
 			return "数据库操作失败"
 		case "check_failed":
 			return "检查更新失败"
+		case "setup_required":
+			return "请先设置 DKStore 管理员密码"
+		case "password_already_set":
+			return "已设置管理员密码，请直接登录或在设置页修改密码"
+		case "password_too_short":
+			return "密码长度至少 6 位"
+		case "sse_unsupported":
+			return "服务端不支持事件推送（SSE）"
+		case "updater_unavailable":
+			return "更新模块不可用"
+		case "keygen_failed":
+			if fallback != "" {
+				return "生成 SSH 密钥失败：" + fallback
+			}
+			return "生成 SSH 密钥失败"
 		}
 	}
 	return fallback
+}
+
+// HostAuthHint 将宿主登录态核验失败原因码（internal/hostauth.Reason*）转为本地化说明；
+// 未知原因码返回空字符串。
+func HostAuthHint(lang Lang, code string) string {
+	if lang == EnUS {
+		switch code {
+		case "no_host_cookie":
+			return "No device login was detected. Sign in to the device admin page (DSM / LuCI) in this browser using the same address, or set a DKStore password below."
+		case "invalid_host_cookie":
+			return "The device login cookie has an unexpected format and cannot be verified."
+		case "host_auth_unavailable":
+			return "This device does not provide a usable login verification interface (e.g. LuCI is not installed or the system is customized)."
+		case "host_session_invalid":
+			return "The device login session is invalid or has expired. Sign in to the device admin page again and refresh."
+		case "host_not_admin":
+			return "The account signed in to the device is not an administrator."
+		}
+		return ""
+	}
+	switch code {
+	case "no_host_cookie":
+		return "未检测到设备登录状态。请在本浏览器中用相同地址登录设备管理后台（DSM / LuCI），或在下方设置 DKStore 密码。"
+	case "invalid_host_cookie":
+		return "设备登录 Cookie 格式异常，无法核验。"
+	case "host_auth_unavailable":
+		return "本设备未提供可用的登录核验接口（例如未安装 LuCI 或为厂商定制系统）。"
+	case "host_session_invalid":
+		return "设备登录状态无效或已过期，请重新登录设备管理后台后刷新本页。"
+	case "host_not_admin":
+		return "当前登录设备的账号不是管理员。"
+	}
+	return ""
 }
 
 // NotifyItem 是用于生成推送通知消息的单条更新摘要。
@@ -324,6 +390,7 @@ func formatAppSvc(it NotifyItem) string {
 
 // FormatUpdateError 根据更新错误编码生成对应语言的可读错误消息（立项文档 §7.2）。
 func FormatUpdateError(lang Lang, code, detail string) string {
+	detail = LocalizeDetail(lang, detail)
 	if lang == EnUS {
 		switch code {
 		case "external_conflict":
@@ -332,6 +399,13 @@ func FormatUpdateError(lang Lang, code, detail string) string {
 			return "This container is managed by the platform's native Package Center and cannot be directly recreated by DKStore."
 		case "capability_unsupported":
 			return "The target platform does not support safe single-service updates without affecting other services."
+		case "dsm_tag_change_unsupported":
+			return "Pure Synology DSM WebAPI mode only supports in-place updates for the current tag; changing version tags requires SSH or Docker Engine API access."
+		case "interrupted":
+			if detail != "" {
+				return detail
+			}
+			return "Task was interrupted by a DKStore restart; please verify the container state and retry."
 		case "pull_failed":
 			return "Failed to pull target image: " + detail
 		case "recreate_failed":
@@ -352,6 +426,13 @@ func FormatUpdateError(lang Lang, code, detail string) string {
 		return "该容器由系统套件中心托管，不支持通过更新中心直接重建，请前往宿主套件中心升级。"
 	case "capability_unsupported":
 		return "目标平台当前不支持安全地仅更新单个服务，已阻止整项目重建以避免误升级数据库。"
+	case "dsm_tag_change_unsupported":
+		return "纯群晖 DSM WebAPI 模式仅支持同标签原位更新，跨版本标签升级请配置 SSH 或 Docker API 连接。"
+	case "interrupted":
+		if detail != "" {
+			return detail
+		}
+		return "DKStore 重启导致任务中断，请确认容器状态后重试。"
 	case "pull_failed":
 		return "拉取目标镜像失败：" + detail
 	case "recreate_failed":

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/platform"
 	"github.com/kukushouhou/DKStore/internal/transport"
 )
@@ -29,6 +30,7 @@ func (a *Adapter) HasLocalImage(ctx context.Context, imageIDOrRef string) bool {
 }
 
 // UpdateService 执行单服务镜像拉取、冲突检测、按原配置重建与状态核验（立项文档 §7 / §8 / §9）。
+// 返回的 UpdateError.Message 为 i18n.EngineDetail 编码，由上层按请求语言渲染（审计 I1）。
 func (a *Adapter) UpdateService(
 	ctx context.Context,
 	req platform.UpdateRequest,
@@ -37,14 +39,14 @@ func (a *Adapter) UpdateService(
 	if req.Source == platform.SourceVendorManaged {
 		return nil, &platform.UpdateError{
 			Code:    "vendor_managed_readonly",
-			Message: "vendor managed container cannot be modified directly",
+			Message: i18n.EngineDetail(i18n.MsgDockerVendorReadonly),
 		}
 	}
 	execTr, ok := a.tr.(transport.ExecutableTransport)
 	if !ok {
 		return nil, &platform.UpdateError{
 			Code:    "capability_unsupported",
-			Message: "transport does not support update execution",
+			Message: i18n.EngineDetail(i18n.MsgDockerNoExec),
 		}
 	}
 	emit := func(p platform.PullProgress) {
@@ -62,23 +64,25 @@ func (a *Adapter) UpdateService(
 	emit(platform.PullProgress{Phase: "precheck", StatusText: "Checking target container & configuration for conflicts"})
 	targetContainerID, rawInspect, wasRunning, err := a.findTargetContainer(ctx, req)
 	if err != nil {
-		return nil, &platform.UpdateError{Code: "precheck_failed", Message: err.Error()}
+		return nil, &platform.UpdateError{Code: "precheck_failed", Message: i18n.DetailOf(err)}
 	}
 	curImageID, _ := rawInspect["Image"].(string)
 	if req.ExpectedImageID != "" && curImageID != "" &&
 		!strings.HasPrefix(curImageID, req.ExpectedImageID) && !strings.HasPrefix(req.ExpectedImageID, curImageID) {
 		return nil, &platform.UpdateError{
 			Code:    "external_conflict",
-			Message: fmt.Sprintf("container image changed externally (%s -> %s)", shortID(req.ExpectedImageID), shortID(curImageID)),
+			Message: i18n.EngineDetail(i18n.MsgDockerImageChanged, shortID(req.ExpectedImageID), shortID(curImageID)),
 		}
 	}
 	addLog("precheck ok: container=%s image=%s wasRunning=%v", shortID(targetContainerID), shortID(curImageID), wasRunning)
 
-	// 若为 Compose / DSM 项目，提前记录 Compose YAML 的 SHA256 用于冲突保护
+	// 若为 Compose / DSM 项目，提前记录 Compose YAML 的原始内容与 SHA256，用于冲突保护与失败回写
 	var (
-		composePath   string
-		composeBytes  []byte
-		composeSHA256 string
+		composePath      string
+		composeBytes     []byte
+		origComposeSHA   string // 更新前的 SHA256（L11：old_compose_sha256 记录的是更新前的值）
+		writtenSHA       string // 写入新内容后的 SHA256（为空表示未改写文件）
+		composeRewritten bool
 	)
 	if (req.Source == platform.SourceCompose || req.Source == platform.SourceDSMProject) &&
 		req.Project != nil && len(req.Project.ConfigFiles) > 0 {
@@ -88,10 +92,26 @@ func (a *Adapter) UpdateService(
 				composePath = full
 				composeBytes = b
 				sum := sha256.Sum256(b)
-				composeSHA256 = hex.EncodeToString(sum[:])
+				origComposeSHA = hex.EncodeToString(sum[:])
 				break
 			}
 		}
+	}
+
+	// restoreCompose 在 Compose 文件已改写、但后续重建或校验失败时写回原内容（审计 M5），返回附带回写结果的错误详情。
+	restoreCompose := func(detail string) string {
+		if !composeRewritten {
+			return detail
+		}
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
+		defer cancel()
+		if err := execTr.WriteFileAtomic(rctx, composePath, composeBytes, writtenSHA); err != nil {
+			addLog("restore compose file %s failed: %v", composePath, err)
+			return i18n.EngineDetail(i18n.MsgDockerComposeRestoreErr, detail, err.Error())
+		}
+		composeRewritten = false
+		addLog("restored original compose file %s", composePath)
+		return i18n.EngineDetail(i18n.MsgDockerComposeRestored, detail)
 	}
 
 	// 2. 拉取目标镜像并流式解析分层进度（立项文档 §7.1 / §7.3 / A04）
@@ -99,7 +119,7 @@ func (a *Adapter) UpdateService(
 	addLog("pulling image: %s", req.TargetImageRef)
 	newImageID, newRepoDigest, err := a.pullImageStream(ctx, execTr, req.TargetImageRef, req.RegistryAuthB64, emit)
 	if err != nil {
-		return nil, &platform.UpdateError{Code: "pull_failed", Message: err.Error()}
+		return nil, &platform.UpdateError{Code: "pull_failed", Message: i18n.DetailOf(err)}
 	}
 	addLog("image pulled: id=%s digest=%s", shortID(newImageID), newRepoDigest)
 
@@ -117,21 +137,22 @@ func (a *Adapter) UpdateService(
 		if req.OldImageRef != "" && req.TargetImageRef != "" && req.OldImageRef != req.TargetImageRef {
 			updatedYAML, changed := replaceServiceImageInYAML(composeBytes, req.ServiceName, req.TargetImageRef)
 			if changed {
-				if err := execTr.WriteFileAtomic(ctx, composePath, updatedYAML, composeSHA256); err != nil {
+				if err := execTr.WriteFileAtomic(ctx, composePath, updatedYAML, origComposeSHA); err != nil {
 					if errors.Is(err, transport.ErrFileConflict) {
 						return nil, &platform.UpdateError{
 							Code:    "external_conflict",
-							Message: "Compose YAML was modified externally during image pull",
+							Message: i18n.EngineDetail(i18n.MsgDockerComposeChanged),
 						}
 					}
 					return nil, &platform.UpdateError{
 						Code:    "recreate_failed",
-						Message: fmt.Sprintf("failed to update Compose file %s: %v", composePath, err),
+						Message: i18n.EngineDetail(i18n.MsgDockerComposeWrite, composePath, err.Error()),
 					}
 				}
 				sum := sha256.Sum256(updatedYAML)
-				composeSHA256 = hex.EncodeToString(sum[:])
-				addLog("updated compose file %s (sha256=%s)", composePath, composeSHA256[:12])
+				writtenSHA = hex.EncodeToString(sum[:])
+				composeRewritten = true
+				addLog("updated compose file %s (sha256=%s)", composePath, writtenSHA[:12])
 			}
 		}
 
@@ -157,7 +178,7 @@ func (a *Adapter) UpdateService(
 	if !usedComposeCLI {
 		newCID, err := a.recreateContainerViaEngine(ctx, execTr, targetContainerID, rawInspect, req.TargetImageRef, wasRunning)
 		if err != nil {
-			return nil, &platform.UpdateError{Code: "recreate_failed", Message: err.Error()}
+			return nil, &platform.UpdateError{Code: "recreate_failed", Message: restoreCompose(i18n.DetailOf(err))}
 		}
 		addLog("recreated container via Engine API: %s", shortID(newCID))
 	}
@@ -170,10 +191,10 @@ func (a *Adapter) UpdateService(
 	})
 	res, err := a.verifyUpdatedService(ctx, req, newImageID, newRepoDigest, wasRunning)
 	if err != nil {
-		return nil, &platform.UpdateError{Code: "verify_failed", Message: err.Error()}
+		return nil, &platform.UpdateError{Code: "verify_failed", Message: restoreCompose(i18n.DetailOf(err))}
 	}
 	res.ComposePath = composePath
-	res.ComposeSHA256 = composeSHA256
+	res.ComposeSHA256 = origComposeSHA
 	addLog("verified ok: container=%s state=%s health=%s image=%s",
 		shortID(res.NewContainerID), res.ContainerState, res.HealthStatus, shortID(res.NewImageID))
 	res.Logs = logs
@@ -216,7 +237,7 @@ func (a *Adapter) pullImageStream(
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", "", fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return "", "", i18n.NewEngineError(i18n.MsgDockerPullFailed, dockerHTTPErr(resp.StatusCode, strings.TrimSpace(string(body))))
 	}
 
 	layers := make(map[string]*layerStat)
@@ -300,15 +321,37 @@ func (a *Adapter) pullImageStream(
 
 	var ii imageInspect
 	if err := a.getJSON(ctx, "/images/"+url.PathEscape(targetRef)+"/json", &ii); err != nil {
-		return "", "", fmt.Errorf("读取新拉取镜像信息失败: %w", err)
+		return "", "", i18n.NewEngineError(i18n.MsgDockerInspectPulled, err.Error())
 	}
-	for _, rd := range ii.RepoDigests {
-		if _, d, ok := strings.Cut(rd, "@"); ok && strings.HasPrefix(d, "sha256:") {
-			repoDigest = d
-			break
+	return ii.ID, pickDigestForRepo(fromImg, ii.RepoDigests), nil
+}
+
+// pickDigestForRepo 优先返回与目标仓库匹配的 RepoDigest，找不到时退回第一个 sha256 摘要。
+func pickDigestForRepo(repo string, repoDigests []string) string {
+	want := normalizeRepoName(repo)
+	first := ""
+	for _, rd := range repoDigests {
+		name, d, ok := strings.Cut(rd, "@")
+		if !ok || !strings.HasPrefix(d, "sha256:") {
+			continue
+		}
+		if first == "" {
+			first = d
+		}
+		if normalizeRepoName(name) == want {
+			return d
 		}
 	}
-	return ii.ID, repoDigest, nil
+	return first
+}
+
+func normalizeRepoName(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	for _, p := range []string{"docker.io/", "index.docker.io/", "registry-1.docker.io/"} {
+		s = strings.TrimPrefix(s, p)
+	}
+	s = strings.TrimPrefix(s, "library/")
+	return s
 }
 
 func splitPullImageAndTag(ref string) (fromImage, tag string) {
@@ -322,6 +365,11 @@ func splitPullImageAndTag(ref string) (fromImage, tag string) {
 		return s[:colon], s[colon+1:]
 	}
 	return s, "latest"
+}
+
+// ReplaceServiceImageInYAML 精确替换 Compose YAML 中指定服务块下的 image: 行，完全保留原文件注释、缩进与其他服务配置。
+func ReplaceServiceImageInYAML(raw []byte, serviceName, newImage string) ([]byte, bool) {
+	return replaceServiceImageInYAML(raw, serviceName, newImage)
 }
 
 // replaceServiceImageInYAML 精确替换 Compose YAML 中指定服务块下的 image: 行，完全保留原文件注释、缩进与其他服务配置。

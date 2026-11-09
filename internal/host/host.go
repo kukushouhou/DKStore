@@ -1,4 +1,4 @@
-// Package host 负责被管理主机的增删改查、连接测试、指纹信任与适配器构造（实施文档 §3）。
+// Package host 负责被管理主机的增删改查、连接测试、指纹记录与适配器构造（实施文档 §3）。
 package host
 
 import (
@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/kukushouhou/DKStore/internal/i18n"
@@ -23,40 +24,51 @@ import (
 
 // Host 是对外展示与持久化的主机记录（不含任何密码或私钥明文）。
 type Host struct {
-	ID            string             `json:"id"`
-	Name          string             `json:"name"`
-	Kind          string             `json:"kind"`          // docker | synology
-	Transport     string             `json:"transport"`     // local | ssh
-	Address       string             `json:"address,omitempty"`
-	Port          int                `json:"port,omitempty"`
-	SSHUser       string             `json:"sshUser,omitempty"`
-	SSHAuth       string             `json:"sshAuth,omitempty"` // password | key
-	SSHHostKey    string             `json:"sshHostKey,omitempty"`
-	TransportMode string             `json:"transportMode,omitempty"`
-	DSMURL        string             `json:"dsmUrl,omitempty"`
-	DSMUser       string             `json:"dsmUser,omitempty"`
-	Info          *platform.HostInfo `json:"info,omitempty"`
-	Status        string             `json:"status"` // online | offline | unknown
-	LastSeenAt    int64              `json:"lastSeenAt,omitempty"`
-	Sort          int                `json:"sort"`
-	CreatedAt     int64              `json:"createdAt"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Kind       string `json:"kind"`      // docker | synology
+	Transport  string `json:"transport"` // local | ssh | dsm_api
+	Address    string `json:"address,omitempty"`
+	Port       int    `json:"port,omitempty"`
+	SSHUser    string `json:"sshUser,omitempty"`
+	SSHAuth    string `json:"sshAuth,omitempty"` // password | key
+	SSHHostKey string `json:"sshHostKey,omitempty"`
+	// SSHPrevHostKey / SSHHostKeyChangedAt 非空表示指纹曾自动更新（可能重装过系统），卡片据此提示。
+	SSHPrevHostKey      string             `json:"sshPrevHostKey,omitempty"`
+	SSHHostKeyChangedAt int64              `json:"sshHostKeyChangedAt,omitempty"`
+	TransportMode       string             `json:"transportMode,omitempty"`
+	DSMURL              string             `json:"dsmUrl,omitempty"`
+	DSMUser             string             `json:"dsmUser,omitempty"`
+	Info                *platform.HostInfo `json:"info,omitempty"`
+	Status              string             `json:"status"` // online | offline | unknown
+	LastSeenAt          int64              `json:"lastSeenAt,omitempty"`
+	Sort                int                `json:"sort"`
+	CreatedAt           int64              `json:"createdAt"`
 }
 
-// CreateOrUpdateInput 是新建或编辑主机时的输入。
+// CreateOrUpdateInput 是新建、编辑主机或测试连接时的输入。
 type CreateOrUpdateInput struct {
+	// HostID 仅用于 POST /hosts/test：编辑已有主机时复用其已保存的凭据。
+	HostID        string `json:"hostId,omitempty"`
 	Name          string `json:"name"`
 	Kind          string `json:"kind"`      // docker | synology
-	Transport     string `json:"transport"` // local | ssh
+	Transport     string `json:"transport"` // local | ssh | dsm_api
 	Address       string `json:"address"`
 	Port          int    `json:"port"`
 	SSHUser       string `json:"sshUser"`
 	SSHAuth       string `json:"sshAuth"`   // password | key
 	SSHSecret     string `json:"sshSecret"` // 密码或私钥 PEM；编辑时留空表示不修改
 	SSHPassphrase string `json:"sshPassphrase"`
-	SSHHostKey    string `json:"sshHostKey"` // 连接测试确认后的指纹
 	DSMURL        string `json:"dsmUrl"`
 	DSMUser       string `json:"dsmUser"`
 	DSMSecret     string `json:"dsmSecret"`
+	DSMOTPCode    string `json:"dsmOtpCode"`
+	// DeviceTokenNonce 为“测试连接”返回的设备令牌暂存凭证，保存时带回以复用令牌（避免同一动态码用两次）。
+	DeviceTokenNonce string `json:"deviceTokenNonce,omitempty"`
+
+	// 以下字段只在服务端内部使用，不接受客户端传入。
+	SSHHostKey     string `json:"-"` // 已记录的指纹（来自数据库）
+	DSMDeviceToken string `json:"-"`
 }
 
 // StepResult 表示连接测试中单步的诊断结果。
@@ -69,22 +81,54 @@ type StepResult struct {
 // TestResult 是 POST /hosts/test 的返回结构。
 type TestResult struct {
 	OK               bool               `json:"ok"`
+	NeedOTP          bool               `json:"needOtp,omitempty"`
+	DeviceToken      string             `json:"-"`
+	DeviceTokenNonce string             `json:"deviceTokenNonce,omitempty"`
 	Steps            []StepResult       `json:"steps"`
 	PresentedHostKey string             `json:"presentedHostKey,omitempty"`
-	HostKeyTrusted   bool               `json:"hostKeyTrusted"`
+	HostKeyChanged   bool               `json:"hostKeyChanged,omitempty"`
+	PreviousHostKey  string             `json:"previousHostKey,omitempty"`
 	TransportMode    string             `json:"transportMode,omitempty"`
 	Info             *platform.HostInfo `json:"info,omitempty"`
+}
+
+// SaveVerifyError 表示保存主机时强制重连验证未通过。
+type SaveVerifyError struct {
+	Code       string
+	Message    string
+	TestResult *TestResult
+}
+
+func (e *SaveVerifyError) Error() string { return e.Message }
+
+// deviceTokenTTL 为测试连接所得 DSM 设备令牌的暂存时长。
+const deviceTokenTTL = 10 * time.Minute
+
+type stashedToken struct {
+	token   string
+	url     string
+	user    string
+	expires time.Time
 }
 
 // Registry 管理主机与凭证。
 type Registry struct {
 	st  *store.Store
 	box *secret.Box
+
+	tokMu  sync.Mutex
+	tokens map[string]stashedToken
 }
 
 // NewRegistry 创建主机注册表。
 func NewRegistry(st *store.Store, box *secret.Box) *Registry {
-	return &Registry{st: st, box: box}
+	return &Registry{st: st, box: box, tokens: make(map[string]stashedToken)}
+}
+
+// dbtx 同时被 *sql.DB 与 *sql.Tx 实现。
+type dbtx interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
 // EnsureLocalHost 在主机表为空且本机存在 /var/run/docker.sock 时，自动添加一条“本机 Docker”记录。
@@ -104,19 +148,44 @@ func (r *Registry) EnsureLocalHost(ctx context.Context) error {
 		Name:      "本机 Docker",
 		Kind:      "docker",
 		Transport: "local",
-	})
+	}, i18n.ZhCN)
 	return err
+}
+
+const hostColumns = `id, name, kind, transport, COALESCE(address,''), COALESCE(port,0),
+	COALESCE(ssh_user,''), COALESCE(ssh_auth,''), COALESCE(ssh_host_key,''),
+	COALESCE(ssh_prev_host_key,''), COALESCE(ssh_host_key_changed_at,0),
+	COALESCE(transport_mode,''), COALESCE(dsm_url,''), COALESCE(dsm_user,''),
+	COALESCE(info_json,''), COALESCE(status,'unknown'), COALESCE(last_seen_at,0),
+	sort, created_at`
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanHost(s rowScanner) (Host, error) {
+	var h Host
+	var infoStr string
+	if err := s.Scan(
+		&h.ID, &h.Name, &h.Kind, &h.Transport, &h.Address, &h.Port,
+		&h.SSHUser, &h.SSHAuth, &h.SSHHostKey, &h.SSHPrevHostKey, &h.SSHHostKeyChangedAt,
+		&h.TransportMode, &h.DSMURL, &h.DSMUser, &infoStr, &h.Status, &h.LastSeenAt,
+		&h.Sort, &h.CreatedAt,
+	); err != nil {
+		return h, err
+	}
+	if infoStr != "" {
+		var info platform.HostInfo
+		if json.Unmarshal([]byte(infoStr), &info) == nil {
+			h.Info = &info
+		}
+	}
+	return h, nil
 }
 
 // List 返回所有主机。
 func (r *Registry) List(ctx context.Context) ([]Host, error) {
-	rows, err := r.st.DB.QueryContext(ctx, `
-		SELECT id, name, kind, transport, COALESCE(address,''), COALESCE(port,0),
-		       COALESCE(ssh_user,''), COALESCE(ssh_auth,''), COALESCE(ssh_host_key,''),
-		       COALESCE(transport_mode,''), COALESCE(dsm_url,''), COALESCE(dsm_user,''),
-		       COALESCE(info_json,''), COALESCE(status,'unknown'), COALESCE(last_seen_at,0),
-		       sort, created_at
-		FROM host ORDER BY sort ASC, created_at ASC`)
+	rows, err := r.st.DB.QueryContext(ctx, `SELECT `+hostColumns+` FROM host ORDER BY sort ASC, created_at ASC`)
 	if err != nil {
 		return nil, err
 	}
@@ -124,21 +193,9 @@ func (r *Registry) List(ctx context.Context) ([]Host, error) {
 
 	var out []Host
 	for rows.Next() {
-		var h Host
-		var infoStr string
-		if err := rows.Scan(
-			&h.ID, &h.Name, &h.Kind, &h.Transport, &h.Address, &h.Port,
-			&h.SSHUser, &h.SSHAuth, &h.SSHHostKey, &h.TransportMode,
-			&h.DSMURL, &h.DSMUser, &infoStr, &h.Status, &h.LastSeenAt,
-			&h.Sort, &h.CreatedAt,
-		); err != nil {
+		h, err := scanHost(rows)
+		if err != nil {
 			return nil, err
-		}
-		if infoStr != "" {
-			var info platform.HostInfo
-			if json.Unmarshal([]byte(infoStr), &info) == nil {
-				h.Info = &info
-			}
 		}
 		out = append(out, h)
 	}
@@ -147,32 +204,37 @@ func (r *Registry) List(ctx context.Context) ([]Host, error) {
 
 // Get 获取单台主机。
 func (r *Registry) Get(ctx context.Context, id string) (*Host, error) {
-	list, err := r.List(ctx)
+	h, err := scanHost(r.st.DB.QueryRowContext(ctx, `SELECT `+hostColumns+` FROM host WHERE id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, i18n.NewHostError("host.not_found", nil, id)
+	}
 	if err != nil {
 		return nil, err
 	}
-	for i := range list {
-		if list[i].ID == id {
-			return &list[i], nil
-		}
-	}
-	return nil, fmt.Errorf("设备不存在: %s", id)
+	return &h, nil
 }
 
-// Create 新增主机并在后台探测状态。
-func (r *Registry) Create(ctx context.Context, in CreateOrUpdateInput) (*Host, error) {
+// normalizeInput 补齐默认值并执行 Create / Update 共用的必填校验。
+// hasSavedDSMSecret 表示编辑时数据库中已有 DSM 密码（允许留空沿用）。
+func normalizeInput(in *CreateOrUpdateInput, hasSavedDSMSecret bool) error {
 	if in.Name == "" {
-		return nil, errors.New("请填写设备名称")
+		return i18n.NewHostError("host.name_required", nil)
 	}
 	if in.Kind == "" {
 		in.Kind = "docker"
 	}
 	if in.Transport == "" {
-		in.Transport = "local"
+		if in.Kind == "synology" && in.DSMURL != "" {
+			in.Transport = "dsm_api"
+		} else {
+			in.Transport = "local"
+		}
 	}
-	if in.Transport == "ssh" {
+	switch in.Transport {
+	case "local":
+	case "ssh":
 		if in.Address == "" || in.SSHUser == "" {
-			return nil, errors.New("SSH 设备需填写主机地址与用户名")
+			return i18n.NewHostError("host.ssh_required", nil)
 		}
 		if in.Port <= 0 {
 			in.Port = 22
@@ -180,49 +242,163 @@ func (r *Registry) Create(ctx context.Context, in CreateOrUpdateInput) (*Host, e
 		if in.SSHAuth == "" {
 			in.SSHAuth = "password"
 		}
+	case "dsm_api":
+		in.Kind = "synology"
+		if in.DSMURL == "" || in.DSMUser == "" || (in.DSMSecret == "" && !hasSavedDSMSecret) {
+			return i18n.NewHostError("host.dsm_required", nil)
+		}
+	default:
+		return i18n.NewHostError("host.transport_invalid", nil, in.Transport)
+	}
+	return nil
+}
+
+// hostRefs 是主机记录上的凭据引用。
+type hostRefs struct {
+	ssh, dsm, did string
+}
+
+func loadRefs(ctx context.Context, q dbtx, id string) (hostRefs, error) {
+	var refs hostRefs
+	err := q.QueryRowContext(ctx, `
+		SELECT COALESCE(ssh_secret_ref,''), COALESCE(dsm_secret_ref,''), COALESCE(dsm_device_token_ref,'')
+		FROM host WHERE id=?`, id).Scan(&refs.ssh, &refs.dsm, &refs.did)
+	if errors.Is(err, sql.ErrNoRows) {
+		return refs, i18n.NewHostError("host.not_found", nil, id)
+	}
+	return refs, err
+}
+
+// fillSavedCredentials 在输入未重填密码 / 私钥 / 设备令牌时，加载已保存的凭据用于实时连接（Update 与编辑时测试连接共用）。
+// 返回已保存的设备令牌明文（用于判断令牌是否变化）。
+func (r *Registry) fillSavedCredentials(ctx context.Context, cur *Host, refs hostRefs, in *CreateOrUpdateInput) (savedDID string, err error) {
+	if in.SSHSecret == "" && refs.ssh != "" && in.Transport == "ssh" {
+		raw, err := r.loadSecret(ctx, r.st.DB, refs.ssh)
+		if err != nil {
+			return "", i18n.NewHostError("host.secret_load", err)
+		}
+		var p sshSecretPayload
+		if json.Unmarshal([]byte(raw), &p) == nil {
+			in.SSHSecret = p.Secret
+			if in.SSHPassphrase == "" {
+				in.SSHPassphrase = p.Passphrase
+			}
+		} else {
+			in.SSHSecret = raw
+		}
+	}
+	if in.DSMSecret == "" && refs.dsm != "" {
+		raw, err := r.loadSecret(ctx, r.st.DB, refs.dsm)
+		if err != nil {
+			return "", i18n.NewHostError("host.secret_load", err)
+		}
+		in.DSMSecret = raw
+	}
+	// 设备令牌与 DSM 地址 + 账号绑定，二者未改动时才复用
+	if refs.did != "" && in.DSMURL == cur.DSMURL && in.DSMUser == cur.DSMUser {
+		if tok, err := r.loadSecret(ctx, r.st.DB, refs.did); err == nil {
+			savedDID = tok
+			if in.DSMDeviceToken == "" {
+				in.DSMDeviceToken = tok
+			}
+		}
+	}
+	// 地址与端口未变时沿用已记录的指纹，用于检测“指纹已变化”
+	port := in.Port
+	if port <= 0 {
+		port = 22
+	}
+	curPort := cur.Port
+	if curPort <= 0 {
+		curPort = 22
+	}
+	if in.Transport == "ssh" && in.Address == cur.Address && port == curPort {
+		in.SSHHostKey = cur.SSHHostKey
+	}
+	return savedDID, nil
+}
+
+// applyDeviceTokenNonce 若带有测试连接暂存的设备令牌，则优先使用该令牌并不再提交 OTP。
+func (r *Registry) applyDeviceTokenNonce(in *CreateOrUpdateInput) {
+	if in.DeviceTokenNonce == "" || in.Transport != "dsm_api" {
+		return
+	}
+	if tok := r.takeDeviceToken(in.DeviceTokenNonce, in.DSMURL, in.DSMUser); tok != "" {
+		in.DSMDeviceToken = tok
+		in.DSMOTPCode = ""
+	}
+}
+
+// Create 新增主机并强制执行一次实时连接与能力校验，验证通过后在单个事务中入库。
+func (r *Registry) Create(ctx context.Context, in CreateOrUpdateInput, lang i18n.Lang) (*Host, error) {
+	if err := normalizeInput(&in, false); err != nil {
+		return nil, err
+	}
+	in.SSHHostKey = "" // 首次连接自动记录指纹（TOFU）
+	in.DSMDeviceToken = ""
+	r.applyDeviceTokenNonce(&in)
+
+	testRes := r.testConnection(ctx, in, lang)
+	if !testRes.OK {
+		return nil, buildSaveVerifyError(testRes, lang)
 	}
 
 	id := newID("h_")
-	var sshSecretRef, dsmSecretRef string
-	var err error
-	if in.SSHSecret != "" {
-		blob, _ := json.Marshal(sshSecretPayload{Secret: in.SSHSecret, Passphrase: in.SSHPassphrase})
-		sshSecretRef, err = r.saveSecret(ctx, string(blob))
-		if err != nil {
-			return nil, err
-		}
-	}
-	if in.DSMSecret != "" {
-		dsmSecretRef, err = r.saveSecret(ctx, in.DSMSecret)
-		if err != nil {
-			return nil, err
-		}
+	now := time.Now().Unix()
+	infoJSON := marshalInfo(testRes.Info)
+	hostKey := ""
+	if in.Transport == "ssh" {
+		hostKey = testRes.PresentedHostKey
 	}
 
-	now := time.Now().Unix()
-	_, err = r.st.DB.ExecContext(ctx, `
-		INSERT INTO host(
-			id, name, kind, transport, address, port, ssh_user, ssh_auth,
-			ssh_secret_ref, ssh_host_key, dsm_url, dsm_user, dsm_secret_ref,
-			status, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unknown', ?)`,
-		id, in.Name, in.Kind, in.Transport, in.Address, in.Port, in.SSHUser, in.SSHAuth,
-		sshSecretRef, in.SSHHostKey, in.DSMURL, in.DSMUser, dsmSecretRef, now,
-	)
+	err := r.withTx(ctx, func(tx *sql.Tx) error {
+		var sshRef, dsmRef, didRef string
+		var err error
+		if in.Transport == "ssh" && in.SSHSecret != "" {
+			blob, _ := json.Marshal(sshSecretPayload{Secret: in.SSHSecret, Passphrase: in.SSHPassphrase})
+			if sshRef, err = r.saveSecret(ctx, tx, string(blob)); err != nil {
+				return err
+			}
+		}
+		if in.DSMSecret != "" {
+			if dsmRef, err = r.saveSecret(ctx, tx, in.DSMSecret); err != nil {
+				return err
+			}
+		}
+		if testRes.DeviceToken != "" {
+			if didRef, err = r.saveSecret(ctx, tx, testRes.DeviceToken); err != nil {
+				return err
+			}
+		}
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO host(
+				id, name, kind, transport, address, port, ssh_user, ssh_auth,
+				ssh_secret_ref, ssh_host_key, transport_mode, dsm_url, dsm_user,
+				dsm_secret_ref, dsm_device_token_ref, info_json, status, last_seen_at, created_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'online', ?, ?)`,
+			id, in.Name, in.Kind, in.Transport, in.Address, in.Port, in.SSHUser, in.SSHAuth,
+			sshRef, hostKey, testRes.TransportMode, in.DSMURL, in.DSMUser,
+			dsmRef, didRef, infoJSON, now, now,
+		)
+		return err
+	})
 	if err != nil {
-		return nil, err
+		return nil, i18n.NewHostError("host.save_failed", err)
 	}
-	// 立即尝试一次探测
-	_, _ = r.ProbeAndSave(ctx, id)
 	return r.Get(ctx, id)
 }
 
-// Update 更新主机信息；若密码/私钥留空则沿用已保存凭证。
-func (r *Registry) Update(ctx context.Context, id string, in CreateOrUpdateInput) (*Host, error) {
+// Update 更新主机信息；若密码/私钥留空则沿用已保存凭证，并强制重新执行实时连接校验，校验通过后在单个事务中写库。
+func (r *Registry) Update(ctx context.Context, id string, in CreateOrUpdateInput, lang i18n.Lang) (*Host, error) {
 	cur, err := r.Get(ctx, id)
 	if err != nil {
 		return nil, err
 	}
+	refs, err := loadRefs(ctx, r.st.DB, id)
+	if err != nil {
+		return nil, err
+	}
+
 	if in.Name == "" {
 		in.Name = cur.Name
 	}
@@ -232,66 +408,164 @@ func (r *Registry) Update(ctx context.Context, id string, in CreateOrUpdateInput
 	if in.Transport == "" {
 		in.Transport = cur.Transport
 	}
-	if in.Port <= 0 {
-		in.Port = cur.Port
-		if in.Port <= 0 {
-			in.Port = 22
-		}
-	}
 	if in.SSHAuth == "" {
 		in.SSHAuth = cur.SSHAuth
 	}
-	hostKey := in.SSHHostKey
-	if hostKey == "" {
-		hostKey = cur.SSHHostKey
+	if err := normalizeInput(&in, refs.dsm != ""); err != nil {
+		return nil, err
 	}
+	in.SSHHostKey = ""
+	in.DSMDeviceToken = ""
 
-	_, err = r.st.DB.ExecContext(ctx, `
-		UPDATE host SET name=?, kind=?, transport=?, address=?, port=?, ssh_user=?, ssh_auth=?,
-		                ssh_host_key=?, dsm_url=?, dsm_user=?
-		WHERE id=?`,
-		in.Name, in.Kind, in.Transport, in.Address, in.Port, in.SSHUser, in.SSHAuth,
-		hostKey, in.DSMURL, in.DSMUser, id,
-	)
+	verifyIn := in
+	savedDID, err := r.fillSavedCredentials(ctx, cur, refs, &verifyIn)
 	if err != nil {
 		return nil, err
 	}
-	if in.SSHSecret != "" {
-		blob, _ := json.Marshal(sshSecretPayload{Secret: in.SSHSecret, Passphrase: in.SSHPassphrase})
-		ref, err := r.saveSecret(ctx, string(blob))
-		if err != nil {
-			return nil, err
-		}
-		_, _ = r.st.DB.ExecContext(ctx, `UPDATE host SET ssh_secret_ref=? WHERE id=?`, ref, id)
+	r.applyDeviceTokenNonce(&verifyIn)
+
+	testRes := r.testConnection(ctx, verifyIn, lang)
+	if !testRes.OK {
+		return nil, buildSaveVerifyError(testRes, lang)
 	}
-	if in.DSMSecret != "" {
-		ref, err := r.saveSecret(ctx, in.DSMSecret)
-		if err != nil {
-			return nil, err
+
+	infoJSON := marshalInfo(testRes.Info)
+	now := time.Now().Unix()
+	hostKey, prevKey, changedAt := "", "", int64(0)
+	if in.Transport == "ssh" {
+		hostKey = testRes.PresentedHostKey
+		if testRes.HostKeyChanged {
+			prevKey, changedAt = testRes.PreviousHostKey, now
 		}
-		_, _ = r.st.DB.ExecContext(ctx, `UPDATE host SET dsm_secret_ref=? WHERE id=?`, ref, id)
 	}
-	_, _ = r.ProbeAndSave(ctx, id)
+
+	var obsolete []string
+	err = r.withTx(ctx, func(tx *sql.Tx) error {
+		sshRef, dsmRef, didRef := refs.ssh, refs.dsm, refs.did
+		if in.Transport == "ssh" && in.SSHSecret != "" {
+			blob, _ := json.Marshal(sshSecretPayload{Secret: in.SSHSecret, Passphrase: in.SSHPassphrase})
+			ref, err := r.saveSecret(ctx, tx, string(blob))
+			if err != nil {
+				return err
+			}
+			if sshRef != "" {
+				obsolete = append(obsolete, sshRef)
+			}
+			sshRef = ref
+		}
+		if in.DSMSecret != "" {
+			ref, err := r.saveSecret(ctx, tx, in.DSMSecret)
+			if err != nil {
+				return err
+			}
+			if dsmRef != "" {
+				obsolete = append(obsolete, dsmRef)
+			}
+			dsmRef = ref
+		}
+		// 令牌与已保存值相同时不重复写入
+		if testRes.DeviceToken != "" && testRes.DeviceToken != savedDID {
+			ref, err := r.saveSecret(ctx, tx, testRes.DeviceToken)
+			if err != nil {
+				return err
+			}
+			if didRef != "" {
+				obsolete = append(obsolete, didRef)
+			}
+			didRef = ref
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE host SET name=?, kind=?, transport=?, address=?, port=?, ssh_user=?, ssh_auth=?,
+			                ssh_secret_ref=?, ssh_host_key=?, ssh_prev_host_key=?, ssh_host_key_changed_at=?,
+			                transport_mode=?, dsm_url=?, dsm_user=?, dsm_secret_ref=?, dsm_device_token_ref=?,
+			                info_json=?, status='online', last_seen_at=?
+			WHERE id=?`,
+			in.Name, in.Kind, in.Transport, in.Address, in.Port, in.SSHUser, in.SSHAuth,
+			sshRef, hostKey, nullIfEmpty(prevKey), nullIfZero(changedAt),
+			testRes.TransportMode, in.DSMURL, in.DSMUser, dsmRef, didRef,
+			infoJSON, now, id,
+		); err != nil {
+			return err
+		}
+		return deleteSecrets(ctx, tx, obsolete...)
+	})
+	if err != nil {
+		return nil, i18n.NewHostError("host.save_failed", err)
+	}
 	return r.Get(ctx, id)
 }
 
-// Delete 删除主机（级联删除其下的 app / service）。
-func (r *Registry) Delete(ctx context.Context, id string) error {
-	_, err := r.st.DB.ExecContext(ctx, `DELETE FROM host WHERE id=?`, id)
-	return err
-}
-
-// TrustHostKey 将用户确认过的 SSH 指纹写入主机记录。
-func (r *Registry) TrustHostKey(ctx context.Context, id, fingerprint string) error {
-	if fingerprint == "" {
-		return errors.New("指纹不能为空")
+func buildSaveVerifyError(res *TestResult, lang i18n.Lang) error {
+	msg := i18n.HostText(lang, "host.verify_failed")
+	for i := len(res.Steps) - 1; i >= 0; i-- {
+		if res.Steps[i].Status == "error" && res.Steps[i].Message != "" {
+			msg = res.Steps[i].Message
+			break
+		}
 	}
-	_, err := r.st.DB.ExecContext(ctx, `UPDATE host SET ssh_host_key=? WHERE id=?`, fingerprint, id)
-	return err
+	code := "connection_failed"
+	if res.NeedOTP {
+		code = "need_otp"
+	}
+	return &SaveVerifyError{
+		Code:       code,
+		Message:    msg,
+		TestResult: res,
+	}
 }
 
-// TestConnection 执行分步连接诊断（支持按 lang 返回中/英诊断步骤），不会保存主机。
+// Delete 删除主机（级联删除其下的 app / service）及其加密凭据记录。
+func (r *Registry) Delete(ctx context.Context, id string) error {
+	return r.withTx(ctx, func(tx *sql.Tx) error {
+		refs, err := loadRefs(ctx, tx, id)
+		if err != nil {
+			var he *i18n.HostError
+			if errors.As(err, &he) {
+				return nil // 已不存在，视为删除成功
+			}
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM host WHERE id=?`, id); err != nil {
+			return err
+		}
+		return deleteSecrets(ctx, tx, refs.ssh, refs.dsm, refs.did)
+	})
+}
+
+// TestConnection 执行分步连接诊断（按 lang 返回中/英诊断步骤），不会保存主机。
+// 若 in.HostID 非空，则复用该主机已保存的 SSH 密码/私钥、DSM 密码与设备令牌。
+// DSM 登录拿到新的设备令牌时暂存于服务端，并通过 DeviceTokenNonce 返回给前端，保存时带回复用。
 func (r *Registry) TestConnection(ctx context.Context, in CreateOrUpdateInput, lang i18n.Lang) (*TestResult, error) {
+	in.SSHHostKey = ""
+	in.DSMDeviceToken = ""
+	if in.HostID != "" {
+		cur, err := r.Get(ctx, in.HostID)
+		if err != nil {
+			return nil, err
+		}
+		refs, err := loadRefs(ctx, r.st.DB, in.HostID)
+		if err != nil {
+			return nil, err
+		}
+		if in.Transport == "" {
+			in.Transport = cur.Transport
+		}
+		if in.SSHAuth == "" {
+			in.SSHAuth = cur.SSHAuth
+		}
+		if _, err := r.fillSavedCredentials(ctx, cur, refs, &in); err != nil {
+			return nil, err
+		}
+	}
+	res := r.testConnection(ctx, in, lang)
+	if res.OK && res.DeviceToken != "" && res.DeviceToken != in.DSMDeviceToken {
+		res.DeviceTokenNonce = r.stashDeviceToken(res.DeviceToken, in.DSMURL, in.DSMUser)
+	}
+	return res, nil
+}
+
+// testConnection 是实际的分步诊断实现（Create / Update 保存前强制校验也使用它）。
+func (r *Registry) testConnection(ctx context.Context, in CreateOrUpdateInput, lang i18n.Lang) *TestResult {
 	tr := func(zh, en string) string {
 		if lang == i18n.EnUS {
 			return en
@@ -299,6 +573,51 @@ func (r *Registry) TestConnection(ctx context.Context, in CreateOrUpdateInput, l
 		return zh
 	}
 	res := &TestResult{}
+	if in.Transport == "dsm_api" {
+		ad := synology.New("test", nil, synology.DSMConfig{
+			URL:           in.DSMURL,
+			Username:      in.DSMUser,
+			Secret:        in.DSMSecret,
+			OTPCode:       in.DSMOTPCode,
+			DeviceToken:   in.DSMDeviceToken,
+			SkipTLSVerify: true,
+		})
+		defer ad.Close()
+		info, err := ad.Probe(ctx)
+		if err != nil {
+			var authErr *synology.DSMAuthError
+			if errors.As(err, &authErr) && authErr.NeedOTP {
+				res.NeedOTP = true
+			}
+			res.Steps = append(res.Steps, StepResult{
+				Step:    tr("群晖 DSM 网页接口登录与权限验证", "Synology DSM WebAPI login & permission check"),
+				Status:  "error",
+				Message: i18n.LocalizeErr(lang, err),
+			})
+			return res
+		}
+		arch := info.Arch
+		if arch == "" {
+			arch = tr("架构未知", "arch unknown")
+		}
+		res.Steps = append(res.Steps,
+			StepResult{
+				Step:    tr("群晖 DSM 网页接口登录与权限验证", "Synology DSM WebAPI login & permission check"),
+				Status:  "ok",
+				Message: fmt.Sprintf("%s (%s, %s)", in.DSMURL, info.PlatformVersion, arch),
+			},
+			StepResult{
+				Step:    tr("群晖 Container Manager 原生项目与容器通道", "Synology Container Manager native project & container channel"),
+				Status:  "ok",
+				Message: tr("已启用免 SSH 网页接口直连（自动识别 Project、独立容器与套件中心容器）", "Agentless & SSH-free DSM WebAPI active (detects Projects, standalone & Package Center containers)"),
+			},
+		)
+		res.OK = true
+		res.TransportMode = "dsm_api"
+		res.DeviceToken = ad.DeviceToken()
+		res.Info = info
+		return res
+	}
 	if in.Transport == "local" || in.Transport == "" {
 		sock := transport.DefaultLocalSocket()
 		if _, err := os.Stat(sock); err != nil {
@@ -307,7 +626,7 @@ func (r *Registry) TestConnection(ctx context.Context, in CreateOrUpdateInput, l
 				Status:  "error",
 				Message: fmt.Sprintf(tr("未找到 %s：%v", "%s not found: %v"), sock, err),
 			})
-			return res, nil
+			return res
 		}
 		res.Steps = append(res.Steps, StepResult{
 			Step:    tr("检查本机 Docker Socket", "Check local Docker Socket"),
@@ -322,9 +641,9 @@ func (r *Registry) TestConnection(ctx context.Context, in CreateOrUpdateInput, l
 			res.Steps = append(res.Steps, StepResult{
 				Step:    tr("读取 Docker Engine 信息", "Query Docker Engine info"),
 				Status:  "error",
-				Message: err.Error(),
+				Message: i18n.LocalizeErr(lang, err),
 			})
-			return res, nil
+			return res
 		}
 		res.Steps = append(res.Steps, StepResult{
 			Step:    tr("读取 Docker Engine 信息", "Query Docker Engine info"),
@@ -332,18 +651,17 @@ func (r *Registry) TestConnection(ctx context.Context, in CreateOrUpdateInput, l
 			Message: fmt.Sprintf("Docker %s (%s/%s)", info.DockerVersion, info.OS, info.Arch),
 		})
 		res.OK = true
-		res.HostKeyTrusted = true
 		res.TransportMode = string(transport.ModeLocal)
 		res.Info = info
-		return res, nil
+		return res
 	}
 
-	// SSH 连接测试
+	// SSH 连接测试：首次自动记录指纹；指纹变化时自动改用新指纹并标记“指纹已变化”
 	port := in.Port
 	if port <= 0 {
 		port = 22
 	}
-	sshTr, err := transport.DialSSH(ctx, transport.SSHConfig{
+	sshTr, prevKey, err := dialSSHRefreshingHostKey(ctx, transport.SSHConfig{
 		Address:        in.Address,
 		Port:           port,
 		User:           in.SSHUser,
@@ -351,30 +669,31 @@ func (r *Registry) TestConnection(ctx context.Context, in CreateOrUpdateInput, l
 		Secret:         in.SSHSecret,
 		Passphrase:     in.SSHPassphrase,
 		TrustedHostKey: in.SSHHostKey,
-		AllowTOFU:      true,
-	})
+		AllowTOFU:      in.SSHHostKey == "",
+	}, transport.DialSSH)
 	if err != nil {
-		var mismatch *transport.HostKeyMismatchError
-		if errors.As(err, &mismatch) {
-			res.PresentedHostKey = mismatch.Presented
-		}
 		res.Steps = append(res.Steps, StepResult{
 			Step:    tr("SSH 连接与 Docker 通道探测", "SSH connection & Docker channel probe"),
 			Status:  "error",
-			Message: err.Error(),
+			Message: i18n.LocalizeErr(lang, err),
 		})
-		return res, nil
+		return res
 	}
 	defer sshTr.Close()
 
 	res.PresentedHostKey = sshTr.PresentedHostKey()
-	res.HostKeyTrusted = in.SSHHostKey != "" && in.SSHHostKey == sshTr.PresentedHostKey()
 	res.TransportMode = string(sshTr.Mode())
+	fpMsg := i18n.HostText(lang, "host.fp", sshTr.PresentedHostKey())
+	if prevKey != "" {
+		res.HostKeyChanged = true
+		res.PreviousHostKey = prevKey
+		fpMsg = i18n.HostText(lang, "host.fp_changed", prevKey, sshTr.PresentedHostKey())
+	}
 	res.Steps = append(res.Steps,
 		StepResult{
 			Step:    tr("SSH 握手与认证", "SSH handshake & authentication"),
 			Status:  "ok",
-			Message: fmt.Sprintf(tr("主机指纹 %s", "Host fingerprint %s"), sshTr.PresentedHostKey()),
+			Message: fpMsg,
 		},
 		StepResult{
 			Step:    tr("Docker 通道探测", "Docker channel probe"),
@@ -399,9 +718,9 @@ func (r *Registry) TestConnection(ctx context.Context, in CreateOrUpdateInput, l
 		res.Steps = append(res.Steps, StepResult{
 			Step:    tr("读取 Docker Engine 信息", "Query Docker Engine info"),
 			Status:  "error",
-			Message: err.Error(),
+			Message: i18n.LocalizeErr(lang, err),
 		})
-		return res, nil
+		return res
 	}
 	res.Steps = append(res.Steps, StepResult{
 		Step:    tr("读取 Docker Engine 信息", "Query Docker Engine info"),
@@ -425,72 +744,89 @@ func (r *Registry) TestConnection(ctx context.Context, in CreateOrUpdateInput, l
 	}
 	res.OK = true
 	res.Info = info
-	return res, nil
+	return res
+}
+
+// dialSSHRefreshingHostKey 建立 SSH 连接；若远端指纹与已记录指纹不一致（家庭场景多为重装系统 / IP 变更），
+// 自动改用远端出示的新指纹重连。返回值 prevKey 非空表示指纹已变化（为旧指纹）。
+// 只依赖 transport 现有 API：用新指纹作为 TrustedHostKey 重新拨号。
+func dialSSHRefreshingHostKey[T any](ctx context.Context, cfg transport.SSHConfig, dial func(context.Context, transport.SSHConfig) (T, error)) (T, string, error) {
+	t, err := dial(ctx, cfg)
+	var mm *transport.HostKeyMismatchError
+	if err != nil && errors.As(err, &mm) && mm.Presented != "" {
+		prev := mm.Expected
+		if prev == "" {
+			prev = cfg.TrustedHostKey
+		}
+		cfg.TrustedHostKey = mm.Presented
+		cfg.AllowTOFU = false
+		t, err = dial(ctx, cfg)
+		if err != nil {
+			var zero T
+			return zero, "", err
+		}
+		return t, prev, nil
+	}
+	return t, "", err
 }
 
 // OpenAdapter 为指定主机建立传输并返回平台适配器（调用方负责 Close）。
 func (r *Registry) OpenAdapter(ctx context.Context, hostID string) (platform.Adapter, *Host, error) {
-	var (
-		h            Host
-		sshSecretRef string
-		dsmSecretRef string
-		infoStr      string
-	)
-	err := r.st.DB.QueryRowContext(ctx, `
-		SELECT id, name, kind, transport, COALESCE(address,''), COALESCE(port,22),
-		       COALESCE(ssh_user,''), COALESCE(ssh_auth,'password'), COALESCE(ssh_secret_ref,''),
-		       COALESCE(ssh_host_key,''), COALESCE(transport_mode,''),
-		       COALESCE(dsm_url,''), COALESCE(dsm_user,''), COALESCE(dsm_secret_ref,''),
-		       COALESCE(info_json,''), COALESCE(status,'unknown'), COALESCE(last_seen_at,0)
-		FROM host WHERE id=?`, hostID).Scan(
-		&h.ID, &h.Name, &h.Kind, &h.Transport, &h.Address, &h.Port,
-		&h.SSHUser, &h.SSHAuth, &sshSecretRef, &h.SSHHostKey, &h.TransportMode,
-		&h.DSMURL, &h.DSMUser, &dsmSecretRef,
-		&infoStr, &h.Status, &h.LastSeenAt,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil, fmt.Errorf("设备不存在: %s", hostID)
-	}
+	h, err := r.Get(ctx, hostID)
 	if err != nil {
 		return nil, nil, err
 	}
-	if infoStr != "" {
-		var info platform.HostInfo
-		if json.Unmarshal([]byte(infoStr), &info) == nil {
-			h.Info = &info
-		}
+	refs, err := loadRefs(ctx, r.st.DB, hostID)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	var dsmSecret string
-	if dsmSecretRef != "" {
-		dsmSecret, _ = r.loadSecret(ctx, dsmSecretRef)
+	var dsmSecret, dsmDeviceToken string
+	if refs.dsm != "" {
+		dsmSecret, _ = r.loadSecret(ctx, r.st.DB, refs.dsm)
+	}
+	if refs.did != "" {
+		dsmDeviceToken, _ = r.loadSecret(ctx, r.st.DB, refs.did)
 	}
 	dsmCfg := synology.DSMConfig{
 		URL:           h.DSMURL,
 		Username:      h.DSMUser,
 		Secret:        dsmSecret,
+		DeviceToken:   dsmDeviceToken,
 		SkipTLSVerify: true,
 	}
 
+	if h.Transport == "dsm_api" {
+		h.TransportMode = "dsm_api"
+		ad := synology.New(h.ID, nil, dsmCfg)
+		// 主动登录一次：登录失败时立即标记离线
+		if err := ad.Login(ctx); err != nil {
+			_ = ad.Close()
+			r.markOffline(ctx, h.ID)
+			h.Status = "offline"
+			return nil, h, err
+		}
+		return ad, h, nil
+	}
 	if h.Transport == "local" {
 		tr := transport.NewLocal("")
 		if h.Kind == "synology" || isSynologyTarget(ctx, tr) {
-			return synology.New(h.ID, tr, dsmCfg), &h, nil
+			return synology.New(h.ID, tr, dsmCfg), h, nil
 		}
-		return docker.New(h.ID, tr), &h, nil
+		return docker.New(h.ID, tr), h, nil
 	}
 
 	var payload sshSecretPayload
-	if sshSecretRef != "" {
-		raw, err := r.loadSecret(ctx, sshSecretRef)
+	if refs.ssh != "" {
+		raw, err := r.loadSecret(ctx, r.st.DB, refs.ssh)
 		if err != nil {
-			return nil, &h, err
+			return nil, h, i18n.NewHostError("host.secret_load", err)
 		}
 		if json.Unmarshal([]byte(raw), &payload) != nil {
 			payload.Secret = raw
 		}
 	}
-	sshTr, err := transport.DialSSH(ctx, transport.SSHConfig{
+	cfg := transport.SSHConfig{
 		Address:        h.Address,
 		Port:           h.Port,
 		User:           h.SSHUser,
@@ -500,38 +836,45 @@ func (r *Registry) OpenAdapter(ctx context.Context, hostID string) (platform.Ada
 		TrustedHostKey: h.SSHHostKey,
 		AllowTOFU:      h.SSHHostKey == "",
 		PreferredMode:  transport.Mode(h.TransportMode),
-	})
-	if err != nil {
+	}
+	sshTr, prevKey, err := dialSSHRefreshingHostKey(ctx, cfg, transport.DialSSH)
+	if err != nil && h.TransportMode != "" {
 		// 若首选模式失败，清空 PreferredMode 重新探测一次
-		if h.TransportMode != "" {
-			sshTr, err = transport.DialSSH(ctx, transport.SSHConfig{
-				Address:        h.Address,
-				Port:           h.Port,
-				User:           h.SSHUser,
-				AuthType:       h.SSHAuth,
-				Secret:         payload.Secret,
-				Passphrase:     payload.Passphrase,
-				TrustedHostKey: h.SSHHostKey,
-				AllowTOFU:      h.SSHHostKey == "",
-			})
-		}
-		if err != nil {
-			r.markStatus(ctx, h.ID, "offline", nil, "")
-			return nil, &h, err
-		}
+		cfg.PreferredMode = ""
+		sshTr, prevKey, err = dialSSHRefreshingHostKey(ctx, cfg, transport.DialSSH)
+	}
+	if err != nil {
+		r.markOffline(ctx, h.ID)
+		h.Status = "offline"
+		return nil, h, err
 	}
 	h.TransportMode = string(sshTr.Mode())
-	if h.SSHHostKey == "" && sshTr.PresentedHostKey() != "" {
-		_ = r.TrustHostKey(ctx, h.ID, sshTr.PresentedHostKey())
+	if presented := sshTr.PresentedHostKey(); presented != "" {
+		if prevKey != "" {
+			r.recordHostKeyChange(ctx, h.ID, prevKey, presented)
+			h.SSHPrevHostKey = prevKey
+			h.SSHHostKeyChangedAt = time.Now().Unix()
+			h.SSHHostKey = presented
+		} else if h.SSHHostKey == "" {
+			_, _ = r.st.DB.ExecContext(ctx, `UPDATE host SET ssh_host_key=? WHERE id=?`, presented, h.ID)
+			h.SSHHostKey = presented
+		}
 	}
 	if h.Kind == "synology" || isSynologyTarget(ctx, sshTr) {
 		if h.Kind != "synology" {
 			h.Kind = "synology"
 			_, _ = r.st.DB.ExecContext(ctx, `UPDATE host SET kind='synology' WHERE id=?`, h.ID)
 		}
-		return synology.New(h.ID, sshTr, dsmCfg), &h, nil
+		return synology.New(h.ID, sshTr, dsmCfg), h, nil
 	}
-	return docker.New(h.ID, sshTr), &h, nil
+	return docker.New(h.ID, sshTr), h, nil
+}
+
+// recordHostKeyChange 自动更新为新指纹并标记“指纹已变化”。
+func (r *Registry) recordHostKeyChange(ctx context.Context, id, prevKey, newKey string) {
+	_, _ = r.st.DB.ExecContext(ctx, `
+		UPDATE host SET ssh_host_key=?, ssh_prev_host_key=?, ssh_host_key_changed_at=? WHERE id=?`,
+		newKey, prevKey, time.Now().Unix(), id)
 }
 
 func isSynologyTarget(ctx context.Context, tr transport.Transport) bool {
@@ -539,33 +882,87 @@ func isSynologyTarget(ctx context.Context, tr transport.Transport) bool {
 	return err == nil && len(b) > 0
 }
 
-// ProbeAndSave 探测主机并更新数据库中的 status / info_json / transport_mode。
-func (r *Registry) ProbeAndSave(ctx context.Context, hostID string) (*platform.HostInfo, error) {
-	ad, h, err := r.OpenAdapter(ctx, hostID)
-	if err != nil {
-		return nil, err
-	}
-	defer ad.Close()
-	info, err := ad.Probe(ctx)
-	if err != nil {
-		r.markStatus(ctx, hostID, "offline", nil, "")
-		return nil, err
-	}
-	r.markStatus(ctx, hostID, "online", info, h.TransportMode)
-	return info, nil
+func (r *Registry) markOffline(ctx context.Context, id string) {
+	_, _ = r.st.DB.ExecContext(ctx, `UPDATE host SET status='offline' WHERE id=?`, id)
 }
 
-func (r *Registry) markStatus(ctx context.Context, id, status string, info *platform.HostInfo, mode string) {
-	now := time.Now().Unix()
-	if info != nil {
-		b, _ := json.Marshal(info)
-		_, _ = r.st.DB.ExecContext(ctx, `
-			UPDATE host SET status=?, info_json=?, last_seen_at=?,
-			                transport_mode= CASE WHEN ?<>'' THEN ? ELSE transport_mode END
-			WHERE id=?`, status, string(b), now, mode, mode, id)
-		return
+// stashDeviceToken 暂存设备令牌（一次性、10 分钟有效），返回随机 nonce。
+func (r *Registry) stashDeviceToken(token, url, user string) string {
+	nonce := newID("dt_")
+	now := time.Now()
+	r.tokMu.Lock()
+	defer r.tokMu.Unlock()
+	for k, v := range r.tokens {
+		if now.After(v.expires) {
+			delete(r.tokens, k)
+		}
 	}
-	_, _ = r.st.DB.ExecContext(ctx, `UPDATE host SET status=? WHERE id=?`, status, id)
+	r.tokens[nonce] = stashedToken{token: token, url: url, user: user, expires: now.Add(deviceTokenTTL)}
+	return nonce
+}
+
+// takeDeviceToken 取出并删除暂存令牌；过期或 DSM 地址/账号不一致时返回空串。
+func (r *Registry) takeDeviceToken(nonce, url, user string) string {
+	r.tokMu.Lock()
+	defer r.tokMu.Unlock()
+	v, ok := r.tokens[nonce]
+	if !ok {
+		return ""
+	}
+	delete(r.tokens, nonce)
+	if time.Now().After(v.expires) || v.url != url || v.user != user {
+		return ""
+	}
+	return v.token
+}
+
+func (r *Registry) withTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	tx, err := r.st.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func deleteSecrets(ctx context.Context, q dbtx, ids ...string) error {
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, err := q.ExecContext(ctx, `DELETE FROM secret WHERE id=?`, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func marshalInfo(info *platform.HostInfo) string {
+	if info == nil {
+		return ""
+	}
+	b, err := json.Marshal(info)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+func nullIfZero(v int64) any {
+	if v == 0 {
+		return nil
+	}
+	return v
 }
 
 type sshSecretPayload struct {
@@ -573,19 +970,19 @@ type sshSecretPayload struct {
 	Passphrase string `json:"passphrase,omitempty"`
 }
 
-func (r *Registry) saveSecret(ctx context.Context, plain string) (string, error) {
+func (r *Registry) saveSecret(ctx context.Context, q dbtx, plain string) (string, error) {
 	nonce, sealed, err := r.box.Seal([]byte(plain))
 	if err != nil {
 		return "", err
 	}
 	id := newID("sec_")
-	_, err = r.st.DB.ExecContext(ctx, `INSERT INTO secret(id, nonce, cipher) VALUES (?, ?, ?)`, id, nonce, sealed)
+	_, err = q.ExecContext(ctx, `INSERT INTO secret(id, nonce, cipher) VALUES (?, ?, ?)`, id, nonce, sealed)
 	return id, err
 }
 
-func (r *Registry) loadSecret(ctx context.Context, id string) (string, error) {
+func (r *Registry) loadSecret(ctx context.Context, q dbtx, id string) (string, error) {
 	var nonce, cipher []byte
-	if err := r.st.DB.QueryRowContext(ctx, `SELECT nonce, cipher FROM secret WHERE id=?`, id).Scan(&nonce, &cipher); err != nil {
+	if err := q.QueryRowContext(ctx, `SELECT nonce, cipher FROM secret WHERE id=?`, id).Scan(&nonce, &cipher); err != nil {
 		return "", err
 	}
 	plain, err := r.box.Open(nonce, cipher)

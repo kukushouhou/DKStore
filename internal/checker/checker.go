@@ -35,20 +35,33 @@ type Progress struct {
 
 // Service 负责执行检查任务与查询检测结果。
 type Service struct {
-	log    *slog.Logger
-	st     *store.Store
-	hosts  *host.Registry
-	inv    *inventory.Service
-	reg    *registry.Client
-	ign    *ignore.Service
-	ntf    *notify.Service
+	log   *slog.Logger
+	st    *store.Store
+	hosts *host.Registry
+	inv   *inventory.Service
+	reg   *registry.Client
+	ign   *ignore.Service
+	ntf   *notify.Service
 
 	mu          sync.Mutex
 	progress    Progress
 	subscribers map[chan Progress]struct{}
+	pending     *pendingRun // 运行期间收到的 Trigger，当前任务结束后补跑一次（审计 L9）
+
+	// runFn 仅供单元测试替换实际检查逻辑。
+	runFn func(ctx context.Context, trigger, hostID string, bypassCache bool)
 }
 
-// New 创建检查服务。
+type pendingRun struct {
+	trigger     string
+	hostID      string
+	bypassCache bool
+}
+
+// finalizeTimeout 是检查收尾写库使用的独立超时（审计 M6）。
+const finalizeTimeout = 5 * time.Second
+
+// New 创建检查服务，并把上次进程异常退出时残留的 running 检查记录标记为 failed（审计 M6）。
 func New(
 	log *slog.Logger,
 	st *store.Store,
@@ -58,7 +71,7 @@ func New(
 	ign *ignore.Service,
 	ntf *notify.Service,
 ) *Service {
-	return &Service{
+	s := &Service{
 		log:         log,
 		st:          st,
 		hosts:       hosts,
@@ -68,6 +81,30 @@ func New(
 		ntf:         ntf,
 		progress:    Progress{Phase: "idle"},
 		subscribers: make(map[chan Progress]struct{}),
+	}
+	s.runFn = s.runCheck
+	s.recoverInterruptedRuns()
+	return s
+}
+
+// recoverInterruptedRuns 把库中残留的 running 状态 check_run 标记为 failed。
+func (s *Service) recoverInterruptedRuns() {
+	if s.st == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), finalizeTimeout)
+	defer cancel()
+	res, err := s.st.DB.ExecContext(ctx, `
+		UPDATE check_run SET status='failed', finished_at=COALESCE(finished_at, ?)
+		WHERE status='running'`, time.Now().Unix())
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("标记残留检查记录失败", "err", err)
+		}
+		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 && s.log != nil {
+		s.log.Info("已将残留的进行中检查记录标记为失败", "count", n)
 	}
 }
 
@@ -105,10 +142,25 @@ func (s *Service) broadcast(p Progress) {
 	s.mu.Unlock()
 }
 
-// Trigger 异步启动一次检查任务（若已有任务在跑则直接返回当前进度）。
+// Trigger 异步启动一次检查任务（若已有任务在跑则挂起合并，当前任务结束后补跑一次，审计 L9）。
 func (s *Service) Trigger(trigger, hostID string, bypassCache bool) Progress {
 	s.mu.Lock()
 	if s.progress.Running {
+		if s.pending == nil {
+			s.pending = &pendingRun{
+				trigger:     trigger,
+				hostID:      hostID,
+				bypassCache: bypassCache,
+			}
+		} else {
+			if s.pending.hostID == "" || hostID == "" || s.pending.hostID != hostID {
+				s.pending.hostID = ""
+			}
+			s.pending.bypassCache = s.pending.bypassCache || bypassCache
+			if trigger != "" {
+				s.pending.trigger = trigger
+			}
+		}
 		p := s.progress
 		s.mu.Unlock()
 		return p
@@ -122,47 +174,78 @@ func (s *Service) Trigger(trigger, hostID string, bypassCache bool) Progress {
 	p := s.progress
 	s.mu.Unlock()
 
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-		defer cancel()
-		s.runCheck(ctx, trigger, hostID, bypassCache)
-	}()
+	s.launchRun(trigger, hostID, bypassCache)
 	return p
 }
 
-// RunSync 同步执行一次检查任务（用于测试或命令行验证）。
-func (s *Service) RunSync(ctx context.Context, trigger, hostID string, bypassCache bool) error {
-	s.mu.Lock()
-	if s.progress.Running {
-		s.mu.Unlock()
-		return nil
-	}
-	s.progress = Progress{Running: true, Phase: "discovering", StartedAt: time.Now().Unix()}
-	s.mu.Unlock()
-	s.runCheck(ctx, trigger, hostID, bypassCache)
-	return nil
+func (s *Service) launchRun(trigger, hostID string, bypassCache bool) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		fn := s.runFn
+		if fn == nil {
+			fn = s.runCheck
+		}
+		fn(ctx, trigger, hostID, bypassCache)
+	}()
 }
 
 type svcRow struct {
-	Key        string
-	AppKey     string
-	AppName    string
-	HostID     string
-	HostName   string
-	Name       string
-	ImageRef   string
-	ImageID    string
-	RepoDigest string
-	Platform   string
+	Key           string
+	AppKey        string
+	AppName       string
+	AppSource     string
+	HostID        string
+	HostName      string
+	HostTransport string
+	Name          string
+	ImageRef      string
+	ImageID       string
+	RepoDigest    string
+	Platform      string
 }
 
 func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, bypassCache bool) {
 	started := time.Now().Unix()
-	res, _ := s.st.DB.ExecContext(ctx, `INSERT INTO check_run(trigger, started_at, status) VALUES (?, ?, 'running')`, trigger, started)
-	var runID int64
-	if res != nil {
-		runID, _ = res.LastInsertId()
+	var (
+		runID     int64
+		total     int
+		completed bool
+	)
+	if s.st != nil {
+		res, err := s.st.DB.ExecContext(ctx, `INSERT INTO check_run(trigger, started_at, status) VALUES (?, ?, 'running')`, trigger, started)
+		if err != nil {
+			if s.log != nil {
+				s.log.Warn("创建 check_run 记录失败", "err", err)
+			}
+		} else if res != nil {
+			runID, _ = res.LastInsertId()
+		}
 	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			if s.log != nil {
+				s.log.Error("检查任务发生 panic", "recover", r)
+			}
+		}
+		if !completed {
+			if s.st != nil && runID > 0 {
+				fCtx, cancel := context.WithTimeout(context.Background(), finalizeTimeout)
+				_, _ = s.st.DB.ExecContext(fCtx, `UPDATE check_run SET finished_at=?, status='failed' WHERE id=?`, time.Now().Unix(), runID)
+				cancel()
+			}
+			s.broadcast(Progress{
+				Running:   false,
+				RunID:     runID,
+				Phase:     "done",
+				Completed: total,
+				Total:     total,
+				StartedAt: started,
+			})
+		}
+		s.finishOrRunPending()
+	}()
 
 	hosts, _ := s.hosts.List(ctx)
 	for _, h := range hosts {
@@ -177,14 +260,16 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 			StartedAt: started,
 		})
 		if _, _, err := s.inv.SyncHost(ctx, h.ID); err != nil {
-			s.log.Warn("同步主机应用失败", "host", h.Name, "err", err)
+			if s.log != nil {
+				s.log.Warn("同步主机应用失败", "host", h.Name, "err", err)
+			}
 		}
 	}
 
 	// 读取待检查的活跃服务
 	query := `
-		SELECT s.key, s.app_key, a.name, a.host_id, h.name, s.name,
-		       COALESCE(s.image_ref,''), COALESCE(s.image_id,''), COALESCE(s.repo_digest,''), COALESCE(s.platform,'linux/amd64')
+		SELECT s.key, s.app_key, a.name, COALESCE(a.source,'standalone'), a.host_id, h.name, COALESCE(h.transport,'local'), s.name,
+		       COALESCE(s.image_ref,''), COALESCE(s.image_id,''), COALESCE(s.repo_digest,''), COALESCE(s.platform,'')
 		FROM service s
 		JOIN app a ON s.app_key = a.key
 		JOIN host h ON a.host_id = h.id
@@ -196,17 +281,24 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 	}
 	rows, err := s.st.DB.QueryContext(ctx, query, args...)
 	var services []svcRow
-	if err == nil {
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("查询活跃服务列表失败", "err", err)
+		}
+	} else {
 		for rows.Next() {
 			var r svcRow
-			if rows.Scan(&r.Key, &r.AppKey, &r.AppName, &r.HostID, &r.HostName, &r.Name, &r.ImageRef, &r.ImageID, &r.RepoDigest, &r.Platform) == nil {
+			if rows.Scan(&r.Key, &r.AppKey, &r.AppName, &r.AppSource, &r.HostID, &r.HostName, &r.HostTransport, &r.Name, &r.ImageRef, &r.ImageID, &r.RepoDigest, &r.Platform) == nil {
 				services = append(services, r)
 			}
+		}
+		if err := rows.Err(); err != nil && s.log != nil {
+			s.log.Warn("遍历活跃服务列表出错", "err", err)
 		}
 		rows.Close()
 	}
 
-	total := len(services)
+	total = len(services)
 	s.broadcast(Progress{Running: true, RunID: runID, Phase: "checking", Completed: 0, Total: total, StartedAt: started})
 
 	ignoreRules, _ := s.ign.ListAll(ctx)
@@ -257,12 +349,16 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 
 	if len(newNotifyItems) > 0 {
 		if err := s.ntf.SendUpdates(ctx, newNotifyItems); err != nil {
-			s.log.Warn("发送更新推送失败", "err", err)
+			if !errors.Is(err, notify.ErrQuietHours) && s.log != nil {
+				s.log.Warn("发送更新推送失败", "err", err)
+			}
 		} else {
 			now := time.Now().Unix()
+			fCtx, cancel := context.WithTimeout(context.Background(), finalizeTimeout)
 			for _, svc := range services {
-				_, _ = s.st.DB.ExecContext(ctx, `UPDATE finding SET notified_at=? WHERE service_key=? AND notified_at IS NULL`, now, svc.Key)
+				_, _ = s.st.DB.ExecContext(fCtx, `UPDATE finding SET notified_at=? WHERE service_key=? AND notified_at IS NULL`, now, svc.Key)
 			}
+			cancel()
 		}
 	}
 
@@ -273,9 +369,12 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 		"caution": cautionCount,
 		"failed":  failedCount,
 	})
-	_, _ = s.st.DB.ExecContext(ctx, `UPDATE check_run SET finished_at=?, status='done', summary_json=? WHERE id=?`,
+	fCtx, cancel := context.WithTimeout(context.Background(), finalizeTimeout)
+	_, _ = s.st.DB.ExecContext(fCtx, `UPDATE check_run SET finished_at=?, status='done', summary_json=? WHERE id=?`,
 		finished, string(summaryBytes), runID)
+	cancel()
 
+	completed = true
 	s.broadcast(Progress{
 		Running:   false,
 		RunID:     runID,
@@ -286,9 +385,30 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 	})
 }
 
+func (s *Service) finishOrRunPending() {
+	s.mu.Lock()
+	next := s.pending
+	s.pending = nil
+	if next == nil {
+		s.progress.Running = false
+		s.mu.Unlock()
+		return
+	}
+	s.progress = Progress{
+		Running:   true,
+		Phase:     "discovering",
+		StartedAt: time.Now().Unix(),
+	}
+	s.mu.Unlock()
+	s.launchRun(next.trigger, next.hostID, next.bypassCache)
+}
+
 func (s *Service) checkSingleService(ctx context.Context, svc svcRow, bypassCache bool) (out classify.Output, errKind, errMsg string, curMatched []string) {
+	if svc.AppSource == "vendor_managed" {
+		return classify.Output{Kind: classify.KindUncomparable}, "", "", nil
+	}
 	ref, err := version.ParseImageRef(svc.ImageRef)
-	if err != nil || strings.HasPrefix(svc.ImageRef, "sha256:") || (svc.RepoDigest == "" && !ref.IsPinnedDigest()) {
+	if err != nil || strings.HasPrefix(svc.ImageRef, "sha256:") || (svc.RepoDigest == "" && svc.ImageID == "" && !ref.IsPinnedDigest()) {
 		return classify.Output{Kind: classify.KindUncomparable}, "", "", nil
 	}
 
@@ -296,6 +416,10 @@ func (s *Service) checkSingleService(ctx context.Context, svc svcRow, bypassCach
 	if err != nil {
 		var re *registry.RegistryError
 		if errors.As(err, &re) {
+			// 仅当远端明确返回 404 且本地无 RepoDigest（如本地构建/导入镜像）时，才归为 uncomparable（审计 M3）
+			if re.Kind == registry.ErrNotFound && svc.RepoDigest == "" && !ref.IsPinnedDigest() {
+				return classify.Output{Kind: classify.KindUncomparable}, "", "", nil
+			}
 			errKind = string(re.Kind)
 			errMsg = re.Message
 		} else {
@@ -319,14 +443,15 @@ func (s *Service) checkSingleService(ctx context.Context, svc svcRow, bypassCach
 	}
 
 	out = classify.Evaluate(classify.Input{
-		Ref:                ref,
-		LocalRepoDigest:    svc.RepoDigest,
-		LocalImageID:       svc.ImageID,
-		RemoteManifest:     mf,
-		CurrentMatchedTags: curMatched,
-		RemoteMatchedTags:  remMatched,
-		CandidateTags:      recentTags,
-		HostPlatform:       svc.Platform,
+		Ref:                 ref,
+		LocalRepoDigest:     svc.RepoDigest,
+		LocalImageID:        svc.ImageID,
+		RemoteManifest:      mf,
+		CurrentMatchedTags:  curMatched,
+		RemoteMatchedTags:   remMatched,
+		CandidateTags:       recentTags,
+		HostPlatform:        svc.Platform,
+		AllowImageIDCompare: svc.HostTransport == "dsm_api",
 	})
 	return out, "", "", curMatched
 }

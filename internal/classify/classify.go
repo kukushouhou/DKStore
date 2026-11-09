@@ -37,7 +37,10 @@ type Input struct {
 	RemoteMatchedTags  []string
 	CandidateTags      []registry.TagDigestEntry
 	HostPlatform       string
-	Lang               i18n.Lang
+	// AllowImageIDCompare 仅在主机传输方式为群晖 dsm_api（拿不到 RepoDigest）时为 true，
+	// 允许在无 RepoDigest 时用本地 ImageID 与远端对应平台的 ConfigDigest 比对。
+	AllowImageIDCompare bool
+	Lang                i18n.Lang
 }
 
 // Output 是分类器输出的 Finding 结果。
@@ -91,20 +94,36 @@ func Evaluate(in Input) Output {
 		return out
 	}
 
-	// 2. 本地无 RepoDigest（如本地构建镜像或 docker load 导入）
-	if in.LocalRepoDigest == "" {
+	// 2. 本地无 RepoDigest 时，只有来源为群晖 dsm_api（AllowImageIDCompare）且远端取到了对应平台的 ConfigDigest，
+	//    才允许用 ImageID 与 ConfigDigest 比对；其他来源（本地构建镜像、docker load 导入等）一律无法比较（审计 M2）
+	localRepoDigest := registry.NormalizeDigest(in.LocalRepoDigest)
+	localImageID := registry.NormalizeDigest(in.LocalImageID)
+	var remoteRepoDigest, remotePlatformDigest, remoteConfigDigest string
+	if in.RemoteManifest != nil {
+		remoteRepoDigest = registry.NormalizeDigest(in.RemoteManifest.RepoDigest)
+		remotePlatformDigest = registry.NormalizeDigest(in.RemoteManifest.PlatformDigest)
+		remoteConfigDigest = registry.NormalizeDigest(in.RemoteManifest.ConfigDigest)
+	}
+	canCompareImageID := in.AllowImageIDCompare && localImageID != "" && remoteConfigDigest != ""
+	if localRepoDigest == "" && !canCompareImageID {
 		out.Kind = KindUncomparable
 		out.Links = resolveLinks(ruleSet, in.Ref, dbRule, "")
 		return out
 	}
 
-	// 3. 判断当前标签是否有 Digest 变化（含多架构平台级复核，实施文档 §5.2-A）
+	// 3. 判断当前标签是否有 Digest 变化（含多架构平台级复核及纯 DSM WebAPI 下的 ConfigDigest/ImageID 比对，实施文档 §5.2-A）
 	digestChanged := false
-	if in.RemoteManifest != nil && in.RemoteManifest.RepoDigest != "" {
-		if in.RemoteManifest.RepoDigest != in.LocalRepoDigest {
-			samePlatform := (in.RemoteManifest.PlatformDigest != "" && in.RemoteManifest.PlatformDigest == in.LocalRepoDigest) ||
-				(in.RemoteManifest.ConfigDigest != "" && in.RemoteManifest.ConfigDigest == in.LocalImageID)
-			if !samePlatform {
+	if in.RemoteManifest != nil {
+		if localRepoDigest != "" && remoteRepoDigest != "" {
+			if remoteRepoDigest != localRepoDigest {
+				samePlatform := (remotePlatformDigest != "" && remotePlatformDigest == localRepoDigest) ||
+					(remoteConfigDigest != "" && localImageID != "" && remoteConfigDigest == localImageID)
+				if !samePlatform {
+					digestChanged = true
+				}
+			}
+		} else if localRepoDigest == "" && canCompareImageID {
+			if remoteConfigDigest != localImageID {
 				digestChanged = true
 			}
 		}
@@ -189,7 +208,7 @@ func Evaluate(in Input) Output {
 				out.TargetVersion = "@new_digest"
 			}
 			out.TargetRef = in.Ref.WithTag(in.Ref.Tag)
-			out.TargetDigest = in.RemoteManifest.RepoDigest
+			out.TargetDigest = remoteRepoDigest
 			out.TargetTags = in.RemoteMatchedTags
 			if curDisplay != "" && remoteBest != "" {
 				pCur := version.ParseTag(curDisplay)
@@ -252,7 +271,7 @@ func Evaluate(in Input) Output {
 			out.TargetVersion = "@new_digest"
 		}
 		out.TargetRef = in.Ref.WithTag(in.Ref.Tag)
-		out.TargetDigest = in.RemoteManifest.RepoDigest
+		out.TargetDigest = remoteRepoDigest
 		out.TargetTags = in.RemoteMatchedTags
 		if latestOverall != nil && latestOverall.Raw != in.Ref.Tag {
 			out.Hint = "higher_tag:" + latestOverall.Raw

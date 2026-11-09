@@ -3,10 +3,12 @@ import { useUIStore } from '../store/ui'
 export class ApiError extends Error {
   status: number
   code: string
-  constructor(status: number, code: string, message: string) {
+  testResult?: HostTestResult
+  constructor(status: number, code: string, message: string, testResult?: HostTestResult) {
     super(message)
     this.status = status
     this.code = code
+    this.testResult = testResult
   }
 }
 
@@ -25,17 +27,20 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const body = await res.json().catch(() => null)
   if (!res.ok) {
     const err = body?.error
-    throw new ApiError(res.status, err?.code ?? 'http_error', err?.message ?? `HTTP ${res.status}`)
+    throw new ApiError(res.status, err?.code ?? 'http_error', err?.message ?? `HTTP ${res.status}`, body?.testResult)
   }
   return body as T
 }
 
-export interface Health {
-  status: string
-  version: string
-  commit: string
-  schemaVersion: number
-  time: number
+/** 访问模式：device=宿主设备管理员登录态；password=DKStore 自有密码；setup_required=必须先设置密码。 */
+export type AuthMode = 'device' | 'password' | 'setup_required'
+
+export interface AuthStatus {
+  mode: AuthMode
+  authenticated: boolean
+  installMode: string
+  /** 宿主登录态核验失败原因（已本地化），仅群晖/OpenWrt 套件安装时可能给出。 */
+  deviceAuthHint?: string
 }
 
 export interface HostInfo {
@@ -50,12 +55,18 @@ export interface HostItem {
   id: string
   name: string
   kind: string
-  transport: 'local' | 'ssh'
+  transport: 'local' | 'ssh' | 'dsm_api'
   address?: string
   port?: number
   sshUser?: string
   sshAuth?: 'password' | 'key'
   sshHostKey?: string
+  /** 指纹曾自动更新时的旧指纹（可能重装过系统） */
+  sshPrevHostKey?: string
+  /** 指纹自动更新的时间（Unix 秒），非空时卡片提示指纹已变化 */
+  sshHostKeyChangedAt?: number
+  dsmUrl?: string
+  dsmUser?: string
   transportMode?: string
   info?: HostInfo
   status: 'online' | 'offline' | 'unknown'
@@ -65,21 +76,31 @@ export interface HostItem {
 export interface HostInput {
   name: string
   kind: string
-  transport: 'local' | 'ssh'
+  transport: 'local' | 'ssh' | 'dsm_api'
   address?: string
   port?: number
   sshUser?: string
   sshAuth?: 'password' | 'key'
   sshSecret?: string
   sshPassphrase?: string
-  sshHostKey?: string
+  dsmUrl?: string
+  dsmUser?: string
+  dsmSecret?: string
+  dsmOtpCode?: string
+  /** 测试连接返回的 DSM 设备令牌暂存凭证，保存时带回以避免同一动态码被用两次 */
+  deviceTokenNonce?: string
+  /** 仅测试连接使用：编辑已有设备时复用其已保存的密码 / 私钥 */
+  hostId?: string
 }
 
 export interface HostTestResult {
   ok: boolean
+  needOtp?: boolean
   steps: { step: string; status: 'ok' | 'error' | 'skipped'; message: string }[]
   presentedHostKey?: string
-  hostKeyTrusted: boolean
+  hostKeyChanged?: boolean
+  previousHostKey?: string
+  deviceTokenNonce?: string
   transportMode?: string
   info?: HostInfo
 }
@@ -270,11 +291,14 @@ export interface SelfUpdateStatus {
 }
 
 export const api = {
-  health: () => request<Health>('/health'),
-  authStatus: () => request<{ passwordEnabled: boolean; authenticated: boolean }>('/auth/status'),
+  authStatus: () => request<AuthStatus>('/auth/status'),
   login: (password: string) =>
     request<{ ok: boolean }>('/auth/login', { method: 'POST', body: JSON.stringify({ password }) }),
   logout: () => request<{ ok: boolean }>('/auth/logout', { method: 'POST' }),
+  /** 首次设置管理员密码（仅未设置密码时可用），成功后直接登录。 */
+  setupPassword: (password: string) =>
+    request<{ ok: boolean }>('/auth/setup', { method: 'POST', body: JSON.stringify({ password }) }),
+  /** 修改管理员密码（必须已设置密码并提供旧密码）。 */
   setPassword: (oldPassword: string, newPassword: string) =>
     request<{ ok: boolean }>('/auth/password', {
       method: 'POST',
@@ -331,7 +355,6 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ serviceKeys }),
     }),
-  getUpdateJob: (id: string) => request<UpdateJobItem>(`/updates/${encodeURIComponent(id)}`),
   verifyRollback: (id: string) =>
     request<RollbackVerifyResult>(`/updates/${encodeURIComponent(id)}/rollback-check`),
   executeRollback: (id: string) =>

@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/platform"
 	"github.com/kukushouhou/DKStore/internal/transport"
 	"gopkg.in/yaml.v3"
@@ -46,7 +47,7 @@ type dockerInfoResp struct {
 func (a *Adapter) Probe(ctx context.Context) (*platform.HostInfo, error) {
 	var info dockerInfoResp
 	if err := a.getJSON(ctx, "/info", &info); err != nil {
-		return nil, fmt.Errorf("读取 Docker /info 失败: %w", err)
+		return nil, i18n.NewEngineError(i18n.MsgDockerProbeFailed, i18n.DetailOf(err))
 	}
 	osName, arch, variant := normalizePlatform(info.OSType, info.Architecture)
 	return &platform.HostInfo{
@@ -91,17 +92,13 @@ type containerInspect struct {
 type imageInspect struct {
 	ID          string   `json:"Id"`
 	RepoDigests []string `json:"RepoDigests"`
-	RepoTags    []string `json:"RepoTags"`
-	Os          string   `json:"Os"`
-	Architecture string  `json:"Architecture"`
-	Variant     string   `json:"Variant"`
 }
 
 // ListApps 列出主机上的全部 Compose 项目与独立容器。
 func (a *Adapter) ListApps(ctx context.Context) ([]platform.App, error) {
 	var list []containerSummary
 	if err := a.getJSON(ctx, "/containers/json?all=1", &list); err != nil {
-		return nil, fmt.Errorf("列出容器失败: %w", err)
+		return nil, i18n.NewEngineError(i18n.MsgDockerListFailed, i18n.DetailOf(err))
 	}
 
 	imageCache := make(map[string]*imageInspect)

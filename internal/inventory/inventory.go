@@ -4,13 +4,13 @@ package inventory
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"time"
 
 	"github.com/kukushouhou/DKStore/internal/host"
 	"github.com/kukushouhou/DKStore/internal/platform"
 	"github.com/kukushouhou/DKStore/internal/store"
+	"github.com/kukushouhou/DKStore/internal/version"
 )
 
 // Service 管理应用与服务的持久化库存。
@@ -48,10 +48,7 @@ func (s *Service) SyncHost(ctx context.Context, hostID string) ([]platform.App, 
 
 func (s *Service) saveHostInventory(ctx context.Context, hostID string, info *platform.HostInfo, apps []platform.App) error {
 	now := time.Now().Unix()
-	platStr := fmt.Sprintf("%s/%s", info.OS, info.Arch)
-	if info.Variant != "" {
-		platStr += "/" + info.Variant
-	}
+	platStr := formatHostPlatform(info)
 
 	infoBytes, _ := json.Marshal(info)
 	tx, err := s.st.DB.BeginTx(ctx, nil)
@@ -148,15 +145,65 @@ func (s *Service) saveHostInventory(ctx context.Context, hostID string, info *pl
 	return tx.Commit()
 }
 
-// pickRepoDigest 从镜像的 RepoDigests（如 ["nginx@sha256:abc..."]）中提取 sha256:... 部分。
+// pickRepoDigest 从镜像的 RepoDigests（如 ["nginx@sha256:abc..."]）中提取 sha256:... 部分，
+// 优先选择与当前镜像引用同一仓库的条目（审计 L5），找不到时退回第一个有效摘要。
 func pickRepoDigest(imageRef string, repoDigests []string) string {
+	if _, dig, ok := strings.Cut(imageRef, "@"); ok && strings.HasPrefix(dig, "sha256:") {
+		// 引用本身固定了摘要时，优先使用 RepoDigests 中与之相同的条目
+		for _, rd := range repoDigests {
+			if _, d, ok := strings.Cut(rd, "@"); ok && d == dig {
+				return d
+			}
+		}
+	}
+	wantRepo := repoKey(imageRef)
+	first := ""
 	for _, rd := range repoDigests {
-		if _, dig, ok := strings.Cut(rd, "@"); ok && strings.HasPrefix(dig, "sha256:") {
+		name, dig, ok := strings.Cut(rd, "@")
+		if !ok || !strings.HasPrefix(dig, "sha256:") {
+			continue
+		}
+		if first == "" {
+			first = dig
+		}
+		if wantRepo != "" && repoKey(name) == wantRepo {
 			return dig
 		}
+	}
+	if first != "" {
+		return first
 	}
 	if _, dig, ok := strings.Cut(imageRef, "@"); ok && strings.HasPrefix(dig, "sha256:") {
 		return dig
 	}
 	return ""
+}
+
+// repoKey 返回 "registry/repository" 归一化键，解析失败返回空。
+func repoKey(ref string) string {
+	pr, err := version.ParseImageRef(ref)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(pr.Registry + "/" + pr.Repository)
+}
+
+// formatHostPlatform 生成 service.platform 字符串；架构为空或未知时返回空串，检测时跳过平台级比对（不默认 amd64，审计 M2/H5）。
+func formatHostPlatform(info *platform.HostInfo) string {
+	if info == nil {
+		return ""
+	}
+	osName := strings.ToLower(strings.TrimSpace(info.OS))
+	arch := strings.ToLower(strings.TrimSpace(info.Arch))
+	if arch == "" || arch == "unknown" {
+		return ""
+	}
+	if osName == "" {
+		osName = "linux"
+	}
+	p := osName + "/" + arch
+	if v := strings.ToLower(strings.TrimSpace(info.Variant)); v != "" && !(arch == "arm64" && v == "v8") {
+		p += "/" + v
+	}
+	return p
 }

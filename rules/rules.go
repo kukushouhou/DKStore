@@ -143,19 +143,19 @@ func (s *Set) IsRollingTag(tag string) bool {
 }
 
 // ResolveLinks 根据 registry 与 repository 生成官方仓库和更新说明链接。
-func (s *Set) ResolveLinks(registry, repository, targetVersion string) RepoLink {
+func (s *Set) ResolveLinks(registry, repository, _ string) RepoLink {
 	repoLower := strings.ToLower(repository)
 	fullLower := strings.ToLower(registry + "/" + repository)
 	if link, ok := s.Links[fullLower]; ok {
-		return enrichReleaseTag(link, targetVersion)
+		return link
 	}
 	if link, ok := s.Links[repoLower]; ok {
-		return enrichReleaseTag(link, targetVersion)
+		return link
 	}
 	switch strings.ToLower(registry) {
 	case "ghcr.io":
 		gh := "https://github.com/" + repository
-		return enrichReleaseTag(RepoLink{Repo: gh, Releases: gh + "/releases"}, targetVersion)
+		return RepoLink{Repo: gh, Releases: gh + "/releases"}
 	case "lscr.io":
 		parts := strings.SplitN(repository, "/", 2)
 		if len(parts) == 2 && parts[0] == "linuxserver" {
@@ -172,8 +172,4 @@ func (s *Set) ResolveLinks(registry, repository, targetVersion string) RepoLink 
 		return RepoLink{Repo: "https://hub.docker.com/r/" + repository}
 	}
 	return RepoLink{}
-}
-
-func enrichReleaseTag(link RepoLink, ver string) RepoLink {
-	return link
 }

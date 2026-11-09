@@ -5,11 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/platform"
+	"github.com/kukushouhou/DKStore/internal/registry"
 	"github.com/kukushouhou/DKStore/internal/version"
 )
 
@@ -75,7 +75,7 @@ func (s *Service) GetJob(ctx context.Context, id string, lang i18n.Lang) (*Job, 
 	}
 	defer rows.Close()
 	if !rows.Next() {
-		return nil, fmt.Errorf("未找到更新记录: %s", id)
+		return nil, i18n.NewEngineError(i18n.MsgUpdateJobNotFound, id)
 	}
 	j, err := scanJobRow(rows, lang)
 	if err != nil {
@@ -90,10 +90,7 @@ func (s *Service) VerifyRollback(ctx context.Context, jobID string, lang i18n.La
 	if err != nil {
 		return nil, err
 	}
-	warn := "注意：回退容器镜像不等于回退业务数据库或持久化卷数据结构；若新版已执行不可逆的数据迁移，请先确认数据兼容性。"
-	if lang == i18n.EnUS {
-		warn = "Note: Rolling back the container image does not roll back persistent database schemas or volume data."
-	}
+	warn := i18n.EngineMessage(lang, i18n.MsgUpdateRollbackWarning)
 
 	if !j.RollbackEligible || j.RollbackRef == "" {
 		code := j.RollbackReason
@@ -107,14 +104,11 @@ func (s *Service) VerifyRollback(ctx context.Context, jobID string, lang i18n.La
 		}, nil
 	}
 
-	// 查询主机平台架构
+	// 查询主机平台架构（审计 L12：未记录平台时不盲目默认 linux/amd64）
 	var plat string
-	_ = s.st.DB.QueryRowContext(ctx, `SELECT COALESCE(platform,'linux/amd64') FROM service WHERE key=?`, j.ServiceKey).Scan(&plat)
-	if plat == "" {
-		plat = "linux/amd64"
-	}
+	_ = s.st.DB.QueryRowContext(ctx, `SELECT COALESCE(platform,'') FROM service WHERE key=?`, j.ServiceKey).Scan(&plat)
 
-	// 1. 先检查远端仓库中该精确版本标签是否仍指向历史旧 Digest
+	// 1. 先检查远端仓库中该精确版本标签是否仍指向历史旧 Digest（审计 M12）
 	ref, err := version.ParseImageRef(j.RollbackRef)
 	if err != nil {
 		return &RollbackVerifyResult{
@@ -127,9 +121,16 @@ func (s *Service) VerifyRollback(ctx context.Context, jobID string, lang i18n.La
 	remoteMatches := false
 	mf, mfErr := s.reg.CheckManifest(ctx, ref, plat, true)
 	if mfErr == nil && mf != nil {
-		if j.OldRepoDigest == "" ||
-			mf.RepoDigest == j.OldRepoDigest ||
-			(mf.PlatformDigest != "" && mf.PlatformDigest == j.OldRepoDigest) {
+		oldDigest := registry.NormalizeDigest(j.OldRepoDigest)
+		oldImgID := registry.NormalizeDigest(j.OldImageID)
+		remDigest := registry.NormalizeDigest(mf.RepoDigest)
+		remPlatDigest := registry.NormalizeDigest(mf.PlatformDigest)
+		remCfgDigest := registry.NormalizeDigest(mf.ConfigDigest)
+		if oldDigest != "" {
+			if remDigest == oldDigest || (remPlatDigest != "" && remPlatDigest == oldDigest) {
+				remoteMatches = true
+			}
+		} else if oldImgID != "" && remCfgDigest != "" && remCfgDigest == oldImgID {
 			remoteMatches = true
 		}
 	}
@@ -181,6 +182,23 @@ func (s *Service) ExecuteRollback(ctx context.Context, jobID string, lang i18n.L
 		return nil, err
 	}
 
+	// 审计 M4：在同一次 s.mu.Lock() 内检查并占位写入 activeJobs
+	s.mu.Lock()
+	if active, ok := s.activeJobs[orig.ServiceKey]; ok && (active.Status == "running" || active.Status == "queued") {
+		s.mu.Unlock()
+		return &active, nil
+	}
+	s.activeJobs[orig.ServiceKey] = Job{ServiceKey: orig.ServiceKey, Status: "queued", Phase: "precheck"}
+	s.mu.Unlock()
+
+	cleanupPlaceholder := func() {
+		s.mu.Lock()
+		if cur, ok := s.activeJobs[orig.ServiceKey]; ok && cur.ID == "" {
+			delete(s.activeJobs, orig.ServiceKey)
+		}
+		s.mu.Unlock()
+	}
+
 	var curImageRef, curImageID, curRepoDigest string
 	_ = s.st.DB.QueryRowContext(ctx, `
 		SELECT COALESCE(image_ref,''), COALESCE(image_id,''), COALESCE(repo_digest,'')
@@ -214,6 +232,7 @@ func (s *Service) ExecuteRollback(ctx context.Context, jobID string, lang i18n.L
 		StartedAt:          now,
 	}
 	if err := s.insertJob(ctx, rbJob); err != nil {
+		cleanupPlaceholder()
 		return nil, err
 	}
 	s.broadcast(rbJob)

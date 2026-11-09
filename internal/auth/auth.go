@@ -1,4 +1,4 @@
-// Package auth 实现轻量的个人/家庭管理员密码保护与 Cookie 会话（实施文档 §10.1 / §15）。
+// Package auth 实现轻量的个人/家庭访问保护：设备登录优先，接不上就用 DKStore 自有密码（实施文档 §10.1 / §10.1.1）。
 package auth
 
 import (
@@ -12,47 +12,132 @@ import (
 	"net/http"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	"github.com/kukushouhou/DKStore/internal/hostauth"
 	"github.com/kukushouhou/DKStore/internal/store"
 )
 
 const (
 	cookieName     = "dkstore_session"
 	passwordSetKey = "admin_password_hash"
+
+	// MinPasswordLen 是管理员密码的最小长度（字符数）。
+	MinPasswordLen = 6
 )
 
-// Service 管理管理员密码与登录会话。
-// 若用户尚未设置管理员密码（passwordEnabled=false），默认允许本机/局域网直接访问并在界面提示可设置密码；
-// 一旦设置了密码，则所有 API 请求必须携带有效会话 Cookie。
+// 访问模式（GET /auth/status 的 mode 字段）。
+const (
+	ModeDevice        = "device"
+	ModePassword      = "password"
+	ModeSetupRequired = "setup_required"
+)
+
+// 错误（其 Error() 即 API 错误码）。
+var (
+	ErrInvalidCredentials = errors.New("invalid_credentials")
+	ErrPasswordSet        = errors.New("password_already_set")
+	ErrSetupRequired      = errors.New("setup_required")
+	ErrPasswordTooShort   = errors.New("password_too_short")
+)
+
+// HostVerifier 核验宿主设备（群晖 DSM / OpenWrt LuCI）的管理员登录态。
+type HostVerifier interface {
+	InstallMode() string
+	Supported() bool
+	Verify(ctx context.Context, r *http.Request) hostauth.Result
+}
+
+// Service 管理管理员密码、登录会话与宿主登录态复用。
+//
+// 判定规则：
+//   - 已设置 DKStore 密码 → 统一走密码会话；
+//   - 未设置密码且为群晖/OpenWrt 套件安装、能核验到宿主管理员登录态 → 设备登录直接放行；
+//   - 其他情况 → 必须先设置密码（setup_required），所有业务接口拒绝访问。
 type Service struct {
 	st       *store.Store
+	host     HostVerifier
 	mu       sync.RWMutex
 	sessions map[string]time.Time
+
+	// getHash/setHash 可在测试中替换；默认读写 setting 表。
+	getHash func(ctx context.Context) string
+	setHash func(ctx context.Context, hash string, onlyIfAbsent bool) (bool, error)
 }
 
-// New 创建认证服务。
-func New(st *store.Store) *Service {
-	return &Service{
+// StatusInfo 是 GET /auth/status 的结果。
+type StatusInfo struct {
+	Mode          string
+	Authenticated bool
+	InstallMode   string
+	HostUser      string
+	// HintCode 为宿主登录态核验失败的原因码（仅群晖/OpenWrt 套件安装且 setup_required 时给出）。
+	HintCode string
+}
+
+// New 创建认证服务。host 为 nil 时按运行环境自动构建宿主核验器。
+func New(st *store.Store, host HostVerifier) *Service {
+	if host == nil {
+		host = hostauth.New("", nil, nil)
+	}
+	s := &Service{
 		st:       st,
+		host:     host,
 		sessions: make(map[string]time.Time),
 	}
+	s.getHash = s.dbGetHash
+	s.setHash = s.dbSetHash
+	return s
 }
 
-// Status 返回当前是否已启用密码保护，以及当前请求是否已认证通过。
-func (s *Service) Status(ctx context.Context, r *http.Request) (passwordEnabled, authenticated bool) {
-	hash := s.getPasswordHash(ctx)
-	if hash == "" {
-		return false, true
+// PasswordSet 返回是否已设置 DKStore 自有密码。
+func (s *Service) PasswordSet(ctx context.Context) bool {
+	return s.getHash(ctx) != ""
+}
+
+// Status 计算当前请求的访问模式与认证状态。
+func (s *Service) Status(ctx context.Context, r *http.Request) StatusInfo {
+	info := StatusInfo{InstallMode: s.host.InstallMode()}
+	if s.PasswordSet(ctx) {
+		info.Mode = ModePassword
+		info.Authenticated = s.hasSession(r)
+		return info
 	}
-	return true, s.IsAuthenticated(ctx, r)
+	if s.host.Supported() {
+		res := s.host.Verify(ctx, r)
+		if res.OK {
+			info.Mode = ModeDevice
+			info.Authenticated = true
+			info.HostUser = res.User
+			return info
+		}
+		info.HintCode = res.Reason
+	}
+	info.Mode = ModeSetupRequired
+	return info
 }
 
-// IsAuthenticated 判断请求是否通过认证。
+// Authorize 判断请求能否访问业务接口；不通过时返回 API 错误码（unauthorized / setup_required）。
+func (s *Service) Authorize(ctx context.Context, r *http.Request) (ok bool, code string) {
+	if s.PasswordSet(ctx) {
+		if s.hasSession(r) {
+			return true, ""
+		}
+		return false, "unauthorized"
+	}
+	if s.host.Supported() && s.host.Verify(ctx, r).OK {
+		return true, ""
+	}
+	return false, ErrSetupRequired.Error()
+}
+
+// IsAuthenticated 判断请求是否通过认证（等价于 Authorize 的 ok）。
 func (s *Service) IsAuthenticated(ctx context.Context, r *http.Request) bool {
-	hash := s.getPasswordHash(ctx)
-	if hash == "" {
-		return true
-	}
+	ok, _ := s.Authorize(ctx, r)
+	return ok
+}
+
+func (s *Service) hasSession(r *http.Request) bool {
 	c, err := r.Cookie(cookieName)
 	if err != nil || c.Value == "" {
 		return false
@@ -63,38 +148,66 @@ func (s *Service) IsAuthenticated(ctx context.Context, r *http.Request) bool {
 	return ok && time.Now().Before(exp)
 }
 
-// Login 验证密码并下发 HttpOnly Cookie。
+// Login 验证密码并下发 HttpOnly Cookie。未设置密码时返回 ErrSetupRequired。
 func (s *Service) Login(ctx context.Context, w http.ResponseWriter, password string) error {
-	hash := s.getPasswordHash(ctx)
+	hash := s.getHash(ctx)
 	if hash == "" {
-		return nil
+		return ErrSetupRequired
 	}
 	if !verifyPassword(password, hash) {
-		return errors.New("invalid_credentials")
+		return ErrInvalidCredentials
 	}
 	s.issueCookie(w)
 	return nil
 }
 
-// SetPassword 设置或修改管理员密码（若已有密码需验证 oldPassword；newPassword 为空表示关闭密码保护）。
-func (s *Service) SetPassword(ctx context.Context, w http.ResponseWriter, oldPassword, newPassword string) error {
-	curHash := s.getPasswordHash(ctx)
-	if curHash != "" && !verifyPassword(oldPassword, curHash) {
-		return errors.New("invalid_credentials")
-	}
-	if newPassword == "" {
-		_, err := s.st.DB.ExecContext(ctx, `DELETE FROM setting WHERE k=?`, passwordSetKey)
+// Setup 首次设置管理员密码并直接登录；已设置密码时返回 ErrPasswordSet。
+func (s *Service) Setup(ctx context.Context, w http.ResponseWriter, password string) error {
+	if err := checkPassword(password); err != nil {
 		return err
 	}
-	newHash := hashPassword(newPassword)
-	_, err := s.st.DB.ExecContext(ctx, `
-		INSERT INTO setting(k, v) VALUES (?, ?)
-		ON CONFLICT(k) DO UPDATE SET v=excluded.v`,
-		passwordSetKey, newHash)
+	if s.PasswordSet(ctx) {
+		return ErrPasswordSet
+	}
+	ok, err := s.setHash(ctx, hashPassword(password), true)
 	if err != nil {
 		return err
 	}
+	if !ok {
+		return ErrPasswordSet
+	}
 	s.issueCookie(w)
+	return nil
+}
+
+// SetPassword 修改管理员密码：必须已设置密码并验证旧密码。
+// 修改成功后清除所有已有会话并为当前请求重新签发会话。
+// 未设置密码时返回 ErrSetupRequired（首次设置统一走 Setup）。
+func (s *Service) SetPassword(ctx context.Context, w http.ResponseWriter, oldPassword, newPassword string) error {
+	curHash := s.getHash(ctx)
+	if curHash == "" {
+		return ErrSetupRequired
+	}
+	if !verifyPassword(oldPassword, curHash) {
+		return ErrInvalidCredentials
+	}
+	if err := checkPassword(newPassword); err != nil {
+		return err
+	}
+	if _, err := s.setHash(ctx, hashPassword(newPassword), false); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.sessions = make(map[string]time.Time)
+	s.mu.Unlock()
+	s.issueCookie(w)
+	return nil
+}
+
+func checkPassword(pw string) error {
+	if utf8.RuneCountInString(pw) < MinPasswordLen {
+		return ErrPasswordTooShort
+	}
 	return nil
 }
 
@@ -121,6 +234,12 @@ func (s *Service) issueCookie(w http.ResponseWriter) {
 	tok := hex.EncodeToString(b)
 	exp := time.Now().Add(30 * 24 * time.Hour)
 	s.mu.Lock()
+	now := time.Now()
+	for k, e := range s.sessions {
+		if now.After(e) {
+			delete(s.sessions, k)
+		}
+	}
 	s.sessions[tok] = exp
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{
@@ -133,10 +252,24 @@ func (s *Service) issueCookie(w http.ResponseWriter) {
 	})
 }
 
-func (s *Service) getPasswordHash(ctx context.Context) string {
+func (s *Service) dbGetHash(ctx context.Context) string {
 	var h string
 	_ = s.st.DB.QueryRowContext(ctx, `SELECT v FROM setting WHERE k=?`, passwordSetKey).Scan(&h)
 	return h
+}
+
+func (s *Service) dbSetHash(ctx context.Context, hash string, onlyIfAbsent bool) (bool, error) {
+	q := `INSERT INTO setting(k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`
+	if onlyIfAbsent {
+		// 并发首次设置时只有一个请求能成功写入
+		q = `INSERT INTO setting(k, v) VALUES (?, ?) ON CONFLICT(k) DO NOTHING`
+	}
+	res, err := s.st.DB.ExecContext(ctx, q, passwordSetKey, hash)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
 func hashPassword(pw string) string {

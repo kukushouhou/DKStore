@@ -57,7 +57,7 @@ func run() error {
 		return err
 	}
 
-	authSvc := auth.New(st)
+	authSvc := auth.New(st, nil) // nil：按运行环境自动判定安装方式并构建宿主登录态核验器
 	hostReg := host.NewRegistry(st, box)
 	_ = hostReg.EnsureLocalHost(ctx)
 

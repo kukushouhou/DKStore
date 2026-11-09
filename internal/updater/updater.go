@@ -59,6 +59,9 @@ type Job struct {
 	FinishedAt         int64                 `json:"finishedAt,omitempty"`
 }
 
+// finalizeTimeout 是更新任务收尾写库使用的独立超时（审计 M6）。
+const finalizeTimeout = 5 * time.Second
+
 // Service 管理更新任务与历史回退。
 type Service struct {
 	log   *slog.Logger
@@ -70,9 +73,10 @@ type Service struct {
 	mu          sync.Mutex
 	activeJobs  map[string]Job // key: serviceKey -> running Job
 	subscribers map[chan Job]struct{}
+	appLocks    sync.Map // key: appKey -> *sync.Mutex（按 Compose 项目串行化更新，审计 M4）
 }
 
-// New 创建 Updater 服务。
+// New 创建 Updater 服务，并将上次异常退出残留的 running/queued 任务标记为 failed（审计 M6）。
 func New(
 	log *slog.Logger,
 	st *store.Store,
@@ -80,7 +84,7 @@ func New(
 	inv *inventory.Service,
 	reg *registry.Client,
 ) *Service {
-	return &Service{
+	s := &Service{
 		log:         log,
 		st:          st,
 		hosts:       hosts,
@@ -89,6 +93,41 @@ func New(
 		activeJobs:  make(map[string]Job),
 		subscribers: make(map[chan Job]struct{}),
 	}
+	s.recoverInterruptedJobs()
+	return s
+}
+
+func (s *Service) recoverInterruptedJobs() {
+	if s.st == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), finalizeTimeout)
+	defer cancel()
+	res, err := s.st.DB.ExecContext(ctx, `
+		UPDATE update_job
+		SET status='failed', phase='done', error_code='interrupted', error_msg=?, finished_at=COALESCE(finished_at, ?)
+		WHERE status IN ('running', 'queued')`,
+		i18n.EngineDetail(i18n.MsgUpdateInterrupted), time.Now().Unix(),
+	)
+	if err != nil {
+		if s.log != nil {
+			s.log.Warn("标记残留更新任务失败", "err", err)
+		}
+		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 && s.log != nil {
+		s.log.Info("已将残留的进行中更新任务标记为失败", "count", n)
+	}
+}
+
+func (s *Service) lockApp(appKey string) func() {
+	if appKey == "" {
+		return func() {}
+	}
+	v, _ := s.appLocks.LoadOrStore(appKey, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // Subscribe 订阅实时更新任务进度事件（SSE）。
@@ -131,7 +170,7 @@ func (s *Service) broadcast(j Job) {
 // StartUpdates 为用户指定的 1 个或多个服务启动升级任务（严禁隐式附带未选中的数据库或依赖服务，立项文档 §3.3 / §7.2）。
 func (s *Service) StartUpdates(ctx context.Context, serviceKeys []string, lang i18n.Lang) ([]Job, error) {
 	if len(serviceKeys) == 0 {
-		return nil, errors.New("未选择需要更新的服务")
+		return nil, i18n.NewEngineError(i18n.MsgUpdateNoService)
 	}
 	var jobs []Job
 	for _, sk := range serviceKeys {
@@ -139,23 +178,35 @@ func (s *Service) StartUpdates(ctx context.Context, serviceKeys []string, lang i
 		if sk == "" {
 			continue
 		}
-		j, err := s.prepareUpgradeJob(ctx, sk, lang)
+		j, alreadyRunning, err := s.prepareUpgradeJob(ctx, sk, lang)
 		if err != nil {
 			return nil, err
 		}
 		jobs = append(jobs, j)
-		go s.executeJob(j)
+		if !alreadyRunning {
+			go s.executeJob(j)
+		}
 	}
 	return jobs, nil
 }
 
-func (s *Service) prepareUpgradeJob(ctx context.Context, serviceKey string, lang i18n.Lang) (Job, error) {
+func (s *Service) prepareUpgradeJob(ctx context.Context, serviceKey string, lang i18n.Lang) (Job, bool, error) {
+	// 审计 M4：在同一次 s.mu.Lock() 内完成 activeJobs 检查与占位写入，消除并发请求的 TOCTOU 竞态
 	s.mu.Lock()
 	if active, ok := s.activeJobs[serviceKey]; ok && (active.Status == "running" || active.Status == "queued") {
 		s.mu.Unlock()
-		return active, nil
+		return active, true, nil
 	}
+	s.activeJobs[serviceKey] = Job{ServiceKey: serviceKey, Status: "queued", Phase: "precheck"}
 	s.mu.Unlock()
+
+	cleanupPlaceholder := func() {
+		s.mu.Lock()
+		if cur, ok := s.activeJobs[serviceKey]; ok && cur.ID == "" {
+			delete(s.activeJobs, serviceKey)
+		}
+		s.mu.Unlock()
+	}
 
 	var (
 		appKey, appName, hostID, hostName, svcName, source string
@@ -177,13 +228,16 @@ func (s *Service) prepareUpgradeJob(ctx context.Context, serviceKey string, lang
 		&curVer, &targetRef, &targetDigest, &targetVer, &targetTagsRaw,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Job{}, fmt.Errorf("未找到服务: %s", serviceKey)
+		cleanupPlaceholder()
+		return Job{}, false, i18n.NewEngineError(i18n.MsgUpdateServiceNotFound, serviceKey)
 	}
 	if err != nil {
-		return Job{}, err
+		cleanupPlaceholder()
+		return Job{}, false, err
 	}
 	if source == string(platform.SourceVendorManaged) {
-		return Job{}, errors.New(i18n.FormatUpdateError(lang, "vendor_managed_readonly", ""))
+		cleanupPlaceholder()
+		return Job{}, false, errors.New(i18n.FormatUpdateError(lang, "vendor_managed_readonly", ""))
 	}
 
 	if targetRef == "" {
@@ -249,13 +303,27 @@ func (s *Service) prepareUpgradeJob(ctx context.Context, serviceKey string, lang
 		StartedAt:          now,
 	}
 	if err := s.insertJob(ctx, job); err != nil {
-		return Job{}, err
+		cleanupPlaceholder()
+		return Job{}, false, err
 	}
 	s.broadcast(job)
-	return job, nil
+	return job, false, nil
 }
 
 func (s *Service) executeJob(j Job) {
+	defer func() {
+		if r := recover(); r != nil {
+			if s.log != nil {
+				s.log.Error("更新任务发生 panic", "job", j.ID, "recover", r)
+			}
+			s.finishJobFailed(j, "recreate_failed", i18n.EngineDetail(i18n.MsgUpdatePanic, fmt.Sprint(r)), "")
+		}
+	}()
+
+	// 审计 M4：按 AppKey 串行化同一 Compose 项目的多个服务更新
+	unlockApp := s.lockApp(j.AppKey)
+	defer unlockApp()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
@@ -272,14 +340,14 @@ func (s *Service) executeJob(j Job) {
 
 	ad, _, err := s.hosts.OpenAdapter(ctx, j.HostID)
 	if err != nil {
-		s.finishJobFailed(ctx, j, "connect_failed", err.Error(), "")
+		s.finishJobFailed(j, "connect_failed", i18n.DetailOf(err), "")
 		return
 	}
 	defer ad.Close()
 
 	upAd, ok := ad.(platform.UpdateCapableAdapter)
 	if !ok {
-		s.finishJobFailed(ctx, j, "capability_unsupported", "platform adapter does not support UpdateService", "")
+		s.finishJobFailed(j, "capability_unsupported", i18n.EngineDetail(i18n.MsgUpdateAdapterNoUpdate), "")
 		return
 	}
 
@@ -306,13 +374,13 @@ func (s *Service) executeJob(j Job) {
 
 	if err != nil {
 		code := "recreate_failed"
-		msg := err.Error()
+		msg := i18n.DetailOf(err)
 		var ue *platform.UpdateError
 		if errors.As(err, &ue) {
 			code = ue.Code
 			msg = ue.Message
 		}
-		s.finishJobFailed(ctx, j, code, msg, "")
+		s.finishJobFailed(j, code, msg, "")
 		return
 	}
 
@@ -329,8 +397,12 @@ func (s *Service) executeJob(j Job) {
 	j.Logs = strings.Join(res.Logs, "\n")
 	j.FinishedAt = finished
 
+	// 审计 M6：收尾写库使用独立超时上下文，避免 15 分钟执行超时后写库失败导致任务卡死
+	fCtx, fCancel := context.WithTimeout(context.Background(), finalizeTimeout)
+	defer fCancel()
+
 	progBytes, _ := json.Marshal(j.Progress)
-	_, _ = s.st.DB.ExecContext(ctx, `
+	_, _ = s.st.DB.ExecContext(fCtx, `
 		UPDATE update_job
 		SET status='succeeded', phase='done', progress_json=?,
 		    new_image_id=?, new_repo_digest=?,
@@ -343,14 +415,14 @@ func (s *Service) executeJob(j Job) {
 
 	// 同步更新库存与 finding 状态为已是最新（resolved）
 	targetTagsJSON, _ := json.Marshal(j.TargetMatchedTags)
-	_, _ = s.st.DB.ExecContext(ctx, `
+	_, _ = s.st.DB.ExecContext(fCtx, `
 		UPDATE service
 		SET image_ref=?, image_id=?, repo_digest=CASE WHEN ?<>'' THEN ? ELSE repo_digest END,
 		    current_tags_json=?, updated_at=?
 		WHERE key=?`,
 		j.TargetImageRef, j.NewImageID, j.NewRepoDigest, j.NewRepoDigest, string(targetTagsJSON), finished, j.ServiceKey,
 	)
-	_, _ = s.st.DB.ExecContext(ctx, `
+	_, _ = s.st.DB.ExecContext(fCtx, `
 		UPDATE finding
 		SET kind='none', current_version=?, target_version='', target_ref='', target_digest='', checked_at=?
 		WHERE service_key=?`,
@@ -359,16 +431,19 @@ func (s *Service) executeJob(j Job) {
 	s.broadcast(j)
 }
 
-func (s *Service) finishJobFailed(ctx context.Context, j Job, code, msg, logs string) {
+func (s *Service) finishJobFailed(j Job, code, msg, logs string) {
 	finished := time.Now().Unix()
 	j.Status = "failed"
 	j.Phase = "done"
 	j.ErrorCode = code
-	j.ErrorMsg = msg
+	j.ErrorMsg = i18n.FormatUpdateError(i18n.ZhCN, code, msg)
 	j.Logs = logs
 	j.FinishedAt = finished
 	progBytes, _ := json.Marshal(j.Progress)
-	_, _ = s.st.DB.ExecContext(ctx, `
+
+	fCtx, cancel := context.WithTimeout(context.Background(), finalizeTimeout)
+	defer cancel()
+	_, _ = s.st.DB.ExecContext(fCtx, `
 		UPDATE update_job
 		SET status='failed', phase='done', progress_json=?, error_code=?, error_msg=?, logs_text=?, finished_at=?
 		WHERE id=?`,

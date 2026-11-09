@@ -5,10 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"os"
-	"strings"
 	"time"
 
+	"github.com/kukushouhou/DKStore/internal/hostauth"
 	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/version"
 )
@@ -97,17 +96,5 @@ func Check(ctx context.Context, lang i18n.Lang) Status {
 }
 
 func detectInstallMode() string {
-	if _, err := os.Stat("/.dockerenv"); err == nil {
-		return "docker"
-	}
-	if _, err := os.Stat("/var/packages/dkstore"); err == nil {
-		return "synology_spk"
-	}
-	if _, err := os.Stat("/etc/openwrt_release"); err == nil {
-		return "openwrt"
-	}
-	if strings.Contains(strings.ToLower(os.Getenv("CONTAINER")), "docker") {
-		return "docker"
-	}
-	return "binary"
+	return hostauth.DetectInstallMode(hostauth.OSFS())
 }

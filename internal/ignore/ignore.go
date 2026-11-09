@@ -3,9 +3,9 @@ package ignore
 
 import (
 	"context"
-	"errors"
 	"time"
 
+	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/store"
 )
 
@@ -39,10 +39,10 @@ func New(st *store.Store) *Service {
 // 若 mode == "this_version"，会自动从 finding 表读取每个 service 当前的 target_digest 与 target_version 记录下来。
 func (s *Service) Set(ctx context.Context, serviceKeys []string, mode, note string) error {
 	if len(serviceKeys) == 0 {
-		return errors.New("未指定要忽略的服务")
+		return i18n.NewEngineError(i18n.MsgIgnoreNoService)
 	}
 	if mode != ModeThisVersion && mode != ModeForever {
-		return errors.New("忽略模式无效，仅支持 this_version 或 forever")
+		return i18n.NewEngineError(i18n.MsgIgnoreInvalidMode)
 	}
 	now := time.Now().Unix()
 	tx, err := s.st.DB.BeginTx(ctx, nil)

@@ -10,12 +10,16 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/store"
 )
+
+// ErrQuietHours 表示当前处于免打扰时段，暂缓发送推送（保留待通知状态，免打扰结束后再补推）。
+var ErrQuietHours = errors.New("notification skipped during quiet hours")
 
 // Config 是通知推送与全局偏好的设置结构（保存在 setting 表）。
 type Config struct {
@@ -76,7 +80,7 @@ func (s *Service) SaveConfig(ctx context.Context, cfg Config) error {
 	return err
 }
 
-// SendUpdates 按系统语言发送新发现的更新汇总。
+// SendUpdates 按系统语言发送新发现的更新汇总；若处于免打扰时段则返回 ErrQuietHours。
 func (s *Service) SendUpdates(ctx context.Context, items []i18n.NotifyItem) error {
 	if len(items) == 0 {
 		return nil
@@ -85,8 +89,39 @@ func (s *Service) SendUpdates(ctx context.Context, items []i18n.NotifyItem) erro
 	if cfg.Channel == "" {
 		return nil
 	}
-	title, body := i18n.FormatNotification(i18n.Normalize(cfg.Locale), items)
-	return s.dispatch(ctx, cfg, title, body)
+	if inQuietHours(time.Now(), cfg.QuietHoursStart, cfg.QuietHoursEnd) {
+		return ErrQuietHours
+	}
+	lang := i18n.Normalize(cfg.Locale)
+	title, body := i18n.FormatNotification(lang, items)
+	return s.dispatch(ctx, cfg, lang, title, body)
+}
+
+// inQuietHours 判断当前本地时间是否处于 [start, end) 免打扰区间（支持跨零点，如 "23:00" 至 "08:00"）。
+func inQuietHours(now time.Time, startStr, endStr string) bool {
+	startMin, ok1 := parseHHMM(startStr)
+	endMin, ok2 := parseHHMM(endStr)
+	if !ok1 || !ok2 || startMin == endMin {
+		return false
+	}
+	curMin := now.Hour()*60 + now.Minute()
+	if startMin < endMin {
+		return curMin >= startMin && curMin < endMin
+	}
+	return curMin >= startMin || curMin < endMin
+}
+
+func parseHHMM(s string) (int, bool) {
+	hStr, mStr, ok := strings.Cut(strings.TrimSpace(s), ":")
+	if !ok {
+		return 0, false
+	}
+	h, err1 := strconv.Atoi(hStr)
+	m, err2 := strconv.Atoi(mStr)
+	if err1 != nil || err2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		return 0, false
+	}
+	return h*60 + m, true
 }
 
 // SendTest 发送一条测试通知（优先使用传入的 cfg，若 Channel 为空则读取已保存的设置）。
@@ -99,26 +134,29 @@ func (s *Service) SendTest(ctx context.Context, override *Config, lang i18n.Lang
 		lang = i18n.Normalize(cfg.Locale)
 	}
 	title, body := i18n.FormatTestNotification(lang)
-	return s.dispatch(ctx, cfg, title, body)
+	return s.dispatch(ctx, cfg, lang, title, body)
 }
 
-func (s *Service) dispatch(ctx context.Context, cfg Config, title, body string) error {
+func (s *Service) dispatch(ctx context.Context, cfg Config, lang i18n.Lang, title, body string) error {
 	switch cfg.Channel {
 	case "webhook":
-		return s.postJSON(ctx, cfg.WebhookURL, map[string]any{
+		return s.postJSON(ctx, cfg.WebhookURL, lang, map[string]any{
 			"title":   title,
 			"message": body,
 			"source":  "dkstore",
 			"time":    time.Now().Unix(),
 		})
 	case "wecom":
-		return s.postJSON(ctx, cfg.WebhookURL, map[string]any{
+		return s.postJSON(ctx, cfg.WebhookURL, lang, map[string]any{
 			"msgtype": "text",
 			"text": map[string]string{
 				"content": title + "\n\n" + body,
 			},
 		})
 	case "bark":
+		if strings.TrimSpace(cfg.WebhookURL) == "" {
+			return notifyValidationErr(lang, "请填写 Bark 推送地址", "Bark URL cannot be empty")
+		}
 		u := strings.TrimRight(cfg.WebhookURL, "/") + "/" + url.PathEscape(title) + "/" + url.PathEscape(body)
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 		if err != nil {
@@ -135,16 +173,16 @@ func (s *Service) dispatch(ctx context.Context, cfg Config, title, body string) 
 		return nil
 	case "telegram":
 		if cfg.TelegramBotToken == "" || cfg.TelegramChatID == "" {
-			return errors.New("Telegram Bot Token / Chat ID cannot be empty")
+			return notifyValidationErr(lang, "请填写 Telegram Bot Token 与 Chat ID", "Telegram Bot Token / Chat ID cannot be empty")
 		}
 		u := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", cfg.TelegramBotToken)
-		return s.postJSON(ctx, u, map[string]any{
+		return s.postJSON(ctx, u, lang, map[string]any{
 			"chat_id": cfg.TelegramChatID,
 			"text":    title + "\n\n" + body,
 		})
 	case "ntfy":
-		if cfg.WebhookURL == "" {
-			return errors.New("ntfy URL cannot be empty")
+		if strings.TrimSpace(cfg.WebhookURL) == "" {
+			return notifyValidationErr(lang, "请填写 ntfy 推送地址", "ntfy URL cannot be empty")
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.WebhookURL, strings.NewReader(body))
 		if err != nil {
@@ -161,13 +199,13 @@ func (s *Service) dispatch(ctx context.Context, cfg Config, title, body string) 
 		}
 		return nil
 	default:
-		return errors.New("notification channel not configured")
+		return notifyValidationErr(lang, "尚未选择通知推送渠道", "Notification channel is not configured")
 	}
 }
 
-func (s *Service) postJSON(ctx context.Context, targetURL string, payload any) error {
+func (s *Service) postJSON(ctx context.Context, targetURL string, lang i18n.Lang, payload any) error {
 	if strings.TrimSpace(targetURL) == "" {
-		return errors.New("webhook URL is empty")
+		return notifyValidationErr(lang, "请填写 Webhook 推送地址", "Webhook URL cannot be empty")
 	}
 	b, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(b))
@@ -185,4 +223,11 @@ func (s *Service) postJSON(ctx context.Context, targetURL string, payload any) e
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func notifyValidationErr(lang i18n.Lang, zh, en string) error {
+	if lang == i18n.EnUS {
+		return errors.New(en)
+	}
+	return errors.New(zh)
 }

@@ -4,7 +4,6 @@ import {
   Badge,
   Button,
   Card,
-  Checkbox,
   Col,
   Empty,
   Flex,
@@ -32,9 +31,10 @@ import {
   KeyOutlined,
   PlusOutlined,
   SyncOutlined,
+  WarningOutlined,
 } from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type HostInput, type HostItem, type HostTestResult } from '../api/client'
+import { api, ApiError, type HostInput, type HostItem, type HostTestResult } from '../api/client'
 import { useI18n } from '../i18n'
 
 export default function HostsPage() {
@@ -48,7 +48,6 @@ export default function HostsPage() {
   const [form] = Form.useForm<HostInput>()
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<HostTestResult | null>(null)
-  const [trustFingerprint, setTrustFingerprint] = useState(false)
   const [generatedPubKey, setGeneratedPubKey] = useState('')
   const [saving, setSaving] = useState(false)
 
@@ -56,7 +55,6 @@ export default function HostsPage() {
     setEditing(null)
     setStep(0)
     setTestResult(null)
-    setTrustFingerprint(false)
     setGeneratedPubKey('')
     form.resetFields()
     form.setFieldsValue({
@@ -73,7 +71,6 @@ export default function HostsPage() {
     setEditing(h)
     setStep(0)
     setTestResult(null)
-    setTrustFingerprint(Boolean(h.sshHostKey))
     setGeneratedPubKey('')
     form.resetFields()
     form.setFieldsValue({
@@ -84,7 +81,8 @@ export default function HostsPage() {
       port: h.port || 22,
       sshUser: h.sshUser,
       sshAuth: h.sshAuth || 'password',
-      sshHostKey: h.sshHostKey,
+      dsmUrl: h.dsmUrl,
+      dsmUser: h.dsmUser,
     })
     setWizardOpen(true)
   }
@@ -94,11 +92,9 @@ export default function HostsPage() {
     setTesting(true)
     setTestResult(null)
     try {
-      const res = await api.testHost(vals)
+      // 编辑已有设备时带上 hostId，后端复用已保存的密码 / 私钥 / 设备令牌
+      const res = await api.testHost(editing ? { ...vals, hostId: editing.id } : vals)
       setTestResult(res)
-      if (res.hostKeyTrusted) {
-        setTrustFingerprint(true)
-      }
     } catch (e) {
       message.error((e as Error).message)
     } finally {
@@ -117,10 +113,12 @@ export default function HostsPage() {
   }
 
   const handleSave = async () => {
-    const vals = form.getFieldsValue(true) as HostInput
-    if (testResult?.presentedHostKey && trustFingerprint) {
-      vals.sshHostKey = testResult.presentedHostKey
+    const vals = { ...(form.getFieldsValue(true) as HostInput) }
+    // 测试连接拿到的 DSM 设备令牌已在服务端暂存，保存时带回 nonce 复用，避免同一动态码被用两次
+    if (testResult?.deviceTokenNonce) {
+      vals.deviceTokenNonce = testResult.deviceTokenNonce
     }
+    delete vals.hostId
     setSaving(true)
     try {
       if (editing) {
@@ -133,6 +131,10 @@ export default function HostsPage() {
       qc.invalidateQueries({ queryKey: ['hosts'] })
       qc.invalidateQueries({ queryKey: ['overview'] })
     } catch (e) {
+      if (e instanceof ApiError && e.testResult) {
+        setTestResult(e.testResult)
+        setStep(2)
+      }
       message.error((e as Error).message)
     } finally {
       setSaving(false)
@@ -140,6 +142,7 @@ export default function HostsPage() {
   }
 
   const hosts = hostsQuery.data?.items ?? []
+  const kindVal = Form.useWatch('kind', form)
   const transportVal = Form.useWatch('transport', form)
   const authVal = Form.useWatch('sshAuth', form)
 
@@ -192,8 +195,12 @@ export default function HostsPage() {
                     size="small"
                     icon={<SyncOutlined />}
                     onClick={async () => {
-                      await api.triggerCheck(h.id, true)
-                      message.info(t.home.checking)
+                      try {
+                        await api.triggerCheck(h.id, true)
+                        message.info(t.home.checking)
+                      } catch (e) {
+                        message.error((e as Error).message)
+                      }
                     }}
                   >
                     {t.hosts.scanHost}
@@ -211,10 +218,14 @@ export default function HostsPage() {
                     key="del"
                     title={t.hosts.deleteConfirm}
                     onConfirm={async () => {
-                      await api.deleteHost(h.id)
-                      message.success(t.hosts.deleted)
-                      qc.invalidateQueries({ queryKey: ['hosts'] })
-                      qc.invalidateQueries({ queryKey: ['overview'] })
+                      try {
+                        await api.deleteHost(h.id)
+                        message.success(t.hosts.deleted)
+                        qc.invalidateQueries({ queryKey: ['hosts'] })
+                        qc.invalidateQueries({ queryKey: ['overview'] })
+                      } catch (e) {
+                        message.error((e as Error).message)
+                      }
                     }}
                   >
                     <Button type="text" danger size="small" icon={<DeleteOutlined />} />
@@ -224,8 +235,19 @@ export default function HostsPage() {
                 <Space direction="vertical" size={6}>
                   <Space wrap>
                     {h.kind === 'synology' && <Tag color="geekblue">Synology DSM</Tag>}
-                    <Tag>{h.transport === 'local' ? t.hosts.localSocket : t.hosts.sshRemote}</Tag>
-                    {h.address && (
+                    <Tag>
+                      {h.transport === 'local'
+                        ? t.hosts.localSocket
+                        : h.transport === 'dsm_api'
+                          ? t.hosts.dsmWebApi
+                          : t.hosts.sshRemote}
+                    </Tag>
+                    {h.transport === 'dsm_api' && h.dsmUrl && (
+                      <Typography.Text code>
+                        {h.dsmUser}@{h.dsmUrl}
+                      </Typography.Text>
+                    )}
+                    {h.transport === 'ssh' && h.address && (
                       <Typography.Text code>
                         {h.sshUser}@{h.address}:{h.port || 22}
                       </Typography.Text>
@@ -233,12 +255,25 @@ export default function HostsPage() {
                   </Space>
                   {h.info && (
                     <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                      Docker {h.info.dockerVersion} · {h.info.platformVersion || h.info.os} ({h.info.os}/{h.info.arch})
+                      Docker {h.info.dockerVersion} · {h.info.platformVersion || h.info.os} ({h.info.os}/{h.info.arch || t.hosts.archUnknown})
                     </Typography.Text>
                   )}
                   {h.sshHostKey && (
                     <Typography.Text type="secondary" style={{ fontSize: 11, fontFamily: 'monospace' }}>
                       {h.sshHostKey}
+                    </Typography.Text>
+                  )}
+                  {h.transport === 'ssh' && Boolean(h.sshHostKeyChangedAt) && (
+                    <Typography.Text type="warning" style={{ fontSize: 12 }}>
+                      <WarningOutlined /> {t.hosts.fingerprintChanged}
+                      {h.sshHostKeyChangedAt
+                        ? ` · ${new Date(h.sshHostKeyChangedAt * 1000).toLocaleString(locale)}`
+                        : ''}
+                      {h.sshPrevHostKey && (
+                        <div style={{ fontSize: 11, fontFamily: 'monospace' }}>
+                          {t.hosts.fingerprintPrevious}: {h.sshPrevHostKey}
+                        </div>
+                      )}
                     </Typography.Text>
                   )}
                 </Space>
@@ -262,28 +297,26 @@ export default function HostsPage() {
             </div>
             <Space>
               <Button onClick={() => setWizardOpen(false)}>{t.ignoreModal.cancel}</Button>
-              {step < 2 ? (
+              {step === 1 && (
                 <Button
-                  type="primary"
+                  icon={<SyncOutlined spin={testing} />}
+                  loading={testing}
                   onClick={() => {
-                    if (step === 1) {
-                      setStep(2)
-                      runTest()
-                    } else {
-                      setStep(step + 1)
-                    }
+                    setStep(2)
+                    runTest()
                   }}
                 >
+                  {t.hosts.testBtn}
+                </Button>
+              )}
+              {step === 0 ? (
+                <Button type="primary" onClick={() => setStep(1)}>
                   {t.hosts.nextStep}
                 </Button>
               ) : (
                 <Button
                   type="primary"
                   loading={saving}
-                  disabled={
-                    !testResult?.ok ||
-                    (transportVal === 'ssh' && Boolean(testResult?.presentedHostKey) && !trustFingerprint)
-                  }
                   onClick={handleSave}
                 >
                   {t.hosts.saveBtn}
@@ -311,15 +344,27 @@ export default function HostsPage() {
                   <Input placeholder={t.hosts.namePlaceholder} />
                 </Form.Item>
                 <Form.Item name="kind" label={t.hosts.kindLabel}>
-                  <Radio.Group style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <Radio.Group
+                    style={{ display: 'flex', flexDirection: 'column', gap: 10 }}
+                    onChange={(e) => {
+                      if (e.target.value === 'synology') {
+                        form.setFieldsValue({ transport: 'dsm_api' })
+                      } else if (form.getFieldValue('transport') === 'dsm_api') {
+                        form.setFieldsValue({ transport: 'ssh' })
+                      }
+                    }}
+                  >
                     <Radio value="docker">{t.hosts.kindDocker}</Radio>
                     <Radio value="synology">{t.hosts.kindSynology}</Radio>
                   </Radio.Group>
                 </Form.Item>
                 <Form.Item name="transport" label={t.hosts.transportLabel}>
                   <Radio.Group style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                    <Radio value="local">{t.hosts.transportLocal}</Radio>
+                    {kindVal === 'synology' && (
+                      <Radio value="dsm_api">{t.hosts.transportDSMAPI}</Radio>
+                    )}
                     <Radio value="ssh">{t.hosts.transportSSH}</Radio>
+                    <Radio value="local">{t.hosts.transportLocal}</Radio>
                   </Radio.Group>
                 </Form.Item>
               </>
@@ -327,6 +372,29 @@ export default function HostsPage() {
 
             {step === 1 && transportVal === 'local' && (
               <Alert type="info" showIcon title="/var/run/docker.sock" />
+            )}
+
+            {step === 1 && transportVal === 'dsm_api' && (
+              <>
+                <Alert
+                  type="info"
+                  showIcon
+                  style={{ marginBottom: 12 }}
+                  title={t.hosts.saveReconnectHint}
+                />
+                <Form.Item name="dsmUrl" label={t.hosts.dsmUrlLabel} rules={[{ required: true }]}>
+                  <Input placeholder="http://192.168.1.10:5000" />
+                </Form.Item>
+                <Form.Item name="dsmUser" label={t.hosts.dsmUserLabel} rules={[{ required: true }]}>
+                  <Input placeholder="admin" />
+                </Form.Item>
+                <Form.Item name="dsmSecret" label={t.hosts.dsmSecretLabel} rules={[{ required: !editing }]}>
+                  <Input.Password />
+                </Form.Item>
+                <Form.Item name="dsmOtpCode" label={t.hosts.dsmOtpLabel}>
+                  <Input placeholder={t.hosts.dsmOtpPlaceholder} maxLength={8} />
+                </Form.Item>
+              </>
             )}
 
             {step === 1 && transportVal === 'ssh' && (
@@ -428,16 +496,30 @@ export default function HostsPage() {
                         ),
                       }))}
                     />
+                    {testResult.needOtp && (
+                      <Card size="small">
+                        <Form.Item name="dsmOtpCode" label={t.hosts.dsmOtpLabel} style={{ marginBottom: 8 }}>
+                          <Input placeholder={t.hosts.dsmOtpPlaceholder} maxLength={8} />
+                        </Form.Item>
+                      </Card>
+                    )}
                     {transportVal === 'ssh' && testResult.presentedHostKey && (
                       <Card size="small" title={t.hosts.fingerprintTitle}>
                         <Space direction="vertical">
                           <Typography.Text code>{testResult.presentedHostKey}</Typography.Text>
-                          <Checkbox
-                            checked={trustFingerprint}
-                            onChange={(e) => setTrustFingerprint(e.target.checked)}
-                          >
-                            {t.hosts.fingerprintAccepted}
-                          </Checkbox>
+                          {testResult.hostKeyChanged && (
+                            <Typography.Text type="warning">
+                              <WarningOutlined /> {t.hosts.fingerprintChanged}
+                              {testResult.previousHostKey && (
+                                <div style={{ fontSize: 11, fontFamily: 'monospace' }}>
+                                  {t.hosts.fingerprintPrevious}: {testResult.previousHostKey}
+                                </div>
+                              )}
+                            </Typography.Text>
+                          )}
+                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                            {t.hosts.fingerprintAutoHint}
+                          </Typography.Text>
                         </Space>
                       </Card>
                     )}
