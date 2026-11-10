@@ -5,7 +5,7 @@ PKG_VERSION:=0.2.0
 PKG_RELEASE:=1
 
 PKG_LICENSE:=Apache-2.0
-PKG_MAINTAINER:=DKStore Community
+PKG_MAINTAINER:=kukushouhou <https://github.com/kukushouhou>
 
 include $(INCLUDE_DIR)/package.mk
 
