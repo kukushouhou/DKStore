@@ -1,27 +1,27 @@
 import { useMemo, useState } from 'react'
 import {
-  Avatar,
   Badge,
   Button,
   Card,
+  Col,
   Empty,
   Flex,
   Input,
+  Row,
   Segmented,
   Space,
   Spin,
   Tag,
+  Tooltip,
   Typography,
   theme,
 } from 'antd'
 import {
-  CaretDownOutlined,
-  CaretRightOutlined,
-  ContainerOutlined,
+  DownOutlined,
   ExpandAltOutlined,
-  FolderOpenOutlined,
   PlusOutlined,
   ReloadOutlined,
+  RightOutlined,
   SearchOutlined,
   ShrinkOutlined,
 } from '@ant-design/icons'
@@ -30,14 +30,21 @@ import { useNavigate } from 'react-router'
 import { api, type AppRuntimeTree, type ContainerRuntimeStat } from '../api/client'
 import { useI18n } from '../i18n'
 
-const avatarColors = ['#2f6bff', '#13c2c2', '#722ed1', '#eb2f96', '#fa8c16', '#52c41a']
+const badgePalette = [
+  { bg: 'rgba(114, 46, 209, 0.14)', fg: '#722ed1' },
+  { bg: 'rgba(47, 107, 255, 0.14)', fg: '#2f6bff' },
+  { bg: 'rgba(19, 194, 194, 0.14)', fg: '#13c2c2' },
+  { bg: 'rgba(235, 47, 150, 0.14)', fg: '#eb2f96' },
+  { bg: 'rgba(250, 140, 22, 0.14)', fg: '#fa8c16' },
+  { bg: 'rgba(82, 196, 26, 0.14)', fg: '#52c41a' },
+]
 
-function pickColor(name: string) {
+function pickBadgeStyle(name: string) {
   let h = 0
   for (let i = 0; i < name.length; i++) {
     h = (h * 31 + name.charCodeAt(i)) | 0
   }
-  return avatarColors[Math.abs(h) % avatarColors.length]
+  return badgePalette[Math.abs(h) % badgePalette.length]
 }
 
 function formatMem(bytes: number): string {
@@ -72,7 +79,6 @@ export default function ContainersPage() {
   const hosts = hostsQuery.data?.items ?? []
   const rawTrees = containersQuery.data?.items ?? []
 
-  // 统计各状态容器数量（用于状态筛选标签）
   const counts = useMemo(() => {
     let all = 0
     let running = 0
@@ -87,7 +93,6 @@ export default function ContainersPage() {
     return { all, running, stopped }
   }, [rawTrees])
 
-  // 根据状态与搜索词过滤树节点
   const filteredTrees = useMemo(() => {
     const q = keyword.trim().toLowerCase()
     const result: AppRuntimeTree[] = []
@@ -184,36 +189,37 @@ export default function ContainersPage() {
     return t.containers.stateRunning
   }
 
-  const sourceTag = (source: AppRuntimeTree['source']) => {
-    switch (source) {
-      case 'compose':
-        return <Tag color="blue">{t.home.tagCompose}</Tag>
-      case 'dsm_project':
-        return <Tag color="geekblue">{t.home.tagDSM}</Tag>
-      case 'vendor_managed':
-        return <Tag color="purple">{t.home.tagVendor}</Tag>
-      default:
-        return <Tag>{t.home.tagStandalone}</Tag>
+  const formatProjectUptime = (app: AppRuntimeTree): string => {
+    const runningList = app.containers.filter((c) => c.state === 'running')
+    if (runningList.length === 0) return t.containers.stateStopped
+    // 取最早启动的运行中容器计算项目运行时长
+    const withStarted = runningList.filter((c) => c.startedAt && c.startedAt > 0)
+    if (withStarted.length > 0) {
+      const oldest = withStarted.reduce((acc, cur) =>
+        (cur.startedAt ?? 0) < (acc.startedAt ?? 0) ? cur : acc,
+      )
+      return formatUptime(oldest)
     }
+    return formatUptime(runningList[0])
   }
 
-  const renderStateBadge = (c: ContainerRuntimeStat) => {
+  const renderStateCell = (c: ContainerRuntimeStat) => {
     if (c.state === 'running') {
       return (
-        <Space size={4}>
+        <Space size={6} wrap>
           <Badge status="success" text={t.containers.stateRunning} />
           {c.health === 'healthy' && (
-            <Tag color="success" style={{ margin: 0, fontSize: 11 }}>
+            <Tag color="success" style={{ margin: 0, fontSize: 11, lineHeight: '16px' }}>
               {t.containers.healthHealthy}
             </Tag>
           )}
           {c.health === 'unhealthy' && (
-            <Tag color="error" style={{ margin: 0, fontSize: 11 }}>
+            <Tag color="error" style={{ margin: 0, fontSize: 11, lineHeight: '16px' }}>
               {t.containers.healthUnhealthy}
             </Tag>
           )}
           {c.health === 'starting' && (
-            <Tag color="processing" style={{ margin: 0, fontSize: 11 }}>
+            <Tag color="processing" style={{ margin: 0, fontSize: 11, lineHeight: '16px' }}>
               {t.containers.healthStarting}
             </Tag>
           )}
@@ -229,28 +235,26 @@ export default function ContainersPage() {
     return <Badge status="default" text={t.containers.stateStopped} />
   }
 
-  const renderContainerMetrics = (c: ContainerRuntimeStat) => {
-    const isRunning = c.state === 'running'
+  const renderInitialBadge = (name: string) => {
+    const st = pickBadgeStyle(name)
     return (
-      <Space size={12} style={{ justifyContent: 'flex-end', flexShrink: 0 }}>
-        {renderStateBadge(c)}
-        <Typography.Text type="secondary" style={{ fontSize: 12, minWidth: 110, display: 'inline-block' }}>
-          {formatUptime(c)}
-        </Typography.Text>
-        <Typography.Text style={{ fontSize: 12, fontFamily: 'monospace', minWidth: 78, display: 'inline-block' }}>
-          {t.containers.cpuLabel}: {isRunning ? `${c.cpuPercent.toFixed(1)}%` : '-'}
-        </Typography.Text>
-        <Typography.Text style={{ fontSize: 12, fontFamily: 'monospace', minWidth: 105, display: 'inline-block' }}>
-          {t.containers.memLabel}: {isRunning ? formatMem(c.memUsage) : '-'}
-        </Typography.Text>
-        <Typography.Text
-          code
-          ellipsis={{ tooltip: c.image }}
-          style={{ fontSize: 12, maxWidth: 190 }}
-        >
-          {c.image}
-        </Typography.Text>
-      </Space>
+      <span
+        style={{
+          width: 24,
+          height: 24,
+          borderRadius: 6,
+          background: st.bg,
+          color: st.fg,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          fontWeight: 700,
+          fontSize: 11,
+          flexShrink: 0,
+        }}
+      >
+        {name.slice(0, 2).toUpperCase()}
+      </span>
     )
   }
 
@@ -342,153 +346,302 @@ export default function ContainersPage() {
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t.containers.empty} />
         </Card>
       ) : (
-        <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          {filteredTrees.map((app) => {
+        <div
+          style={{
+            border: `1px solid ${token.colorBorderSecondary}`,
+            borderRadius: 12,
+            overflow: 'hidden',
+            background: token.colorBgContainer,
+          }}
+        >
+          {/* 统一表头（5 列：8 / 4 / 4 / 4 / 4，对应 12 栅格的 4 / 2 / 2 / 2 / 2） */}
+          <Row
+            align="middle"
+            style={{
+              padding: '10px 16px',
+              background: token.colorFillQuaternary,
+              borderBottom: `1px solid ${token.colorBorderSecondary}`,
+              fontSize: 12,
+              fontWeight: 500,
+              color: token.colorTextSecondary,
+            }}
+          >
+            <Col xs={12} md={8}>
+              {t.containers.colName}
+            </Col>
+            <Col xs={6} md={4}>
+              {t.containers.colState}
+            </Col>
+            <Col xs={0} md={4}>
+              {t.containers.colUptime}
+            </Col>
+            <Col xs={6} md={4}>
+              {t.containers.colResource}
+            </Col>
+            <Col xs={0} md={4} style={{ textAlign: 'right' }}>
+              {t.containers.colImage}
+            </Col>
+          </Row>
+
+          {/* 树状行列表 */}
+          {filteredTrees.map((app, appIdx) => {
             const isProject = app.containers.length > 1
             const collapsed = Boolean(collapsedKeys[app.key])
+            const isLastApp = appIdx === filteredTrees.length - 1
 
+            // 单容器项目行
             if (!isProject && app.containers.length === 1) {
               const c = app.containers[0]
+              const isRunning = c.state === 'running'
               return (
-                <Card key={app.key} size="small" styles={{ body: { padding: '12px 16px' } }}>
-                  <Flex justify="space-between" align="center" gap={12}>
-                    <Space size={8} style={{ minWidth: 0 }}>
-                      <Avatar
-                        size={32}
-                        shape="square"
-                        style={{
-                          backgroundColor: pickColor(app.name),
-                          borderRadius: 8,
-                          fontWeight: 600,
-                        }}
-                      >
-                        {app.name.slice(0, 2).toUpperCase()}
-                      </Avatar>
-                      <Typography.Text strong style={{ fontSize: 15, whiteSpace: 'nowrap' }}>
+                <Row
+                  key={app.key}
+                  align="middle"
+                  style={{
+                    padding: '12px 16px',
+                    borderBottom: isLastApp
+                      ? 'none'
+                      : `1px solid ${token.colorBorderSecondary}`,
+                    fontSize: 13,
+                  }}
+                >
+                  <Col xs={12} md={8}>
+                    <Flex align="center" gap={10} style={{ paddingLeft: 22, minWidth: 0 }}>
+                      {renderInitialBadge(app.name)}
+                      <Typography.Text strong ellipsis style={{ maxWidth: 180 }}>
                         {app.name}
                       </Typography.Text>
-                      {c.name && c.name !== app.name && (
-                        <Tag style={{ margin: 0, fontSize: 11 }}>{c.name}</Tag>
-                      )}
-                      {sourceTag(app.source)}
-                      <Tag variant="filled" style={{ margin: 0 }}>
-                        {app.hostName}
+                      <Tag
+                        color={
+                          app.source === 'dsm_project'
+                            ? 'geekblue'
+                            : app.source === 'compose'
+                              ? 'blue'
+                              : app.source === 'vendor_managed'
+                                ? 'purple'
+                                : undefined
+                        }
+                        style={{
+                          margin: 0,
+                          fontSize: 11,
+                          lineHeight: '18px',
+                        }}
+                      >
+                        {app.source === 'dsm_project'
+                          ? t.home.tagDSM
+                          : app.source === 'compose'
+                            ? t.home.tagCompose
+                            : app.source === 'vendor_managed'
+                              ? t.home.tagVendor
+                              : t.home.tagStandalone}
                       </Tag>
-                    </Space>
-                    {renderContainerMetrics(c)}
-                  </Flex>
-                </Card>
+                    </Flex>
+                  </Col>
+                  <Col xs={6} md={4}>
+                    {renderStateCell(c)}
+                  </Col>
+                  <Col xs={0} md={4}>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      {formatUptime(c)}
+                    </Typography.Text>
+                  </Col>
+                  <Col xs={6} md={4}>
+                    <Typography.Text style={{ fontSize: 12, fontFamily: 'monospace' }}>
+                      {isRunning
+                        ? `${c.cpuPercent.toFixed(1)}% · ${formatMem(c.memUsage)}`
+                        : '-'}
+                    </Typography.Text>
+                  </Col>
+                  <Col xs={0} md={4} style={{ textAlign: 'right' }}>
+                    <Tooltip title={`${c.image} (${app.hostName})`}>
+                      <Typography.Text
+                        type="secondary"
+                        style={{
+                          fontSize: 12,
+                          fontFamily: 'monospace',
+                          maxWidth: '100%',
+                          display: 'inline-block',
+                        }}
+                        ellipsis
+                      >
+                        {c.image}
+                      </Typography.Text>
+                    </Tooltip>
+                  </Col>
+                </Row>
               )
             }
 
+            // 多容器项目父节点 + 子容器行
             const allRunning = app.runningCount === app.totalCount && app.totalCount > 0
             const someRunning = app.runningCount > 0 && app.runningCount < app.totalCount
 
             return (
-              <Card key={app.key} size="small" styles={{ body: { padding: 0 } }}>
-                {/* 父节点：多容器项目头 */}
-                <Flex
-                  justify="space-between"
-                  align="center"
-                  wrap
-                  gap={12}
+              <div
+                key={app.key}
+                style={{
+                  borderBottom: isLastApp
+                    ? 'none'
+                    : `1px solid ${token.colorBorderSecondary}`,
+                }}
+              >
+                {/* 父节点行 */}
+                <Row
+                  align="middle"
                   onClick={() => toggleOne(app.key)}
                   style={{
                     padding: '12px 16px',
                     cursor: 'pointer',
                     background: collapsed ? 'transparent' : token.colorFillQuaternary,
-                    borderBottom: collapsed ? 'none' : `1px solid ${token.colorBorderSecondary}`,
+                    borderBottom: collapsed
+                      ? 'none'
+                      : `1px solid ${token.colorBorderSecondary}`,
+                    fontSize: 13,
                   }}
                 >
-                  <Space size={10} wrap>
-                    <Typography.Text type="secondary">
-                      {collapsed ? <CaretRightOutlined /> : <CaretDownOutlined />}
-                    </Typography.Text>
-                    <Avatar
-                      size={32}
-                      shape="square"
-                      icon={<FolderOpenOutlined />}
-                      style={{
-                        backgroundColor: pickColor(app.name),
-                        borderRadius: 8,
-                      }}
-                    />
-                    <Typography.Text strong style={{ fontSize: 15 }}>
-                      {app.name}
-                    </Typography.Text>
-                    {sourceTag(app.source)}
-                    <Tag variant="filled" style={{ margin: 0 }}>
-                      {app.hostName}
-                    </Tag>
-                  </Space>
-
-                  <Space size={16} wrap>
-                    <Tag
-                      color={allRunning ? 'success' : someRunning ? 'warning' : 'default'}
-                      style={{ margin: 0 }}
-                    >
-                      ●{' '}
-                      {t.containers.runningBadge
-                        .replace('{running}', String(app.runningCount))
-                        .replace('{total}', String(app.totalCount))}
-                    </Tag>
-                    <Typography.Text
-                      strong
-                      style={{ fontSize: 12, fontFamily: 'monospace', minWidth: 78, display: 'inline-block' }}
-                    >
-                      {t.containers.cpuLabel}: {app.runningCount > 0 ? `${app.cpuPercent.toFixed(1)}%` : '-'}
-                    </Typography.Text>
-                    <Typography.Text
-                      strong
-                      style={{ fontSize: 12, fontFamily: 'monospace', minWidth: 105, display: 'inline-block' }}
-                    >
-                      {t.containers.memLabel}: {app.runningCount > 0 ? formatMem(app.memUsage) : '-'}
-                    </Typography.Text>
-                  </Space>
-                </Flex>
-
-                {/* 子节点：树状连线展示项目下的每个容器 */}
-                {!collapsed && (
-                  <div style={{ padding: '4px 16px 8px 36px' }}>
-                    {app.containers.map((c, idx) => {
-                      const isLast = idx === app.containers.length - 1
-                      return (
-                        <Flex
-                          key={c.id || c.name}
-                          justify="space-between"
-                          align="center"
-                          wrap
-                          gap={12}
+                  <Col xs={12} md={8}>
+                    <Flex align="center" gap={10} style={{ minWidth: 0 }}>
+                      <Typography.Text
+                        type="secondary"
+                        style={{ fontSize: 11, width: 12, display: 'inline-block' }}
+                      >
+                        {collapsed ? <RightOutlined /> : <DownOutlined />}
+                      </Typography.Text>
+                      {renderInitialBadge(app.name)}
+                      <Typography.Text strong ellipsis style={{ maxWidth: 180 }}>
+                        {app.name}
+                      </Typography.Text>
+                      <Tag
+                        color="blue"
+                        style={{
+                          margin: 0,
+                          fontSize: 11,
+                          lineHeight: '18px',
+                          border: 'none',
+                        }}
+                      >
+                        {t.containers.projectTag.replace('{count}', String(app.totalCount))}
+                      </Tag>
+                    </Flex>
+                  </Col>
+                  <Col xs={6} md={4}>
+                    <Badge
+                      status={allRunning ? 'success' : someRunning ? 'warning' : 'default'}
+                      text={
+                        <span
                           style={{
-                            padding: '8px 0',
-                            borderBottom: isLast
-                              ? 'none'
-                              : `1px dashed ${token.colorBorderSecondary}`,
+                            fontSize: 12,
+                            fontWeight: 500,
+                            color: allRunning
+                              ? token.colorSuccess
+                              : someRunning
+                                ? token.colorWarning
+                                : token.colorTextSecondary,
                           }}
                         >
-                          <Space size={8} wrap>
+                          {t.containers.runningBadge
+                            .replace('{running}', String(app.runningCount))
+                            .replace('{total}', String(app.totalCount))}
+                        </span>
+                      }
+                    />
+                  </Col>
+                  <Col xs={0} md={4}>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      {formatProjectUptime(app)}
+                    </Typography.Text>
+                  </Col>
+                  <Col xs={6} md={4}>
+                    <Typography.Text strong style={{ fontSize: 12, fontFamily: 'monospace' }}>
+                      {app.runningCount > 0
+                        ? `${app.cpuPercent.toFixed(1)}% · ${formatMem(app.memUsage)}`
+                        : '-'}
+                    </Typography.Text>
+                  </Col>
+                  <Col xs={0} md={4} style={{ textAlign: 'right' }}>
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }} ellipsis>
+                      {app.hostName}
+                    </Typography.Text>
+                  </Col>
+                </Row>
+
+                {/* 展开的子容器行 */}
+                {!collapsed &&
+                  app.containers.map((c, idx) => {
+                    const isLastChild = idx === app.containers.length - 1
+                    const isRunning = c.state === 'running'
+                    return (
+                      <Row
+                        key={c.id || c.name}
+                        align="middle"
+                        style={{
+                          padding: '9px 16px',
+                          background: token.colorBgLayout,
+                          borderBottom: isLastChild
+                            ? 'none'
+                            : `1px solid ${token.colorBorderSecondary}`,
+                          fontSize: 12,
+                        }}
+                      >
+                        <Col xs={12} md={8}>
+                          <Flex align="center" gap={8} style={{ paddingLeft: 28, minWidth: 0 }}>
                             <Typography.Text
                               type="secondary"
                               style={{ fontFamily: 'monospace', userSelect: 'none' }}
                             >
-                              {isLast ? '└─' : '├─'}
+                              {isLastChild ? '└─' : '├─'}
                             </Typography.Text>
-                            <ContainerOutlined style={{ color: token.colorTextSecondary }} />
-                            <Typography.Text strong>{c.name}</Typography.Text>
+                            <Typography.Text
+                              style={{ fontWeight: 500, fontSize: 12 }}
+                              ellipsis={{ tooltip: c.name }}
+                            >
+                              {c.name}
+                            </Typography.Text>
                             {c.service && c.service !== c.name && (
-                              <Tag style={{ margin: 0, fontSize: 11 }}>{c.service}</Tag>
+                              <Tag style={{ margin: 0, fontSize: 11, lineHeight: '16px' }}>
+                                {c.service}
+                              </Tag>
                             )}
-                          </Space>
-                          {renderContainerMetrics(c)}
-                        </Flex>
-                      )
-                    })}
-                  </div>
-                )}
-              </Card>
+                          </Flex>
+                        </Col>
+                        <Col xs={6} md={4}>
+                          {renderStateCell(c)}
+                        </Col>
+                        <Col xs={0} md={4}>
+                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                            {formatUptime(c)}
+                          </Typography.Text>
+                        </Col>
+                        <Col xs={6} md={4}>
+                          <Typography.Text style={{ fontSize: 12, fontFamily: 'monospace' }}>
+                            {isRunning
+                              ? `${c.cpuPercent.toFixed(1)}% · ${formatMem(c.memUsage)}`
+                              : '-'}
+                          </Typography.Text>
+                        </Col>
+                        <Col xs={0} md={4} style={{ textAlign: 'right' }}>
+                          <Tooltip title={c.image}>
+                            <Typography.Text
+                              type="secondary"
+                              style={{
+                                fontSize: 12,
+                                fontFamily: 'monospace',
+                                maxWidth: '100%',
+                                display: 'inline-block',
+                              }}
+                              ellipsis
+                            >
+                              {c.image}
+                            </Typography.Text>
+                          </Tooltip>
+                        </Col>
+                      </Row>
+                    )
+                  })}
+              </div>
             )
           })}
-        </Space>
+        </div>
       )}
     </Space>
   )

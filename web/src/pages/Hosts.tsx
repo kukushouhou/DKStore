@@ -81,12 +81,16 @@ export default function HostsPage() {
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<HostItem | null>(null)
   const [platformId, setPlatformId] = useState<PlatformId>('synology')
-  const [showOtpField, setShowOtpField] = useState(false)
   const [form] = Form.useForm<HostInput>()
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<HostTestResult | null>(null)
   const [generatedPubKey, setGeneratedPubKey] = useState('')
   const [saving, setSaving] = useState(false)
+
+  // 2FA 即时弹窗状态（仅在测试连接或保存返回 needOtp 时弹出）
+  const [otpModalOpen, setOtpModalOpen] = useState(false)
+  const [otpCode, setOtpCode] = useState('')
+  const [otpTrigger, setOtpTrigger] = useState<'test' | 'save'>('save')
 
   const canAddLocal = Boolean(hostsQuery.data?.canAddLocal)
 
@@ -117,7 +121,8 @@ export default function HostsPage() {
     setEditing(null)
     setTestResult(null)
     setGeneratedPubKey('')
-    setShowOtpField(false)
+    setOtpModalOpen(false)
+    setOtpCode('')
     form.resetFields()
     setPlatformId('synology')
     form.setFieldsValue({
@@ -134,7 +139,8 @@ export default function HostsPage() {
     setEditing(h)
     setTestResult(null)
     setGeneratedPubKey('')
-    setShowOtpField(false)
+    setOtpModalOpen(false)
+    setOtpCode('')
     form.resetFields()
     const initPlatform: PlatformId =
       h.transport === 'local' ? 'local' : h.kind === 'synology' ? 'synology' : 'linux'
@@ -153,17 +159,31 @@ export default function HostsPage() {
     setModalOpen(true)
   }
 
-  const runTest = async () => {
-    const vals = form.getFieldsValue(true) as HostInput
+  const runTest = async (extraOtp?: string) => {
+    const vals = { ...(form.getFieldsValue(true) as HostInput) }
+    if (extraOtp?.trim()) {
+      vals.dsmOtpCode = extraOtp.trim()
+    }
     setTesting(true)
     setTestResult(null)
     try {
       const res = await api.testHost(editing ? { ...vals, hostId: editing.id } : vals)
       setTestResult(res)
       if (res.needOtp) {
-        setShowOtpField(true)
+        setOtpTrigger('test')
+        setOtpCode('')
+        setOtpModalOpen(true)
+      } else {
+        setOtpModalOpen(false)
       }
     } catch (e) {
+      if (e instanceof ApiError && (e.code === 'need_otp' || e.testResult?.needOtp)) {
+        if (e.testResult) setTestResult(e.testResult)
+        setOtpTrigger('test')
+        setOtpCode('')
+        setOtpModalOpen(true)
+        return
+      }
       message.error((e as Error).message)
     } finally {
       setTesting(false)
@@ -180,13 +200,16 @@ export default function HostsPage() {
     }
   }
 
-  const handleSave = async () => {
+  const handleSave = async (extraOtp?: string) => {
     try {
       await form.validateFields()
     } catch {
       return
     }
     const vals = { ...(form.getFieldsValue(true) as HostInput) }
+    if (extraOtp?.trim()) {
+      vals.dsmOtpCode = extraOtp.trim()
+    }
     if (testResult?.deviceTokenNonce) {
       vals.deviceTokenNonce = testResult.deviceTokenNonce
     }
@@ -198,6 +221,8 @@ export default function HostsPage() {
       } else {
         await api.createHost(vals)
       }
+      setOtpModalOpen(false)
+      setOtpCode('')
       message.success(t.hosts.saved)
       setModalOpen(false)
       qc.invalidateQueries({ queryKey: ['hosts'] })
@@ -206,13 +231,24 @@ export default function HostsPage() {
     } catch (e) {
       if (e instanceof ApiError && e.testResult) {
         setTestResult(e.testResult)
-        if (e.testResult.needOtp) {
-          setShowOtpField(true)
-        }
+      }
+      if (e instanceof ApiError && (e.code === 'need_otp' || e.testResult?.needOtp)) {
+        setOtpTrigger('save')
+        setOtpCode('')
+        setOtpModalOpen(true)
+        return
       }
       message.error((e as Error).message)
     } finally {
       setSaving(false)
+    }
+  }
+
+  const onConfirmOtpModal = () => {
+    if (otpTrigger === 'test') {
+      runTest(otpCode)
+    } else {
+      handleSave(otpCode)
     }
   }
 
@@ -410,11 +446,11 @@ export default function HostsPage() {
             <Button
               icon={<SyncOutlined spin={testing} />}
               loading={testing}
-              onClick={runTest}
+              onClick={() => runTest()}
             >
               {testing ? t.hosts.testing : t.hosts.testBtn}
             </Button>
-            <Button type="primary" loading={saving} onClick={handleSave}>
+            <Button type="primary" loading={saving} onClick={() => handleSave()}>
               {t.hosts.saveBtn}
             </Button>
           </Flex>
@@ -489,7 +525,7 @@ export default function HostsPage() {
               </Form.Item>
             )}
 
-            {/* 3. 表单输入区 */}
+            {/* 3. 表单输入区（不放任何 2FA 字段，检测到 needOtp 时即时弹窗） */}
             <Form.Item name="name" label={t.hosts.nameLabel} rules={[{ required: true }]}>
               <Input placeholder={t.hosts.namePlaceholder} />
             </Form.Item>
@@ -519,20 +555,6 @@ export default function HostsPage() {
                     </Form.Item>
                   </Col>
                 </Row>
-                {showOtpField || testResult?.needOtp ? (
-                  <Form.Item name="dsmOtpCode" label={t.hosts.dsmOtpLabel} style={{ marginBottom: 4 }}>
-                    <Input placeholder={t.hosts.dsmOtpPlaceholder} maxLength={8} />
-                  </Form.Item>
-                ) : (
-                  <Button
-                    type="link"
-                    size="small"
-                    style={{ padding: 0 }}
-                    onClick={() => setShowOtpField(true)}
-                  >
-                    {t.hosts.dsmOtpToggle}
-                  </Button>
-                )}
               </>
             )}
 
@@ -660,6 +682,47 @@ export default function HostsPage() {
               </Space>
             </Card>
           )}
+        </Space>
+      </Modal>
+
+      {/* 2FA 即时弹窗（仅当测试或保存返回 needOtp 时弹出） */}
+      <Modal
+        open={otpModalOpen}
+        title={t.hosts.otpModalTitle}
+        width={380}
+        onCancel={() => setOtpModalOpen(false)}
+        footer={
+          <Flex justify="flex-end" gap={8}>
+            <Button onClick={() => setOtpModalOpen(false)}>{t.ignoreModal.cancel}</Button>
+            <Button
+              type="primary"
+              loading={testing || saving}
+              onClick={onConfirmOtpModal}
+            >
+              {otpTrigger === 'test' ? t.hosts.otpVerifyTestBtn : t.hosts.otpVerifySaveBtn}
+            </Button>
+          </Flex>
+        }
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {t.hosts.otpModalDesc}
+          </Typography.Text>
+          <Input
+            autoFocus
+            maxLength={6}
+            placeholder="000000"
+            value={otpCode}
+            onChange={(e) => setOtpCode(e.target.value)}
+            onPressEnter={onConfirmOtpModal}
+            style={{
+              textAlign: 'center',
+              letterSpacing: '0.4em',
+              fontFamily: 'monospace',
+              fontSize: 18,
+              padding: '8px 12px',
+            }}
+          />
         </Space>
       </Modal>
     </Space>
