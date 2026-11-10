@@ -56,6 +56,11 @@ func FromRequest(r *http.Request, fallback Lang) Lang {
 
 // FormatReason 根据结构化原因码和参数生成对应语言的风险警告文案。
 func FormatReason(lang Lang, reason, dbName, fromVer, toVer string) string {
+	return FormatReasonWithRole(lang, reason, dbName, "", fromVer, toVer)
+}
+
+// FormatReasonWithRole 根据结构化原因码、组件名称与角色类型（database/mq/middleware）生成对应语言的风险警告文案。
+func FormatReasonWithRole(lang Lang, reason, dbName, roleKind, fromVer, toVer string) string {
 	switch reason {
 	case "major_bump":
 		if lang == EnUS {
@@ -63,15 +68,41 @@ func FormatReason(lang Lang, reason, dbName, fromVer, toVer string) string {
 		}
 		return fmt.Sprintf("跨大版本升级（%s → %s），建议先查看新版更新说明。", fromVer, toVer)
 	case "database", "database_suspected":
-		if lang == EnUS {
-			return fmt.Sprintf("This is a %s database service. Please back up your data before updating.", dbName)
+		switch roleKind {
+		case "mq":
+			if lang == EnUS {
+				return fmt.Sprintf("This is a %s message queue service. Please verify message consumers and back up before updating.", dbName)
+			}
+			return fmt.Sprintf("这是 %s 消息队列服务，升级前建议确认消费状态并备份好数据。", dbName)
+		case "middleware":
+			if lang == EnUS {
+				return fmt.Sprintf("This is a %s stateful middleware service. Please back up your data before updating.", dbName)
+			}
+			return fmt.Sprintf("这是 %s 有状态中间件服务，升级前建议先备份好数据。", dbName)
+		default:
+			if lang == EnUS {
+				return fmt.Sprintf("This is a %s database service. Please back up your data before updating.", dbName)
+			}
+			return fmt.Sprintf("这是 %s 数据库服务，升级前建议先备份好数据。", dbName)
 		}
-		return fmt.Sprintf("这是 %s 数据库服务，升级前建议先备份好数据。", dbName)
 	case "database_cross_series":
-		if lang == EnUS {
-			return fmt.Sprintf("%s database major upgrade (%s → %s). Please back up your data and read the upgrade guide first!", dbName, fromVer, toVer)
+		switch roleKind {
+		case "mq":
+			if lang == EnUS {
+				return fmt.Sprintf("%s message queue cross-series upgrade (%s → %s). Please read the upgrade guide first!", dbName, fromVer, toVer)
+			}
+			return fmt.Sprintf("%s 消息队列跨系列升级（%s → %s），请先查阅升级说明！", dbName, fromVer, toVer)
+		case "middleware":
+			if lang == EnUS {
+				return fmt.Sprintf("%s middleware cross-series upgrade (%s → %s). Please back up your data and read the upgrade guide first!", dbName, fromVer, toVer)
+			}
+			return fmt.Sprintf("%s 中间件跨系列升级（%s → %s），请先备份数据并查阅升级说明！", dbName, fromVer, toVer)
+		default:
+			if lang == EnUS {
+				return fmt.Sprintf("%s database major upgrade (%s → %s). Please back up your data and read the upgrade guide first!", dbName, fromVer, toVer)
+			}
+			return fmt.Sprintf("%s 数据库跨大版本升级（%s → %s），请先备份数据并查阅升级说明！", dbName, fromVer, toVer)
 		}
-		return fmt.Sprintf("%s 数据库跨大版本升级（%s → %s），请先备份数据并查阅升级说明！", dbName, fromVer, toVer)
 	case "pinned_digest":
 		if lang == EnUS {
 			return "This container is pinned to a fixed version and will not update automatically."

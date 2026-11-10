@@ -653,6 +653,117 @@ func normalizeRepo(repo string) string {
 	return strings.TrimPrefix(r, "library/")
 }
 
+func normalizeDSMDigest(d string) string {
+	d = strings.TrimSpace(d)
+	if d == "" || strings.Contains(d, ":") {
+		return d
+	}
+	if len(d) == 64 {
+		return "sha256:" + strings.ToLower(d)
+	}
+	return d
+}
+
+func normalizeDSMImageID(id string) string {
+	id = strings.ToLower(strings.TrimSpace(id))
+	return strings.TrimPrefix(id, "sha256:")
+}
+
+// GetProjectCompose 读取群晖 DSM 项目（或 SSH/本机 Compose 项目）的当前 compose.yaml 内容。
+func (a *Adapter) GetProjectCompose(ctx context.Context, project *platform.ProjectInfo) (string, error) {
+	if a.dock != nil {
+		if content, err := a.dock.GetProjectCompose(ctx, project); err == nil {
+			return content, nil
+		} else if a.dsmCli == nil || project == nil || project.DSMProjectID == "" {
+			return "", err
+		}
+	}
+	if a.dsmCli == nil {
+		return "", i18n.NewHostError("dsm.not_configured", nil)
+	}
+	if project == nil || strings.TrimSpace(project.DSMProjectID) == "" {
+		return "", i18n.NewEngineError(i18n.MsgComposeNotEditable)
+	}
+	detail, err := a.dsmCli.GetProject(ctx, project.DSMProjectID)
+	if err != nil {
+		return "", err
+	}
+	return detail.Content, nil
+}
+
+// UpdateProjectCompose 按新版完整 YAML 更新群晖项目：校验 services、备份原配置、拉取全部声明镜像并重建；失败自动写回原 YAML 并恢复（附录 D.4）。
+func (a *Adapter) UpdateProjectCompose(
+	ctx context.Context,
+	appName string,
+	project *platform.ProjectInfo,
+	newYAML string,
+	onProgress func(platform.PullProgress),
+) error {
+	if a.dock != nil {
+		return a.dock.UpdateProjectCompose(ctx, appName, project, newYAML, onProgress)
+	}
+	if a.dsmCli == nil {
+		return &platform.UpdateError{Code: "recreate_failed", Message: biErr(i18n.NewHostError("dsm.not_configured", nil))}
+	}
+	if project == nil || strings.TrimSpace(project.DSMProjectID) == "" {
+		return i18n.NewEngineError(i18n.MsgComposeNotEditable)
+	}
+	svcImages, err := docker.ValidateComposeYAML(newYAML)
+	if err != nil {
+		return err
+	}
+
+	detail, err := a.dsmCli.GetProject(ctx, project.DSMProjectID)
+	if err != nil {
+		return &platform.UpdateError{Code: "recreate_failed", Message: biErr(err)}
+	}
+	beforeYAML := detail.Content
+
+	emit := func(p platform.PullProgress) {
+		if onProgress != nil {
+			onProgress(p)
+		}
+	}
+	emit(platform.PullProgress{Phase: "precheck", StatusText: "Prechecking DSM project compose update", Percent: 5})
+
+	// 按字典序依次拉取新版 YAML 中声明的各个服务镜像（拉取失败尚未改写 DSM 项目，无需回滚）
+	svcNames := make([]string, 0, len(svcImages))
+	for name := range svcImages {
+		svcNames = append(svcNames, name)
+	}
+	sort.Strings(svcNames)
+	seenRef := make(map[string]bool, len(svcNames))
+	for _, svcName := range svcNames {
+		imgRef := svcImages[svcName]
+		if imgRef == "" || strings.Contains(imgRef, "${") || seenRef[imgRef] {
+			continue
+		}
+		seenRef[imgRef] = true
+		repo, tag := splitDSMRepoTag(imgRef)
+		if err := a.dsmCli.PullImage(ctx, repo, tag, onProgress); err != nil {
+			return &platform.UpdateError{
+				Code:    "pull_failed",
+				Message: fmt.Sprintf("%s:%s — %s", repo, tag, biErr(err)),
+			}
+		}
+	}
+
+	emit(platform.PullProgress{Phase: "recreating", StatusText: "Updating DSM project compose.yaml & rebuilding", Percent: 85})
+	if err := a.dsmCli.UpdateAndBuildProject(ctx, project.DSMProjectID, newYAML); err != nil {
+		var pbe *ProjectBuildError
+		restoreNote := ""
+		if !errors.As(err, &pbe) || pbe.YAMLWritten {
+			restoreNote = a.restoreProjectYAML(ctx, project.DSMProjectID, beforeYAML)
+		}
+		return &platform.UpdateError{
+			Code:    "recreate_failed",
+			Message: biErr(err) + restoreNote,
+		}
+	}
+	emit(platform.PullProgress{Phase: "done", StatusText: "Compose project updated", Percent: 100})
+	return nil
+}
+
 // findImageID 在 DSM 镜像列表中查找 repo:tag 对应的镜像 ID。
 func findImageID(imgs []dsmImageListItem, repo, tag string) string {
 	want := normalizeRepo(repo)
@@ -839,13 +950,60 @@ func (a *Adapter) listAppsViaDSMAPI(ctx context.Context) ([]platform.App, error)
 		return nil, err
 	}
 	images, _ := a.dsmCli.ListImages(ctx)
-	digestByRepoTag := make(map[string]string, len(images))
+	digestByRepoTag := make(map[string]string, len(images)*2)
+	digestByImageID := make(map[string]string, len(images))
 	for _, img := range images {
-		if img.Digest != "" {
-			for _, t := range img.Tags {
-				digestByRepoTag[img.Repository+":"+t] = img.Digest
+		normDig := normalizeDSMDigest(img.Digest)
+		if normDig == "" {
+			continue
+		}
+		if idKey := normalizeDSMImageID(img.ID); idKey != "" {
+			digestByImageID[idKey] = normDig
+		}
+		tags := img.Tags
+		if len(tags) == 0 {
+			tags = []string{"latest"}
+		}
+		normImgRepo := normalizeRepo(img.Repository)
+		for _, t := range tags {
+			t = strings.TrimSpace(t)
+			if t == "" {
+				t = "latest"
+			}
+			digestByRepoTag[strings.ToLower(strings.TrimSpace(img.Repository))+":"+t] = normDig
+			if normImgRepo != "" {
+				digestByRepoTag[normImgRepo+":"+t] = normDig
 			}
 		}
+	}
+	lookupDigests := func(imgRef, imageID string) []string {
+		repo, tag := splitDSMRepoTag(imgRef)
+		var d string
+		for _, cand := range []string{
+			strings.ToLower(strings.TrimSpace(imgRef)),
+			strings.ToLower(strings.TrimSpace(repo)) + ":" + tag,
+			normalizeRepo(repo) + ":" + tag,
+		} {
+			if cand != "" {
+				if v := digestByRepoTag[cand]; v != "" {
+					d = v
+					break
+				}
+			}
+		}
+		if d == "" {
+			if idKey := normalizeDSMImageID(imageID); idKey != "" {
+				d = digestByImageID[idKey]
+			}
+		}
+		if d == "" {
+			return nil
+		}
+		baseRepo := repo
+		if baseRepo == "" {
+			baseRepo = imgRef
+		}
+		return []string{baseRepo + "@" + d}
 	}
 
 	claimedContainers := make(map[string]bool)
@@ -883,10 +1041,7 @@ func (a *Adapter) listAppsViaDSMAPI(ctx context.Context) ([]platform.App, error)
 			}
 			svc, exists := svcMap[svcName]
 			if !exists {
-				var digests []string
-				if d := digestByRepoTag[imgRef]; d != "" {
-					digests = []string{imgRef + "@" + d}
-				}
+				digests := lookupDigests(imgRef, c.Image)
 				svc = &platform.Service{
 					Key:         fmt.Sprintf("%s/%s", appKey, svcName),
 					Name:        svcName,
@@ -907,10 +1062,11 @@ func (a *Adapter) listAppsViaDSMAPI(ctx context.Context) ([]platform.App, error)
 			for svcName, imgRef := range parseServicesFromComposeYAML(detail.Content) {
 				svcOrder = append(svcOrder, svcName)
 				svcMap[svcName] = &platform.Service{
-					Key:      fmt.Sprintf("%s/%s", appKey, svcName),
-					Name:     svcName,
-					State:    strings.ToLower(detail.Status),
-					ImageRef: imgRef,
+					Key:         fmt.Sprintf("%s/%s", appKey, svcName),
+					Name:        svcName,
+					State:       strings.ToLower(detail.Status),
+					ImageRef:    imgRef,
+					RepoDigests: lookupDigests(imgRef, ""),
 				}
 			}
 		}
@@ -949,10 +1105,7 @@ func (a *Adapter) listAppsViaDSMAPI(ctx context.Context) ([]platform.App, error)
 		if imgRef == "" {
 			imgRef = c.ImageAlt
 		}
-		var digests []string
-		if d := digestByRepoTag[imgRef]; d != "" {
-			digests = []string{imgRef + "@" + d}
-		}
+		digests := lookupDigests(imgRef, c.ImageID)
 		state := c.State.Status
 		if state == "" {
 			state = c.Status

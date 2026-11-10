@@ -68,3 +68,93 @@ func TestEvaluateCases(t *testing.T) {
 		t.Fatalf("case 4 expected KindNone, got %+v", out4)
 	}
 }
+
+func TestAppendixD_PrecisionScopingAndDigestFormattingAndStatefulRules(t *testing.T) {
+	// 1. 单段标签 :2 绝不越界推荐 :3 / :9
+	ref1, _ := version.ParseImageRef("eclipse-mosquitto:2")
+	out1 := Evaluate(Input{
+		Ref:                ref1,
+		LocalRepoDigest:    "sha256:aaaa111122223333",
+		RemoteManifest:     &registry.ManifestResult{RepoDigest: "sha256:aaaa111122223333"},
+		CurrentMatchedTags: []string{"2", "2.0.20"},
+		CandidateTags: []registry.TagDigestEntry{
+			{Name: "2", RepoDigest: "sha256:aaaa111122223333"},
+			{Name: "3", RepoDigest: "sha256:bbbb444455556666"},
+			{Name: "9", RepoDigest: "sha256:cccc777788889999"},
+		},
+	})
+	if out1.Kind != KindNone || out1.RoleKind != "mq" || out1.CurrentVersion != "2.0.20" {
+		t.Fatalf("1-part precision scoping failed: %+v", out1)
+	}
+
+	// 2. 两段标签 :8.3 绝不越界推荐 :8.4 / :8.9
+	ref2, _ := version.ParseImageRef("php:8.3")
+	out2 := Evaluate(Input{
+		Ref:             ref2,
+		LocalRepoDigest: "sha256:1111222233334444",
+		RemoteManifest:  &registry.ManifestResult{RepoDigest: "sha256:1111222233334444"},
+		CandidateTags: []registry.TagDigestEntry{
+			{Name: "8.3", RepoDigest: "sha256:1111222233334444"},
+			{Name: "8.4", RepoDigest: "sha256:5555666677778888"},
+			{Name: "8.9", RepoDigest: "sha256:9999aaaabbbbcccc"},
+		},
+	})
+	if out2.Kind != KindNone || out2.CurrentVersion != "8.3" {
+		t.Fatalf("2-part precision scoping failed: %+v", out2)
+	}
+
+	// 3. 消除 "2 -> 2"：当 :2 摘要变化但未反查到更细标签时，输出 "2 (a1b2c3) -> 2 (d4e5f6)"
+	out3 := Evaluate(Input{
+		Ref:                ref1,
+		LocalRepoDigest:    "sha256:a1b2c31111111111",
+		RemoteManifest:     &registry.ManifestResult{RepoDigest: "sha256:d4e5f62222222222"},
+		CurrentMatchedTags: []string{"2"},
+		RemoteMatchedTags:  []string{"2"},
+	})
+	if out3.Kind != KindDigestUpdate || out3.CurrentVersion != "2 (a1b2c3)" || out3.TargetVersion != "2 (d4e5f6)" {
+		t.Fatalf("expected short hash diff instead of 2 -> 2, got %+v", out3)
+	}
+
+	// 4. 消除 "当前版本未知 / 检测到新镜像"：:latest 无任何别名标签时输出 "latest (112233) -> latest (445566)"
+	refLatest, _ := version.ParseImageRef("guovern/iptv-api:latest")
+	out4 := Evaluate(Input{
+		Ref:                refLatest,
+		LocalRepoDigest:    "sha256:112233aaaaaaaaaa",
+		RemoteManifest:     &registry.ManifestResult{RepoDigest: "sha256:445566bbbbbbbbbb"},
+		CurrentMatchedTags: []string{"latest"},
+		RemoteMatchedTags:  []string{"latest"},
+	})
+	if out4.Kind != KindDigestUpdate || out4.CurrentVersion != "latest (112233)" || out4.TargetVersion != "latest (445566)" {
+		t.Fatalf("expected latest short hash diff, got %+v", out4)
+	}
+
+	// 5. 四段版本号更新（Chrome 131.0.6778.85 -> 131.0.6778.108 normal；-> 132.0.6834.57 caution）
+	refChrome, _ := version.ParseImageRef("linuxserver/chromium:131.0.6778.85")
+	out5 := Evaluate(Input{
+		Ref:             refChrome,
+		LocalRepoDigest: "sha256:aaa111",
+		RemoteManifest:  &registry.ManifestResult{RepoDigest: "sha256:aaa111"},
+		CandidateTags: []registry.TagDigestEntry{
+			{Name: "131.0.6778.108", RepoDigest: "sha256:bbb222"},
+			{Name: "132.0.6834.57", RepoDigest: "sha256:ccc333"},
+		},
+	})
+	if out5.Kind != KindVersionUpdate || out5.Category != CategoryCaution || out5.TargetVersion != "132.0.6834.57" {
+		t.Fatalf("4-part major bump classification failed: %+v", out5)
+	}
+
+	// 6. 非白名单自定义镜像按服务名 "broker" 兜底识别为需谨慎更新（mq）
+	refCustomMQ, _ := version.ParseImageRef("mycorp/internal-bus:1.2.0")
+	out6 := Evaluate(Input{
+		Ref:             refCustomMQ,
+		ServiceName:     "broker",
+		LocalRepoDigest: "sha256:111",
+		RemoteManifest:  &registry.ManifestResult{RepoDigest: "sha256:111"},
+		CandidateTags: []registry.TagDigestEntry{
+			{Name: "1.2.1", RepoDigest: "sha256:222"},
+		},
+	})
+	if out6.Kind != KindVersionUpdate || out6.Category != CategoryCaution || out6.Reason != "database_suspected" || out6.RoleKind != "mq" {
+		t.Fatalf("expected heuristic mq caution, got %+v", out6)
+	}
+}

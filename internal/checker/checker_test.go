@@ -212,3 +212,50 @@ func TestSaveFinding_PreservesNotifiedAtAcrossCheckFailedAndGetApp(t *testing.T)
 		t.Fatalf("expected GetApp to return all 2 services, got %d", len(card.Services))
 	}
 }
+
+func TestOverview_ThreeGroupsNoSlashConcatenationAndIgnoreBadges(t *testing.T) {
+	chk, st := newTestChecker(t, nil)
+	ctx := context.Background()
+	now := time.Now().Unix()
+
+	_, _ = st.DB.ExecContext(ctx, `INSERT INTO host(id, name, kind, transport, status, created_at) VALUES ('h1', '本机群晖 NAS', 'synology', 'dsm_api', 'online', ?)`, now)
+	_, _ = st.DB.ExecContext(ctx, `
+		INSERT INTO app(key, host_id, name, source, project_json, updated_at) VALUES
+		('h1/dsm_project/teslamate-cn', 'h1', 'teslamate-cn', 'dsm_project', '{"name":"teslamate-cn","dsmProjectId":"uuid-1","sourceReadable":true}', ?),
+		('h1/container/chromium', 'h1', 'chromium', 'standalone', '', ?)`, now, now)
+	_, _ = st.DB.ExecContext(ctx, `
+		INSERT INTO service(key, app_key, name, state, image_ref, image_id, repo_digest, platform, labels_json, updated_at) VALUES
+		('h1/dsm_project/teslamate-cn/teslamate', 'h1/dsm_project/teslamate-cn', 'teslamate', 'running', 'teslamate/teslamate:1.30.0', 'sha256:11', 'sha256:11', 'linux/amd64', '', ?),
+		('h1/dsm_project/teslamate-cn/mosquitto', 'h1/dsm_project/teslamate-cn', 'mosquitto', 'running', 'eclipse-mosquitto:2', 'sha256:22', 'sha256:22', 'linux/amd64', '', ?),
+		('h1/container/chromium/main', 'h1/container/chromium', 'chromium', 'running', 'linuxserver/chromium:131.0.6778.85', 'sha256:33', 'sha256:33', 'linux/amd64', '', ?)`,
+		now, now, now)
+	_, _ = st.DB.ExecContext(ctx, `
+		INSERT INTO finding(service_key, kind, category, reason, current_version, target_version, target_ref, target_digest, checked_at) VALUES
+		('h1/dsm_project/teslamate-cn/teslamate', 'version_update', 'normal', '', '1.30.0', '1.31.0', 'teslamate/teslamate:1.31.0', 'sha256:11b', ?),
+		('h1/dsm_project/teslamate-cn/mosquitto', 'digest_update', 'caution', 'database|Eclipse Mosquitto|mq', '2.0.18', '2.0.20', 'eclipse-mosquitto:2', 'sha256:22b', ?),
+		('h1/container/chromium/main', 'version_update', 'caution', 'major_bump', '131.0.6778.85', '132.0.6834.57', 'linuxserver/chromium:132.0.6834.57', 'sha256:33b', ?)`,
+		now, now, now)
+
+	// 为 chromium 设置锁定前缀 131 -> 132.0.6834.57 应被抑制并归入 noUpdate，且带 Ignored=true & IgnorePrefix="131"
+	if err := chk.ign.SetWithOptions(ctx, ignore.SetOptions{
+		ServiceKeys: []string{"h1/container/chromium/main"},
+		Mode:        ignore.ModePrefix,
+		Prefix:      "131",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ov, err := chk.Overview(ctx, "", i18n.ZhCN)
+	if err != nil {
+		t.Fatalf("Overview: %v", err)
+	}
+	if len(ov.Normal) != 1 || ov.Normal[0].Name != "teslamate" || ov.Normal[0].ProjectName != "teslamate-cn" || ov.Normal[0].TotalServiceCount != 2 || len(ov.Normal[0].AllServices) != 2 || !ov.Normal[0].ComposeEditable {
+		t.Fatalf("unexpected normal card: %+v", ov.Normal)
+	}
+	if len(ov.Caution) != 1 || ov.Caution[0].Name != "mosquitto" || ov.Caution[0].ProjectName != "teslamate-cn" || ov.Caution[0].RoleKind != "mq" {
+		t.Fatalf("unexpected caution card (must be 'mosquitto', not slash concat): %+v", ov.Caution)
+	}
+	if len(ov.NoUpdate) != 1 || ov.NoUpdate[0].Group != "no_update" || !ov.NoUpdate[0].Ignored || ov.NoUpdate[0].IgnorePrefix != "131" || ov.NoUpdate[0].SummaryCurrent != "131.0.6778.85" {
+		t.Fatalf("unexpected noUpdate card: %+v", ov.NoUpdate)
+	}
+}

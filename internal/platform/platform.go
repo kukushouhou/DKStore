@@ -21,6 +21,8 @@ type Adapter interface {
 	Kind() string
 	Probe(ctx context.Context) (*HostInfo, error)
 	ListApps(ctx context.Context) ([]App, error)
+	GetProjectCompose(ctx context.Context, project *ProjectInfo) (string, error)
+	UpdateProjectCompose(ctx context.Context, appName string, project *ProjectInfo, newYAML string, onProgress func(PullProgress)) error
 	Close() error
 }
 

@@ -12,3 +12,39 @@ html[data-theme='light'] body {
 html[data-theme='dark'] body {
   background: #000;
 }
+
+@keyframes dkstore-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.dkstore-spin {
+  animation: dkstore-spin 0.9s linear infinite;
+}
+
+.dkstore-ver-pill {
+  cursor: pointer;
+  transition: border-color 0.16s ease, background-color 0.16s ease, transform 0.12s ease;
+}
+
+.dkstore-ver-pill:hover {
+  filter: brightness(0.97);
+}
+
+.dkstore-tag-row {
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.dkstore-tag-row:hover {
+  background-color: rgba(47, 107, 255, 0.08);
+}
+
+.dkstore-radio-card {
+  cursor: pointer;
+  transition: border-color 0.16s ease, background-color 0.16s ease;
+}

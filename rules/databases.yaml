@@ -1,16 +1,20 @@
-# 数据库类镜像识别与发行系列规则（实施文档 §6.2）
+# 有状态组件（数据库、消息队列、存储与检索中间件）识别与发行系列规则（实施文档 §6.2 / 附录 D.2）
 databases:
   - name: MySQL
+    kind: database
     images:
       - library/mysql
+      - mysql
       - mysql/mysql-server
       - bitnami/mysql
     pattern: '(^|/)mysql(-server)?$'
     series: minor
     docs: https://dev.mysql.com/doc/relnotes/mysql/
   - name: PostgreSQL
+    kind: database
     images:
       - library/postgres
+      - postgres
       - bitnami/postgresql
       - postgis/postgis
       - tensorchord/pgvecto-rs
@@ -19,16 +23,20 @@ databases:
     series: major
     docs: https://www.postgresql.org/docs/release/
   - name: MariaDB
+    kind: database
     images:
       - library/mariadb
+      - mariadb
       - linuxserver/mariadb
       - bitnami/mariadb
     pattern: '(^|/)mariadb$'
     series: minor
     docs: https://mariadb.com/kb/en/release-notes/
   - name: Redis
+    kind: database
     images:
       - library/redis
+      - redis
       - bitnami/redis
       - redis/redis-stack-server
       - redis/redis-stack
@@ -36,6 +44,7 @@ databases:
     series: minor
     docs: https://github.com/redis/redis/releases
   - name: Valkey
+    kind: database
     images:
       - valkey/valkey
       - library/valkey
@@ -43,16 +52,136 @@ databases:
     series: minor
     docs: https://github.com/valkey-io/valkey/releases
   - name: MongoDB
+    kind: database
     images:
       - library/mongo
+      - mongo
       - mongodb/mongodb-community-server
       - bitnami/mongodb
     pattern: '(^|/)mongo(db)?$'
     series: minor
     docs: https://www.mongodb.com/docs/manual/release-notes/
   - name: InfluxDB
+    kind: database
     images:
       - library/influxdb
+      - influxdb
     pattern: '(^|/)influxdb$'
     series: major
     docs: https://docs.influxdata.com/influxdb/
+  - name: ClickHouse
+    kind: database
+    images:
+      - clickhouse/clickhouse-server
+      - library/clickhouse
+      - yandex/clickhouse-server
+    pattern: '(^|/)clickhouse(-server)?$'
+    series: minor
+    docs: https://clickhouse.com/docs/en/whats-new/changelog
+  - name: TimescaleDB
+    kind: database
+    images:
+      - timescale/timescaledb
+      - timescale/timescaledb-ha
+    pattern: '(^|/)timescaledb(-ha)?$'
+    series: major
+    docs: https://github.com/timescale/timescaledb/releases
+  - name: TDengine
+    kind: database
+    images:
+      - tdengine/tdengine
+    pattern: '(^|/)tdengine$'
+    series: minor
+    docs: https://github.com/taosdata/TDengine/releases
+  - name: Eclipse Mosquitto
+    kind: mq
+    images:
+      - eclipse-mosquitto
+      - library/eclipse-mosquitto
+    pattern: '(^|/)(eclipse-)?mosquitto$'
+    series: minor
+    docs: https://github.com/eclipse-mosquitto/mosquitto/releases
+  - name: EMQX
+    kind: mq
+    images:
+      - emqx/emqx
+      - emqx/emqx-enterprise
+    pattern: '(^|/)emqx(-enterprise)?$'
+    series: minor
+    docs: https://github.com/emqx/emqx/releases
+  - name: RabbitMQ
+    kind: mq
+    images:
+      - library/rabbitmq
+      - rabbitmq
+      - bitnami/rabbitmq
+    pattern: '(^|/)rabbitmq$'
+    series: minor
+    docs: https://github.com/rabbitmq/rabbitmq-server/releases
+  - name: Kafka
+    kind: mq
+    images:
+      - apache/kafka
+      - bitnami/kafka
+      - confluentinc/cp-kafka
+    pattern: '(^|/)(cp-)?kafka$'
+    series: minor
+    docs: https://kafka.apache.org/downloads
+  - name: RocketMQ
+    kind: mq
+    images:
+      - apache/rocketmq
+    pattern: '(^|/)rocketmq$'
+    series: minor
+    docs: https://github.com/apache/rocketmq/releases
+  - name: NATS
+    kind: mq
+    images:
+      - library/nats
+      - nats
+      - bitnami/nats
+    pattern: '(^|/)nats$'
+    series: minor
+    docs: https://github.com/nats-io/nats-server/releases
+  - name: Meilisearch
+    kind: middleware
+    images:
+      - getmeili/meilisearch
+    pattern: '(^|/)meilisearch$'
+    series: minor
+    docs: https://github.com/meilisearch/meilisearch/releases
+  - name: Elasticsearch
+    kind: middleware
+    images:
+      - library/elasticsearch
+      - elasticsearch
+      - docker.elastic.co/elasticsearch/elasticsearch
+      - bitnami/elasticsearch
+    pattern: '(^|/)elasticsearch$'
+    series: minor
+    docs: https://www.elastic.co/guide/en/elasticsearch/reference/current/release-notes.html
+  - name: OpenSearch
+    kind: middleware
+    images:
+      - opensearchproject/opensearch
+    pattern: '(^|/)opensearch$'
+    series: minor
+    docs: https://github.com/opensearch-project/OpenSearch/releases
+  - name: MinIO
+    kind: middleware
+    images:
+      - minio/minio
+      - quay.io/minio/minio
+      - bitnami/minio
+    pattern: '(^|/)minio$'
+    series: major
+    docs: https://github.com/minio/minio/releases
+  - name: Etcd
+    kind: middleware
+    images:
+      - quay.io/coreos/etcd
+      - bitnami/etcd
+      - gcr.io/etcd-development/etcd
+    pattern: '(^|/)etcd$'
+    series: minor
+    docs: https://github.com/etcd-io/etcd/releases

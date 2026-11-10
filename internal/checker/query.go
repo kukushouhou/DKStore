@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"net/url"
 	"strings"
 	"time"
 
@@ -11,6 +12,9 @@ import (
 	"github.com/kukushouhou/DKStore/internal/host"
 	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/ignore"
+	"github.com/kukushouhou/DKStore/internal/platform"
+	"github.com/kukushouhou/DKStore/internal/registry"
+	"github.com/kukushouhou/DKStore/internal/version"
 	"github.com/kukushouhou/DKStore/rules"
 )
 
@@ -26,6 +30,10 @@ func (s *Service) saveFinding(
 	if len(curTags) > 0 {
 		b, _ := json.Marshal(curTags)
 		_, _ = s.st.DB.ExecContext(ctx, `UPDATE service SET current_tags_json=? WHERE key=?`, string(b), svc.Key)
+	}
+
+	if out.CurrentVersion == "" {
+		out.CurrentVersion = fallbackCurrentVersion(svc.ImageRef, curTags, svc.LabelsJSON)
 	}
 
 	var prevKind, prevTargetDigest, prevTargetVer string
@@ -59,10 +67,13 @@ func (s *Service) saveFinding(
 		isNewUpdate = true
 	}
 
-	// Reason 保存 "reason|databaseName"，便于查询时按任意语言格式化
+	// Reason 保存 "reason|databaseName|roleKind"，便于查询时按任意语言格式化并还原组件角色
 	reasonStored := out.Reason
 	if out.DatabaseName != "" {
 		reasonStored = out.Reason + "|" + out.DatabaseName
+		if out.RoleKind != "" {
+			reasonStored += "|" + out.RoleKind
+		}
 	}
 	targetTagsJSON, _ := json.Marshal(out.TargetTags)
 	linksJSON, _ := json.Marshal(out.Links)
@@ -124,50 +135,67 @@ func (s *Service) saveFinding(
 
 // ServiceItem 是前端展示的服务级状态。
 type ServiceItem struct {
-	Key            string         `json:"key"`
-	Name           string         `json:"name"`
-	State          string         `json:"state"`
-	ImageRef       string         `json:"imageRef"`
-	RepoDigest     string         `json:"repoDigest,omitempty"`
-	CurrentTags    []string       `json:"currentTags,omitempty"`
-	Kind           string         `json:"kind"`               // none | digest_update | version_update | check_failed | uncomparable
-	Category       string         `json:"category,omitempty"` // normal | caution
-	Reason         string         `json:"reason,omitempty"`
-	DatabaseName   string         `json:"databaseName,omitempty"`
-	ReasonText     string         `json:"reasonText,omitempty"`
-	CurrentVersion string         `json:"currentVersion,omitempty"`
-	TargetVersion  string         `json:"targetVersion,omitempty"`
-	RawTargetVer   string         `json:"rawTargetVersion,omitempty"`
-	TargetRef      string         `json:"targetRef,omitempty"`
-	TargetDigest   string         `json:"targetDigest,omitempty"`
-	TargetTags     []string       `json:"targetTags,omitempty"`
-	Hint           string         `json:"hint,omitempty"`
-	ErrorKind      string         `json:"errorKind,omitempty"`
-	ErrorMsg       string         `json:"errorMsg,omitempty"`
-	Links          rules.RepoLink `json:"links"`
-	Ignored        bool           `json:"ignored"`
-	IgnoreMode     string         `json:"ignoreMode,omitempty"`
-	CheckedAt      int64          `json:"checkedAt,omitempty"`
+	Key              string         `json:"key"`
+	Name             string         `json:"name"`
+	State            string         `json:"state"`
+	ImageRef         string         `json:"imageRef"`
+	IconURL          string         `json:"iconUrl,omitempty"`
+	RepoDigest       string         `json:"repoDigest,omitempty"`
+	CurrentTags      []string       `json:"currentTags,omitempty"`
+	Kind             string         `json:"kind"`               // none | digest_update | version_update | check_failed | uncomparable
+	Category         string         `json:"category,omitempty"` // normal | caution
+	Reason           string         `json:"reason,omitempty"`
+	IsDatabase       bool           `json:"isDatabase,omitempty"`
+	DatabaseName     string         `json:"databaseName,omitempty"`
+	RoleKind         string         `json:"roleKind,omitempty"` // database | mq | middleware
+	ReasonText       string         `json:"reasonText,omitempty"`
+	CurrentVersion   string         `json:"currentVersion,omitempty"`
+	TargetVersion    string         `json:"targetVersion,omitempty"`
+	RawTargetVer     string         `json:"rawTargetVersion,omitempty"`
+	TargetRef        string         `json:"targetRef,omitempty"`
+	TargetDigest     string         `json:"targetDigest,omitempty"`
+	TargetTags       []string       `json:"targetTags,omitempty"`
+	CurrentUpdatedAt int64          `json:"currentUpdatedAt,omitempty"`
+	TargetUpdatedAt  int64          `json:"targetUpdatedAt,omitempty"`
+	Hint             string         `json:"hint,omitempty"`
+	ErrorKind        string         `json:"errorKind,omitempty"`
+	ErrorMsg         string         `json:"errorMsg,omitempty"`
+	Links            rules.RepoLink `json:"links"`
+	Ignored          bool           `json:"ignored"`
+	IgnoreMode       string         `json:"ignoreMode,omitempty"`
+	IgnorePrefix     string         `json:"ignorePrefix,omitempty"`
+	IgnoreTargetTag  string         `json:"ignoreTargetTag,omitempty"`
+	CheckedAt        int64          `json:"checkedAt,omitempty"`
 }
 
-// AppCard 是首页三组卡片以及详情抽屉的数据结构。
+// AppCard 是首页三组卡片（可更新 / 需谨慎更新 / 无需更新）及详情抽屉的数据结构（附录 D.2）。
 type AppCard struct {
-	Key            string         `json:"key"`
-	HostID         string         `json:"hostId"`
-	HostName       string         `json:"hostName"`
-	HostStatus     string         `json:"hostStatus"`
-	Name           string         `json:"name"`
-	Source         string         `json:"source"` // standalone | compose | dsm_project | vendor_managed
-	Group          string         `json:"group"`  // normal | caution | ignored | up_to_date
-	SummaryCurrent string         `json:"summaryCurrent,omitempty"`
-	SummaryTarget  string         `json:"summaryTarget,omitempty"`
-	ReasonText     string         `json:"reasonText,omitempty"`
-	IsDatabase     bool           `json:"isDatabase"`
-	DatabaseName   string         `json:"databaseName,omitempty"`
-	Links          rules.RepoLink `json:"links"`
-	UpdateSvcKeys  []string       `json:"updateServiceKeys,omitempty"`
-	IgnoreMode     string         `json:"ignoreMode,omitempty"`
-	Services       []ServiceItem  `json:"services"`
+	Key               string         `json:"key"`
+	HostID            string         `json:"hostId"`
+	HostName          string         `json:"hostName"`
+	HostStatus        string         `json:"hostStatus"`
+	Name              string         `json:"name"`
+	AppName           string         `json:"appName"`
+	ProjectName       string         `json:"projectName,omitempty"`
+	TotalServiceCount int            `json:"totalServiceCount"`
+	Source            string         `json:"source"` // standalone | compose | dsm_project | vendor_managed
+	Group             string         `json:"group"`  // normal | caution | no_update
+	IconURL           string         `json:"iconUrl,omitempty"`
+	SummaryCurrent    string         `json:"summaryCurrent,omitempty"`
+	SummaryTarget     string         `json:"summaryTarget,omitempty"`
+	ReasonText        string         `json:"reasonText,omitempty"`
+	IsDatabase        bool           `json:"isDatabase"`
+	DatabaseName      string         `json:"databaseName,omitempty"`
+	RoleKind          string         `json:"roleKind,omitempty"` // database | mq | middleware
+	Links             rules.RepoLink `json:"links"`
+	UpdateSvcKeys     []string       `json:"updateServiceKeys,omitempty"`
+	Ignored           bool           `json:"ignored"`
+	IgnoreMode        string         `json:"ignoreMode,omitempty"`
+	IgnorePrefix      string         `json:"ignorePrefix,omitempty"`
+	IgnoreTargetTag   string         `json:"ignoreTargetTag,omitempty"`
+	ComposeEditable   bool           `json:"composeEditable"`
+	Services          []ServiceItem  `json:"services"`
+	AllServices       []ServiceItem  `json:"allServices,omitempty"`
 }
 
 // FailedItem 汇总无法检查的服务。
@@ -182,11 +210,12 @@ type FailedItem struct {
 	ErrorMsg    string `json:"errorMsg"`
 }
 
-// OverviewResponse 是 GET /api/v1/overview 的返回体。
+// OverviewResponse 是 GET /api/v1/overview 的返回体（附录 D.2 三分组：Normal / Caution / NoUpdate）。
 type OverviewResponse struct {
 	Hosts         []host.Host  `json:"hosts"`
 	Normal        []AppCard    `json:"normal"`
 	Caution       []AppCard    `json:"caution"`
+	NoUpdate      []AppCard    `json:"noUpdate"`
 	Ignored       []AppCard    `json:"ignored"`
 	UpToDateCount int          `json:"upToDateCount"`
 	TotalAppCount int          `json:"totalAppCount"`
@@ -195,7 +224,183 @@ type OverviewResponse struct {
 	Progress      Progress     `json:"progress"`
 }
 
-// Overview 按请求语言生成首页三组卡片数据。
+func fallbackCurrentVersion(imageRef string, curTags []string, labelsJSON string) string {
+	var labels map[string]string
+	if labelsJSON != "" {
+		_ = json.Unmarshal([]byte(labelsJSON), &labels)
+	}
+	labelVer := classify.ExtractVersionLabel(labels)
+	pr, err := version.ParseImageRef(imageRef)
+	if err != nil {
+		if labelVer != "" {
+			return labelVer
+		}
+		return strings.TrimSpace(imageRef)
+	}
+	if best := version.SelectBestDisplayTag(pr.Tag, curTags); best != "" {
+		return best
+	}
+	if labelVer != "" {
+		return labelVer
+	}
+	if pr.Tag != "" {
+		return pr.Tag
+	}
+	if pr.Digest != "" {
+		if len(pr.Digest) > 19 {
+			return pr.Digest[:19]
+		}
+		return pr.Digest
+	}
+	return imageRef
+}
+
+func resolveServiceRoleAndLinks(svcName, imageRef, storedReason string, storedLinks rules.RepoLink) (reasonCode, dbName, roleKind string, links rules.RepoLink) {
+	parts := strings.Split(storedReason, "|")
+	if len(parts) > 0 {
+		reasonCode = parts[0]
+	}
+	if len(parts) > 1 {
+		dbName = parts[1]
+	}
+	if len(parts) > 2 {
+		roleKind = parts[2]
+	}
+	links = storedLinks
+
+	pr, err := version.ParseImageRef(imageRef)
+	if err == nil {
+		rs := rules.Default()
+		if dbRule, _ := rs.MatchDatabase(pr.Registry, pr.Repository); dbRule != nil {
+			if dbName == "" {
+				dbName = dbRule.Name
+			}
+			if roleKind == "" {
+				roleKind = dbRule.Kind
+			}
+			if links.Releases == "" && dbRule.Docs != "" {
+				links.Releases = dbRule.Docs
+			}
+		}
+		if links.Repo == "" && links.Releases == "" {
+			resolved := rs.ResolveLinks(pr.Registry, pr.Repository, "")
+			links.Repo = resolved.Repo
+			if links.Releases == "" {
+				links.Releases = resolved.Releases
+			}
+		}
+	}
+	if dbName == "" {
+		if hName, hKind, ok := classify.InferStatefulRole(svcName); ok {
+			dbName = hName
+			roleKind = hKind
+		}
+	}
+	if dbName != "" && roleKind == "" {
+		roleKind = "database"
+	}
+	return
+}
+
+func isComposeEditable(appSource, hostTransport, projJSON string) bool {
+	if appSource == string(platform.SourceVendorManaged) || appSource == string(platform.SourceStandalone) {
+		return false
+	}
+	var proj platform.ProjectInfo
+	if projJSON != "" {
+		_ = json.Unmarshal([]byte(projJSON), &proj)
+	}
+	if appSource == string(platform.SourceDSMProject) && strings.TrimSpace(proj.DSMProjectID) != "" {
+		return true
+	}
+	if appSource == string(platform.SourceCompose) && hostTransport != "dsm_api" {
+		return proj.SourceReadable || len(proj.ConfigFiles) > 0
+	}
+	return false
+}
+
+func evaluateServiceIgnoreState(rule ignore.Rule, hasRule bool, fKind, curVer, tgtDigest, tgtVer string) (ignored bool, mode, prefix, targetTag string) {
+	if !hasRule {
+		return false, "", "", ""
+	}
+	isUpd := fKind == string(classify.KindDigestUpdate) || fKind == string(classify.KindVersionUpdate)
+	if isUpd {
+		if ignore.Matches(rule, fKind, tgtDigest, tgtVer) {
+			tTag := rule.TargetTag
+			if tTag == "" {
+				tTag = tgtVer
+			}
+			return true, rule.Mode, rule.Prefix, tTag
+		}
+		return false, "", rule.Prefix, ""
+	}
+	// 当前无未抑制的新版本时（卡片位于 no_update）：保留用户已配置的永久忽略、前缀锁定或未过期的跳过版本标记
+	switch rule.Mode {
+	case ignore.ModeForever:
+		return true, rule.Mode, "", ""
+	case ignore.ModePrefix:
+		if rule.Prefix != "" {
+			return true, rule.Mode, rule.Prefix, ""
+		}
+	case ignore.ModeThisVersion:
+		if rule.TargetTag != "" && rule.TargetTag != curVer {
+			return true, rule.Mode, "", rule.TargetTag
+		}
+		if rule.TargetTag == "" && rule.TargetDigest != "" {
+			return true, rule.Mode, "", ""
+		}
+	}
+	return false, "", "", ""
+}
+
+func iconURLForService(svcKey string) string {
+	if svcKey == "" {
+		return ""
+	}
+	return "/api/v1/icons?serviceKey=" + url.QueryEscape(svcKey)
+}
+
+func (s *Service) lookupTagTimestamps(ctx context.Context, cache map[string]map[string]int64, imageRef, curVer, tgtVer string) (curTS, tgtTS int64) {
+	if s.reg == nil || imageRef == "" {
+		return 0, 0
+	}
+	pr, err := version.ParseImageRef(imageRef)
+	if err != nil {
+		return 0, 0
+	}
+	repoKey := pr.Registry + "/" + pr.Repository
+	tsByTag, ok := cache[repoKey]
+	if !ok {
+		tsByTag = make(map[string]int64)
+		if raw, hit := s.reg.GetCache(ctx, "tags:"+repoKey); hit {
+			var entries []registry.TagDigestEntry
+			if json.Unmarshal(raw, &entries) == nil {
+				for _, e := range entries {
+					if e.UpdatedAt > 0 && e.Name != "" {
+						tsByTag[e.Name] = e.UpdatedAt
+					}
+				}
+			}
+		}
+		cache[repoKey] = tsByTag
+	}
+	cleanTag := func(v string) string {
+		if base, _, has := strings.Cut(strings.TrimSpace(v), " ("); has {
+			return strings.TrimSpace(base)
+		}
+		return strings.TrimSpace(v)
+	}
+	curTS = tsByTag[cleanTag(curVer)]
+	if curTS == 0 && pr.Tag != "" {
+		curTS = tsByTag[pr.Tag]
+	}
+	if tv := cleanTag(tgtVer); tv != "" {
+		tgtTS = tsByTag[tv]
+	}
+	return
+}
+
+// Overview 按请求语言生成首页三组卡片数据（Normal / Caution / NoUpdate）。
 func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.Lang) (*OverviewResponse, error) {
 	hosts, err := s.hosts.List(ctx)
 	if err != nil {
@@ -208,8 +413,8 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 	ignoreRules, _ := s.ign.ListAll(ctx)
 
 	q := `
-		SELECT a.key, a.host_id, a.name, a.source,
-		       s.key, s.name, COALESCE(s.state,''), COALESCE(s.image_ref,''), COALESCE(s.repo_digest,''), COALESCE(s.current_tags_json,''),
+		SELECT a.key, a.host_id, a.name, a.source, COALESCE(a.project_json,''),
+		       s.key, s.name, COALESCE(s.state,''), COALESCE(s.image_ref,''), COALESCE(s.repo_digest,''), COALESCE(s.current_tags_json,''), COALESCE(s.labels_json,''),
 		       COALESCE(f.kind,'none'), COALESCE(f.category,''), COALESCE(f.reason,''),
 		       COALESCE(f.current_version,''), COALESCE(f.target_version,''), COALESCE(f.target_ref,''),
 		       COALESCE(f.target_digest,''), COALESCE(f.target_tags_json,''), COALESCE(f.hint,''),
@@ -233,20 +438,20 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 
 	appOrder := []string{}
 	appMap := make(map[string]*AppCard)
-	var failedList []FailedItem
+	failedList := []FailedItem{}
 	var maxChecked int64
 
 	for rows.Next() {
 		var (
-			appKey, hostID, appName, appSource                     string
-			svcKey, svcName, state, imageRef, repoDigest, curTagsJ string
-			fKind, fCat, fReason, curVer, tgtVer, tgtRef           string
-			tgtDigest, tgtTagsJ, fHint, errKind, errMsg, linksJ    string
-			checkedAt                                              int64
+			appKey, hostID, appName, appSource, projJSON                        string
+			svcKey, svcName, state, imageRef, repoDigest, curTagsJ, labelsJSON  string
+			fKind, fCat, fReason, curVer, tgtVer, tgtRef                        string
+			tgtDigest, tgtTagsJ, fHint, errKind, errMsg, linksJ                 string
+			checkedAt                                                           int64
 		)
 		if err := rows.Scan(
-			&appKey, &hostID, &appName, &appSource,
-			&svcKey, &svcName, &state, &imageRef, &repoDigest, &curTagsJ,
+			&appKey, &hostID, &appName, &appSource, &projJSON,
+			&svcKey, &svcName, &state, &imageRef, &repoDigest, &curTagsJ, &labelsJSON,
 			&fKind, &fCat, &fReason, &curVer, &tgtVer, &tgtRef,
 			&tgtDigest, &tgtTagsJ, &fHint, &errKind, &errMsg, &linksJ, &checkedAt,
 		); err != nil {
@@ -259,59 +464,71 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 		card, exists := appMap[appKey]
 		if !exists {
 			card = &AppCard{
-				Key:        appKey,
-				HostID:     hostID,
-				HostName:   h.Name,
-				HostStatus: h.Status,
-				Name:       appName,
-				Source:     appSource,
+				Key:             appKey,
+				HostID:          hostID,
+				HostName:        h.Name,
+				HostStatus:      h.Status,
+				Name:            appName,
+				AppName:         appName,
+				Source:          appSource,
+				ComposeEditable: isComposeEditable(appSource, h.Transport, projJSON),
 			}
 			appMap[appKey] = card
 			appOrder = append(appOrder, appKey)
 		}
 
-		reasonCode, dbName, _ := strings.Cut(fReason, "|")
-		displayTarget := i18n.FormatTargetVersion(lang, tgtVer)
-		reasonText := i18n.FormatReason(lang, reasonCode, dbName, curVer, displayTarget)
-		hintText := i18n.FormatHint(lang, fHint)
-		localErrMsg := i18n.FormatRegistryError(lang, errKind, errMsg)
-
 		var curTags, tgtTags []string
 		_ = json.Unmarshal([]byte(curTagsJ), &curTags)
 		_ = json.Unmarshal([]byte(tgtTagsJ), &tgtTags)
-		var links rules.RepoLink
-		_ = json.Unmarshal([]byte(linksJ), &links)
+		var storedLinks rules.RepoLink
+		_ = json.Unmarshal([]byte(linksJ), &storedLinks)
+
+		if curVer == "" {
+			curVer = fallbackCurrentVersion(imageRef, curTags, labelsJSON)
+		}
+		reasonCode, dbName, roleKind, links := resolveServiceRoleAndLinks(svcName, imageRef, fReason, storedLinks)
+		isUpd := fKind == string(classify.KindDigestUpdate) || fKind == string(classify.KindVersionUpdate)
+		displayTarget := ""
+		if isUpd {
+			displayTarget = i18n.FormatTargetVersion(lang, tgtVer)
+		}
+		reasonText := i18n.FormatReasonWithRole(lang, reasonCode, dbName, roleKind, curVer, displayTarget)
+		hintText := i18n.FormatHint(lang, fHint)
+		localErrMsg := i18n.FormatRegistryError(lang, errKind, errMsg)
 
 		rule, hasRule := ignoreRules[svcKey]
-		isIgnored := hasRule && (rule.Mode == ignore.ModeForever || ignore.Matches(rule, fKind, tgtDigest, tgtVer))
+		isIgnored, ignMode, ignPrefix, ignTargetTag := evaluateServiceIgnoreState(rule, hasRule, fKind, curVer, tgtDigest, tgtVer)
 
 		item := ServiceItem{
-			Key:            svcKey,
-			Name:           svcName,
-			State:          state,
-			ImageRef:       imageRef,
-			RepoDigest:     repoDigest,
-			CurrentTags:    curTags,
-			Kind:           fKind,
-			Category:       fCat,
-			Reason:         reasonCode,
-			DatabaseName:   dbName,
-			ReasonText:     reasonText,
-			CurrentVersion: curVer,
-			TargetVersion:  displayTarget,
-			RawTargetVer:   tgtVer,
-			TargetRef:      tgtRef,
-			TargetDigest:   tgtDigest,
-			TargetTags:     tgtTags,
-			Hint:           hintText,
-			ErrorKind:      errKind,
-			ErrorMsg:       localErrMsg,
-			Links:          links,
-			Ignored:        isIgnored,
-			CheckedAt:      checkedAt,
-		}
-		if isIgnored {
-			item.IgnoreMode = rule.Mode
+			Key:             svcKey,
+			Name:            svcName,
+			State:           state,
+			ImageRef:        imageRef,
+			IconURL:         iconURLForService(svcKey),
+			RepoDigest:      repoDigest,
+			CurrentTags:     curTags,
+			Kind:            fKind,
+			Category:        fCat,
+			Reason:          reasonCode,
+			IsDatabase:      dbName != "",
+			DatabaseName:    dbName,
+			RoleKind:        roleKind,
+			ReasonText:      reasonText,
+			CurrentVersion:  curVer,
+			TargetVersion:   displayTarget,
+			RawTargetVer:    tgtVer,
+			TargetRef:       tgtRef,
+			TargetDigest:    tgtDigest,
+			TargetTags:      tgtTags,
+			Hint:            hintText,
+			ErrorKind:       errKind,
+			ErrorMsg:        localErrMsg,
+			Links:           links,
+			Ignored:         isIgnored,
+			IgnoreMode:      ignMode,
+			IgnorePrefix:    ignPrefix,
+			IgnoreTargetTag: ignTargetTag,
+			CheckedAt:       checkedAt,
 		}
 		card.Services = append(card.Services, item)
 
@@ -329,10 +546,22 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 		}
 	}
 
+	rows.Close()
+
+	tagTSCache := make(map[string]map[string]int64)
+	for _, key := range appOrder {
+		card := appMap[key]
+		for i := range card.Services {
+			sv := &card.Services[i]
+			sv.CurrentUpdatedAt, sv.TargetUpdatedAt = s.lookupTagTimestamps(ctx, tagTSCache, sv.ImageRef, sv.CurrentVersion, sv.RawTargetVer)
+		}
+	}
+
 	resp := &OverviewResponse{
 		Hosts:         hosts,
 		Normal:        []AppCard{},
 		Caution:       []AppCard{},
+		NoUpdate:      []AppCard{},
 		Ignored:       []AppCard{},
 		Failed:        failedList,
 		LastCheckedAt: maxChecked,
@@ -342,18 +571,18 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 	for _, key := range appOrder {
 		card := appMap[key]
 		resp.TotalAppCount++
-		normalCard, cautionCard, ignoredCard, isUpToDate := splitAppCards(card)
+		normalCards, cautionCards, noUpdateCards, isUpToDate := splitAppCards(card)
 		if isUpToDate {
 			resp.UpToDateCount++
 		}
-		if normalCard != nil {
-			resp.Normal = append(resp.Normal, *normalCard)
+		if len(normalCards) > 0 {
+			resp.Normal = append(resp.Normal, normalCards...)
 		}
-		if cautionCard != nil {
-			resp.Caution = append(resp.Caution, *cautionCard)
+		if len(cautionCards) > 0 {
+			resp.Caution = append(resp.Caution, cautionCards...)
 		}
-		if ignoredCard != nil {
-			resp.Ignored = append(resp.Ignored, *ignoredCard)
+		if len(noUpdateCards) > 0 {
+			resp.NoUpdate = append(resp.NoUpdate, noUpdateCards...)
 		}
 	}
 	return resp, nil
@@ -372,8 +601,8 @@ func (s *Service) GetApp(ctx context.Context, appKey string, lang i18n.Lang) (*A
 	ignoreRules, _ := s.ign.ListAll(ctx)
 
 	rows, err := s.st.DB.QueryContext(ctx, `
-		SELECT a.key, a.host_id, a.name, a.source,
-		       s.key, s.name, COALESCE(s.state,''), COALESCE(s.image_ref,''), COALESCE(s.repo_digest,''), COALESCE(s.current_tags_json,''),
+		SELECT a.key, a.host_id, a.name, a.source, COALESCE(a.project_json,''),
+		       s.key, s.name, COALESCE(s.state,''), COALESCE(s.image_ref,''), COALESCE(s.repo_digest,''), COALESCE(s.current_tags_json,''), COALESCE(s.labels_json,''),
 		       COALESCE(f.kind,'none'), COALESCE(f.category,''), COALESCE(f.reason,''),
 		       COALESCE(f.current_version,''), COALESCE(f.target_version,''), COALESCE(f.target_ref,''),
 		       COALESCE(f.target_digest,''), COALESCE(f.target_tags_json,''), COALESCE(f.hint,''),
@@ -391,15 +620,15 @@ func (s *Service) GetApp(ctx context.Context, appKey string, lang i18n.Lang) (*A
 	var card *AppCard
 	for rows.Next() {
 		var (
-			aKey, hostID, appName, appSource                       string
-			svcKey, svcName, state, imageRef, repoDigest, curTagsJ string
-			fKind, fCat, fReason, curVer, tgtVer, tgtRef           string
-			tgtDigest, tgtTagsJ, fHint, errKind, errMsg, linksJ    string
-			checkedAt                                              int64
+			aKey, hostID, appName, appSource, projJSON                          string
+			svcKey, svcName, state, imageRef, repoDigest, curTagsJ, labelsJSON  string
+			fKind, fCat, fReason, curVer, tgtVer, tgtRef                        string
+			tgtDigest, tgtTagsJ, fHint, errKind, errMsg, linksJ                 string
+			checkedAt                                                           int64
 		)
 		if err := rows.Scan(
-			&aKey, &hostID, &appName, &appSource,
-			&svcKey, &svcName, &state, &imageRef, &repoDigest, &curTagsJ,
+			&aKey, &hostID, &appName, &appSource, &projJSON,
+			&svcKey, &svcName, &state, &imageRef, &repoDigest, &curTagsJ, &labelsJSON,
 			&fKind, &fCat, &fReason, &curVer, &tgtVer, &tgtRef,
 			&tgtDigest, &tgtTagsJ, &fHint, &errKind, &errMsg, &linksJ, &checkedAt,
 		); err != nil {
@@ -408,104 +637,143 @@ func (s *Service) GetApp(ctx context.Context, appKey string, lang i18n.Lang) (*A
 		h := hostMap[hostID]
 		if card == nil {
 			card = &AppCard{
-				Key:        aKey,
-				HostID:     hostID,
-				HostName:   h.Name,
-				HostStatus: h.Status,
-				Name:       appName,
-				Source:     appSource,
-				Group:      "up_to_date",
+				Key:             aKey,
+				HostID:          hostID,
+				HostName:        h.Name,
+				HostStatus:      h.Status,
+				Name:            appName,
+				AppName:         appName,
+				Source:          appSource,
+				Group:           "no_update",
+				ComposeEditable: isComposeEditable(appSource, h.Transport, projJSON),
 			}
 		}
-		reasonCode, dbName, _ := strings.Cut(fReason, "|")
-		displayTarget := i18n.FormatTargetVersion(lang, tgtVer)
-		reasonText := i18n.FormatReason(lang, reasonCode, dbName, curVer, displayTarget)
-		hintText := i18n.FormatHint(lang, fHint)
-		localErrMsg := i18n.FormatRegistryError(lang, errKind, errMsg)
 
 		var curTags, tgtTags []string
 		_ = json.Unmarshal([]byte(curTagsJ), &curTags)
 		_ = json.Unmarshal([]byte(tgtTagsJ), &tgtTags)
-		var links rules.RepoLink
-		_ = json.Unmarshal([]byte(linksJ), &links)
+		var storedLinks rules.RepoLink
+		_ = json.Unmarshal([]byte(linksJ), &storedLinks)
+
+		if curVer == "" {
+			curVer = fallbackCurrentVersion(imageRef, curTags, labelsJSON)
+		}
+		reasonCode, dbName, roleKind, links := resolveServiceRoleAndLinks(svcName, imageRef, fReason, storedLinks)
+		isUpd := fKind == string(classify.KindDigestUpdate) || fKind == string(classify.KindVersionUpdate)
+		displayTarget := ""
+		if isUpd {
+			displayTarget = i18n.FormatTargetVersion(lang, tgtVer)
+		}
+		reasonText := i18n.FormatReasonWithRole(lang, reasonCode, dbName, roleKind, curVer, displayTarget)
+		hintText := i18n.FormatHint(lang, fHint)
+		localErrMsg := i18n.FormatRegistryError(lang, errKind, errMsg)
 
 		rule, hasRule := ignoreRules[svcKey]
-		isIgnored := hasRule && (rule.Mode == ignore.ModeForever || ignore.Matches(rule, fKind, tgtDigest, tgtVer))
+		isIgnored, ignMode, ignPrefix, ignTargetTag := evaluateServiceIgnoreState(rule, hasRule, fKind, curVer, tgtDigest, tgtVer)
 
 		item := ServiceItem{
-			Key:            svcKey,
-			Name:           svcName,
-			State:          state,
-			ImageRef:       imageRef,
-			RepoDigest:     repoDigest,
-			CurrentTags:    curTags,
-			Kind:           fKind,
-			Category:       fCat,
-			Reason:         reasonCode,
-			DatabaseName:   dbName,
-			ReasonText:     reasonText,
-			CurrentVersion: curVer,
-			TargetVersion:  displayTarget,
-			RawTargetVer:   tgtVer,
-			TargetRef:      tgtRef,
-			TargetDigest:   tgtDigest,
-			TargetTags:     tgtTags,
-			Hint:           hintText,
-			ErrorKind:      errKind,
-			ErrorMsg:       localErrMsg,
-			Links:          links,
-			Ignored:        isIgnored,
-			CheckedAt:      checkedAt,
-		}
-		if isIgnored {
-			item.IgnoreMode = rule.Mode
+			Key:             svcKey,
+			Name:            svcName,
+			State:           state,
+			ImageRef:        imageRef,
+			IconURL:         iconURLForService(svcKey),
+			RepoDigest:      repoDigest,
+			CurrentTags:     curTags,
+			Kind:            fKind,
+			Category:        fCat,
+			Reason:          reasonCode,
+			IsDatabase:      dbName != "",
+			DatabaseName:    dbName,
+			RoleKind:        roleKind,
+			ReasonText:      reasonText,
+			CurrentVersion:  curVer,
+			TargetVersion:   displayTarget,
+			RawTargetVer:    tgtVer,
+			TargetRef:       tgtRef,
+			TargetDigest:    tgtDigest,
+			TargetTags:      tgtTags,
+			Hint:            hintText,
+			ErrorKind:       errKind,
+			ErrorMsg:        localErrMsg,
+			Links:           links,
+			Ignored:         isIgnored,
+			IgnoreMode:      ignMode,
+			IgnorePrefix:    ignPrefix,
+			IgnoreTargetTag: ignTargetTag,
+			CheckedAt:       checkedAt,
 		}
 		card.Services = append(card.Services, item)
 	}
+	rows.Close()
 	if card == nil {
 		return nil, nil
 	}
 
-	normalCard, cautionCard, ignoredCard, _ := splitAppCards(card)
+	tagTSCache := make(map[string]map[string]int64)
+	for i := range card.Services {
+		sv := &card.Services[i]
+		sv.CurrentUpdatedAt, sv.TargetUpdatedAt = s.lookupTagTimestamps(ctx, tagTSCache, sv.ImageRef, sv.CurrentVersion, sv.RawTargetVer)
+	}
+
+	card.TotalServiceCount = len(card.Services)
+	card.AllServices = append([]ServiceItem(nil), card.Services...)
+	if len(card.Services) > 1 {
+		card.ProjectName = card.AppName
+	}
+
+	normalCards, cautionCards, noUpdateCards, _ := splitAppCards(card)
 	switch {
-	case cautionCard != nil:
+	case len(cautionCards) > 0:
+		c0 := cautionCards[0]
 		card.Group = "caution"
-		card.SummaryCurrent = cautionCard.SummaryCurrent
-		card.SummaryTarget = cautionCard.SummaryTarget
-		card.ReasonText = cautionCard.ReasonText
-		card.IsDatabase = cautionCard.IsDatabase
-		card.DatabaseName = cautionCard.DatabaseName
-		card.Links = cautionCard.Links
-	case normalCard != nil:
+		card.IconURL = c0.IconURL
+		card.SummaryCurrent = c0.SummaryCurrent
+		card.SummaryTarget = c0.SummaryTarget
+		card.ReasonText = c0.ReasonText
+		card.IsDatabase = c0.IsDatabase
+		card.DatabaseName = c0.DatabaseName
+		card.RoleKind = c0.RoleKind
+		card.Links = c0.Links
+	case len(normalCards) > 0:
+		n0 := normalCards[0]
 		card.Group = "normal"
-		card.SummaryCurrent = normalCard.SummaryCurrent
-		card.SummaryTarget = normalCard.SummaryTarget
-		card.ReasonText = normalCard.ReasonText
-		card.Links = normalCard.Links
-	case ignoredCard != nil:
-		card.Group = "ignored"
-		card.IgnoreMode = ignoredCard.IgnoreMode
-		card.SummaryCurrent = ignoredCard.SummaryCurrent
-		card.SummaryTarget = ignoredCard.SummaryTarget
-		card.ReasonText = ignoredCard.ReasonText
-		card.Links = ignoredCard.Links
+		card.IconURL = n0.IconURL
+		card.SummaryCurrent = n0.SummaryCurrent
+		card.SummaryTarget = n0.SummaryTarget
+		card.ReasonText = n0.ReasonText
+		card.Links = n0.Links
+	case len(noUpdateCards) > 0:
+		nc := noUpdateCards[0]
+		card.Group = "no_update"
+		card.IconURL = nc.IconURL
+		card.Ignored = nc.Ignored
+		card.IgnoreMode = nc.IgnoreMode
+		card.IgnorePrefix = nc.IgnorePrefix
+		card.IgnoreTargetTag = nc.IgnoreTargetTag
+		card.SummaryCurrent = nc.SummaryCurrent
+		card.SummaryTarget = nc.SummaryTarget
+		card.ReasonText = nc.ReasonText
+		card.IsDatabase = nc.IsDatabase
+		card.DatabaseName = nc.DatabaseName
+		card.RoleKind = nc.RoleKind
+		card.Links = nc.Links
 	}
-	if normalCard != nil {
-		card.UpdateSvcKeys = append(card.UpdateSvcKeys, normalCard.UpdateSvcKeys...)
+	for _, nc := range normalCards {
+		card.UpdateSvcKeys = append(card.UpdateSvcKeys, nc.UpdateSvcKeys...)
 	}
-	if cautionCard != nil {
-		card.UpdateSvcKeys = append(card.UpdateSvcKeys, cautionCard.UpdateSvcKeys...)
+	for _, cc := range cautionCards {
+		card.UpdateSvcKeys = append(card.UpdateSvcKeys, cc.UpdateSvcKeys...)
 	}
 	return card, nil
 }
 
-// splitAppCards 将一个 App 下的服务按 (normal / caution / ignored) 切分为对应分组的卡片，
-// 避免同一个 Compose 项目里的 Redis/MySQL 把同项目的普通 Web 服务也拖入默认收起的“需谨慎更新”而使“可更新”列表变空。
-func splitAppCards(base *AppCard) (normalCard, cautionCard, ignoredCard *AppCard, upToDate bool) {
+// splitAppCards 将一个 App 下的服务按 (normal / caution / no_update) 切分为对应分组的卡片（附录 D.2）。
+// 单容器项目始终保留项目名（避免显示内部 compose service 名如 app/web）；多容器项目下每个待更新组件独立成卡并标明所属项目。
+func splitAppCards(base *AppCard) (normalCards, cautionCards, noUpdateCards []AppCard, upToDate bool) {
 	var normalSvcs, cautionSvcs, ignoredSvcs []ServiceItem
 	for _, svc := range base.Services {
 		isUpd := svc.Kind == string(classify.KindDigestUpdate) || svc.Kind == string(classify.KindVersionUpdate)
-		if svc.Ignored && (isUpd || svc.IgnoreMode == ignore.ModeForever) {
+		if svc.Ignored {
 			ignoredSvcs = append(ignoredSvcs, svc)
 			continue
 		}
@@ -518,73 +786,85 @@ func splitAppCards(base *AppCard) (normalCard, cautionCard, ignoredCard *AppCard
 		}
 	}
 
-	multiGroup := b2i(len(normalSvcs) > 0) + b2i(len(cautionSvcs) > 0) + b2i(len(ignoredSvcs) > 0) > 1
-	formatCardName := func(svcs []ServiceItem) string {
-		if !multiGroup && len(base.Services) == 1 {
-			return base.Name
-		}
-		if len(svcs) == 1 && svcs[0].Name != "main" && svcs[0].Name != base.Name {
-			return base.Name + " / " + svcs[0].Name
-		}
-		return base.Name
-	}
+	isMultiSvcApp := len(base.Services) > 1
 
-	if len(normalSvcs) > 0 {
-		primary := normalSvcs[0]
+	makeCard := func(group string, svcs []ServiceItem) AppCard {
+		primary := svcs[0]
 		c := *base
-		c.Name = formatCardName(normalSvcs)
-		c.Group = "normal"
-		c.SummaryCurrent = primary.CurrentVersion
-		c.SummaryTarget = primary.TargetVersion
-		c.ReasonText = primary.ReasonText
-		c.Links = primary.Links
-		c.UpdateSvcKeys = nil
-		for _, s := range normalSvcs {
-			c.UpdateSvcKeys = append(c.UpdateSvcKeys, s.Key)
+		c.AppName = base.Name
+		c.TotalServiceCount = len(base.Services)
+		c.AllServices = append([]ServiceItem(nil), base.Services...)
+		c.Services = append([]ServiceItem(nil), svcs...)
+		if isMultiSvcApp && len(svcs) == 1 && svcs[0].Name != "main" {
+			c.Name = svcs[0].Name
+			c.ProjectName = base.Name
+		} else {
+			c.Name = base.Name
+			if isMultiSvcApp {
+				c.ProjectName = base.Name
+			} else {
+				c.ProjectName = ""
+			}
 		}
-		normalCard = &c
-	}
-
-	if len(cautionSvcs) > 0 {
-		primary := cautionSvcs[0]
-		c := *base
-		c.Name = formatCardName(cautionSvcs)
-		c.Group = "caution"
+		c.Group = group
+		c.IconURL = primary.IconURL
 		c.SummaryCurrent = primary.CurrentVersion
 		c.SummaryTarget = primary.TargetVersion
 		c.ReasonText = primary.ReasonText
 		c.DatabaseName = primary.DatabaseName
+		c.RoleKind = primary.RoleKind
 		c.IsDatabase = primary.DatabaseName != ""
 		c.Links = primary.Links
 		c.UpdateSvcKeys = nil
-		for _, s := range cautionSvcs {
-			c.UpdateSvcKeys = append(c.UpdateSvcKeys, s.Key)
+		return c
+	}
+
+	for _, svc := range normalSvcs {
+		c := makeCard("normal", []ServiceItem{svc})
+		c.UpdateSvcKeys = []string{svc.Key}
+		normalCards = append(normalCards, c)
+	}
+
+	for _, svc := range cautionSvcs {
+		c := makeCard("caution", []ServiceItem{svc})
+		c.UpdateSvcKeys = []string{svc.Key}
+		cautionCards = append(cautionCards, c)
+	}
+
+	if isMultiSvcApp {
+		for _, svc := range ignoredSvcs {
+			c := makeCard("no_update", []ServiceItem{svc})
+			c.Ignored = true
+			c.IgnoreMode = svc.IgnoreMode
+			c.IgnorePrefix = svc.IgnorePrefix
+			c.IgnoreTargetTag = svc.IgnoreTargetTag
+			noUpdateCards = append(noUpdateCards, c)
 		}
-		cautionCard = &c
-	}
-
-	if len(ignoredSvcs) > 0 {
+	} else if len(ignoredSvcs) > 0 {
+		c := makeCard("no_update", ignoredSvcs)
 		primary := ignoredSvcs[0]
-		c := *base
-		c.Name = formatCardName(ignoredSvcs)
-		c.Group = "ignored"
+		c.Ignored = true
 		c.IgnoreMode = primary.IgnoreMode
-		c.SummaryCurrent = primary.CurrentVersion
-		c.SummaryTarget = primary.TargetVersion
-		c.ReasonText = primary.ReasonText
-		c.Links = primary.Links
-		ignoredCard = &c
+		c.IgnorePrefix = primary.IgnorePrefix
+		c.IgnoreTargetTag = primary.IgnoreTargetTag
+		noUpdateCards = append(noUpdateCards, c)
 	}
 
-	upToDate = len(normalSvcs) == 0 && len(cautionSvcs) == 0 && len(ignoredSvcs) == 0
+	hasFailed := false
+	for _, svc := range base.Services {
+		if svc.Kind == string(classify.KindCheckFailed) || svc.Kind == string(classify.KindUncomparable) {
+			hasFailed = true
+			break
+		}
+	}
+	noActiveUpdates := len(normalSvcs) == 0 && len(cautionSvcs) == 0 && len(ignoredSvcs) == 0
+	upToDate = noActiveUpdates && !hasFailed
+	if noActiveUpdates && len(base.Services) > 0 {
+		c := makeCard("no_update", base.Services)
+		c.SummaryTarget = ""
+		noUpdateCards = append(noUpdateCards, c)
+	}
 	return
-}
-
-func b2i(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }
 
 // CheckRunItem 是检测历史记录。

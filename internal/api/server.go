@@ -46,6 +46,9 @@ type Server struct {
 
 // New 创建 API 服务。
 func New(d Deps) *Server {
+	if d.Updater != nil && d.Ignore != nil {
+		d.Updater.SetIgnore(d.Ignore)
+	}
 	return &Server{d: d}
 }
 
@@ -63,7 +66,13 @@ func (s *Server) Handler() http.Handler {
 	// 需要认证的业务端点
 	mux.HandleFunc("POST /api/v1/auth/password", s.requireAuth(s.handleSetPassword))
 	mux.HandleFunc("GET /api/v1/overview", s.requireAuth(s.handleOverview))
+	mux.HandleFunc("GET /api/v1/icons", s.requireAuth(s.handleGetIcon))
 	mux.HandleFunc("GET /api/v1/apps", s.requireAuth(s.handleGetApp))
+	mux.HandleFunc("GET /api/v1/apps/compose", s.requireAuth(s.handleGetAppCompose))
+	mux.HandleFunc("POST /api/v1/apps/compose-update", s.requireAuth(s.handleUpdateAppCompose))
+	mux.HandleFunc("PUT /api/v1/apps/compose", s.requireAuth(s.handleUpdateAppCompose))
+	mux.HandleFunc("GET /api/v1/services/tags", s.requireAuth(s.handleSearchServiceTags))
+	mux.HandleFunc("GET /api/v1/services/{key}/tags", s.requireAuth(s.handleSearchServiceTags))
 	mux.HandleFunc("GET /api/v1/containers", s.requireAuth(s.handleListContainers))
 	mux.HandleFunc("POST /api/v1/check", s.requireAuth(s.handleTriggerCheck))
 	mux.HandleFunc("GET /api/v1/check/current", s.requireAuth(s.handleCurrentCheck))
@@ -339,16 +348,12 @@ func (s *Server) handleCheckRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetIgnore(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		ServiceKeys []string `json:"serviceKeys"`
-		Mode        string   `json:"mode"`
-		Note        string   `json:"note"`
-	}
+	var body ignore.SetOptions
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	if err := s.d.Ignore.Set(r.Context(), body.ServiceKeys, body.Mode, body.Note); err != nil {
+	if err := s.d.Ignore.SetWithOptions(r.Context(), body); err != nil {
 		lang := s.langOf(r)
 		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
 		return
@@ -556,19 +561,146 @@ func (s *Server) handleStartUpdates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		ServiceKeys []string `json:"serviceKeys"`
+		ServiceKeys []string                    `json:"serviceKeys"`
+		Items       []updater.UpdateItemRequest `json:"items"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
+	items := body.Items
+	if len(items) == 0 && len(body.ServiceKeys) > 0 {
+		items = make([]updater.UpdateItemRequest, 0, len(body.ServiceKeys))
+		for _, sk := range body.ServiceKeys {
+			items = append(items, updater.UpdateItemRequest{ServiceKey: sk})
+		}
+	}
 	lang := s.langOf(r)
-	jobs, err := s.d.Updater.StartUpdates(r.Context(), body.ServiceKeys, lang)
+	jobs, err := s.d.Updater.StartUpdatesWithItems(r.Context(), items, lang)
 	if err != nil {
 		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": jobs})
+}
+
+func (s *Server) handleSearchServiceTags(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
+	svcKey := strings.TrimSpace(r.URL.Query().Get("serviceKey"))
+	if svcKey == "" {
+		svcKey = strings.TrimSpace(r.URL.Query().Get("key"))
+	}
+	if svcKey == "" {
+		svcKey = strings.TrimSpace(r.PathValue("key"))
+	}
+	if svcKey == "" {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", "missing serviceKey")
+		return
+	}
+	var imageRef string
+	err := s.d.Store.DB.QueryRowContext(r.Context(), `
+		SELECT COALESCE(image_ref,'') FROM service WHERE key=? AND gone_at IS NULL`, svcKey).Scan(&imageRef)
+	if err != nil || strings.TrimSpace(imageRef) == "" {
+		writeError(w, lang, http.StatusNotFound, "not_found", "")
+		return
+	}
+	ref, err := version.ParseImageRef(imageRef)
+	if err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	remoteParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("remote")))
+	remote := remoteParam == "1" || remoteParam == "true"
+
+	entries, highestTag, err := s.d.Reg.SearchTags(r.Context(), ref, q, remote)
+	if err != nil {
+		writeError(w, lang, http.StatusBadGateway, "check_failed", i18n.LocalizeError(lang, err))
+		return
+	}
+
+	type tagItem struct {
+		Tag       string `json:"tag"`
+		UpdatedAt int64  `json:"updatedAt,omitempty"`
+		Digest    string `json:"digest,omitempty"`
+	}
+	out := make([]tagItem, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, tagItem{
+			Tag:       e.Name,
+			UpdatedAt: e.UpdatedAt,
+			Digest:    e.RepoDigest,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":      out,
+		"highestTag": highestTag,
+	})
+}
+
+func (s *Server) handleGetAppCompose(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
+	if s.d.Updater == nil {
+		writeError(w, lang, http.StatusInternalServerError, "updater_unavailable", "")
+		return
+	}
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	if key == "" {
+		key = strings.TrimSpace(r.URL.Query().Get("appKey"))
+	}
+	if key == "" {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", "missing key")
+		return
+	}
+	info, err := s.d.Updater.GetAppCompose(r.Context(), key, lang)
+	if err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
+}
+
+func (s *Server) handleUpdateAppCompose(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
+	if s.d.Updater == nil {
+		writeError(w, lang, http.StatusInternalServerError, "updater_unavailable", "")
+		return
+	}
+	var body struct {
+		Key     string `json:"key"`
+		AppKey  string `json:"appKey"`
+		Content string `json:"content"`
+		YAML    string `json:"yaml"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	key := strings.TrimSpace(body.Key)
+	if key == "" {
+		key = strings.TrimSpace(body.AppKey)
+	}
+	if key == "" {
+		key = strings.TrimSpace(r.URL.Query().Get("key"))
+	}
+	yamlContent := body.Content
+	if yamlContent == "" {
+		yamlContent = body.YAML
+	}
+	if key == "" || strings.TrimSpace(yamlContent) == "" {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", "missing key or content")
+		return
+	}
+	hostID, err := s.d.Updater.UpdateAppCompose(r.Context(), key, yamlContent, lang)
+	if err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
+		return
+	}
+	if s.d.Checker != nil {
+		s.d.Checker.Trigger("manual", hostID, false)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "hostId": hostID})
 }
 
 func (s *Server) handleGetUpdateJob(w http.ResponseWriter, r *http.Request) {

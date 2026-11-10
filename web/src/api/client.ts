@@ -19,6 +19,29 @@ export function apiBase(): string {
   return '/api/v1'
 }
 
+export function resolveIconUrl(iconUrl?: string): string | undefined {
+  if (!iconUrl) return undefined
+  if (
+    iconUrl.startsWith('http://') ||
+    iconUrl.startsWith('https://') ||
+    iconUrl.startsWith('data:')
+  ) {
+    return iconUrl
+  }
+  const hasPrefix =
+    typeof window !== 'undefined' && window.location.pathname.startsWith('/dkstore')
+  if (iconUrl.startsWith('/dkstore/api/v1')) {
+    return iconUrl
+  }
+  if (iconUrl.startsWith('/api/v1')) {
+    return hasPrefix ? `/dkstore${iconUrl}` : iconUrl
+  }
+  if (iconUrl.startsWith('/')) {
+    return `${apiBase()}${iconUrl}`
+  }
+  return `${apiBase()}/${iconUrl}`
+}
+
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const locale = useUIStore.getState().locale
   const res = await fetch(`${apiBase()}${path}`, {
@@ -154,6 +177,9 @@ export interface RepoLink {
   releases?: string
 }
 
+export type IgnoreMode = 'this_version' | 'prefix' | 'forever'
+export type UpdatePolicyMode = 'all' | 'skip_latest' | 'prefix' | 'forever'
+
 export interface ServiceItem {
   key: string
   name: string
@@ -164,7 +190,9 @@ export interface ServiceItem {
   kind: 'none' | 'digest_update' | 'version_update' | 'check_failed' | 'uncomparable'
   category?: 'normal' | 'caution'
   reason?: string
+  isDatabase?: boolean
   databaseName?: string
+  roleKind?: 'database' | 'mq' | 'middleware' | string
   reasonText?: string
   currentVersion?: string
   targetVersion?: string
@@ -172,12 +200,16 @@ export interface ServiceItem {
   targetRef?: string
   targetDigest?: string
   targetTags?: string[]
+  currentUpdatedAt?: number
+  targetUpdatedAt?: number
   hint?: string
   errorKind?: string
   errorMsg?: string
   links: RepoLink
   ignored: boolean
-  ignoreMode?: 'this_version' | 'forever'
+  ignoreMode?: IgnoreMode
+  ignorePrefix?: string
+  ignoreTargetTag?: string
   checkedAt?: number
 }
 
@@ -186,18 +218,28 @@ export interface AppCardItem {
   hostId: string
   hostName: string
   hostStatus: string
+  appName?: string
   name: string
+  projectName?: string
+  totalServiceCount?: number
+  iconUrl?: string
   source: 'standalone' | 'compose' | 'dsm_project' | 'vendor_managed'
-  group: 'normal' | 'caution' | 'ignored' | 'up_to_date'
+  group: 'normal' | 'caution' | 'no_update' | 'ignored' | 'up_to_date'
   summaryCurrent?: string
   summaryTarget?: string
   reasonText?: string
   isDatabase: boolean
   databaseName?: string
+  roleKind?: 'database' | 'mq' | 'middleware' | string
+  ignored?: boolean
+  ignoreMode?: IgnoreMode
+  ignorePrefix?: string
+  ignoreTargetTag?: string
+  composeEditable?: boolean
   links: RepoLink
   updateServiceKeys?: string[]
-  ignoreMode?: 'this_version' | 'forever'
   services: ServiceItem[]
+  allServices?: ServiceItem[]
 }
 
 export interface FailedItem {
@@ -216,6 +258,9 @@ export interface CheckProgress {
   runId?: number
   phase?: 'idle' | 'discovering' | 'checking' | 'done'
   hostName?: string
+  currentServiceKey?: string
+  currentAppName?: string
+  completedServiceKeys?: string[]
   completed: number
   total: number
   startedAt?: number
@@ -225,12 +270,50 @@ export interface OverviewResponse {
   hosts: HostItem[]
   normal: AppCardItem[]
   caution: AppCardItem[]
-  ignored: AppCardItem[]
+  noUpdate?: AppCardItem[]
+  ignored?: AppCardItem[]
   upToDateCount: number
   totalAppCount: number
   failed?: FailedItem[]
   lastCheckedAt?: number
   progress: CheckProgress
+}
+
+export interface ServiceTagItem {
+  tag: string
+  updatedAt?: number
+}
+
+export interface ServiceTagsResponse {
+  items: ServiceTagItem[]
+  highestTag?: string
+}
+
+export interface SetIgnorePayload {
+  serviceKeys: string[]
+  mode: IgnoreMode
+  prefix?: string
+  targetTag?: string
+  targetDigest?: string
+}
+
+export interface StartUpdateItemInput {
+  serviceKey: string
+  targetTag?: string
+  policyMode?: UpdatePolicyMode
+  policyPrefix?: string
+  skipTargetTag?: string
+}
+
+export interface StartUpdatesPayload {
+  serviceKeys?: string[]
+  items?: StartUpdateItemInput[]
+}
+
+export interface AppComposeResponse {
+  editable: boolean
+  content: string
+  reason?: string
 }
 
 export interface CheckRunItem {
@@ -358,15 +441,28 @@ export const api = {
     }),
   checkRuns: () => request<{ items: CheckRunItem[] }>('/check-runs'),
 
-  setIgnore: (serviceKeys: string[], mode: 'this_version' | 'forever') =>
+  setIgnore: (payload: SetIgnorePayload) =>
     request<{ ok: boolean }>('/ignore', {
       method: 'POST',
-      body: JSON.stringify({ serviceKeys, mode }),
+      body: JSON.stringify(payload),
     }),
   removeIgnoreByService: (serviceKey: string) =>
     request<{ ok: boolean }>(`/ignore?serviceKey=${encodeURIComponent(serviceKey)}`, { method: 'DELETE' }),
   removeIgnoreByApp: (appKey: string) =>
     request<{ ok: boolean }>(`/ignore?appKey=${encodeURIComponent(appKey)}`, { method: 'DELETE' }),
+
+  searchServiceTags: (serviceKey: string, q = '', remote = false) =>
+    request<ServiceTagsResponse>(
+      `/services/tags?serviceKey=${encodeURIComponent(serviceKey)}&q=${encodeURIComponent(q)}&remote=${remote ? 1 : 0}`,
+    ),
+
+  getAppCompose: (appKey: string) =>
+    request<AppComposeResponse>(`/apps/compose?key=${encodeURIComponent(appKey)}`),
+  updateAppCompose: (appKey: string, content: string) =>
+    request<{ ok: boolean; items?: UpdateJobItem[] }>('/apps/compose-update', {
+      method: 'POST',
+      body: JSON.stringify({ appKey, content }),
+    }),
 
   listHosts: () => request<HostsListResponse>('/hosts'),
   createHost: (input: HostInput) =>
@@ -399,10 +495,10 @@ export const api = {
     }),
 
   listUpdates: () => request<{ items: UpdateJobItem[] }>('/updates'),
-  startUpdates: (serviceKeys: string[]) =>
+  startUpdates: (payload: string[] | StartUpdatesPayload) =>
     request<{ items: UpdateJobItem[] }>('/updates', {
       method: 'POST',
-      body: JSON.stringify({ serviceKeys }),
+      body: JSON.stringify(Array.isArray(payload) ? { serviceKeys: payload } : payload),
     }),
   verifyRollback: (id: string) =>
     request<RollbackVerifyResult>(`/updates/${encodeURIComponent(id)}/rollback-check`),

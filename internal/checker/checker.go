@@ -1,4 +1,4 @@
-// Package checker 编排主机应用发现、镜像更新检测、SSE 进度广播与增量通知推送（实施文档 §5 / §8）。
+// Package checker 编排主机应用发现、镜像更新检测、SSE 逐项进度广播与增量通知推送（实施文档 §5 / §8 / 附录 D.2）。
 package checker
 
 import (
@@ -22,15 +22,18 @@ import (
 	"github.com/kukushouhou/DKStore/rules"
 )
 
-// Progress 表示当前检查任务的实时状态。
+// Progress 表示当前检查任务的实时状态（含逐个服务流式检查进度，附录 D.2）。
 type Progress struct {
-	Running   bool   `json:"running"`
-	RunID     int64  `json:"runId,omitempty"`
-	Phase     string `json:"phase,omitempty"` // idle | discovering | checking | done
-	HostName  string `json:"hostName,omitempty"`
-	Completed int    `json:"completed"`
-	Total     int    `json:"total"`
-	StartedAt int64  `json:"startedAt,omitempty"`
+	Running              bool     `json:"running"`
+	RunID                int64    `json:"runId,omitempty"`
+	Phase                string   `json:"phase,omitempty"` // idle | discovering | checking | done
+	HostName             string   `json:"hostName,omitempty"`
+	CurrentServiceKey    string   `json:"currentServiceKey,omitempty"`
+	CurrentAppName       string   `json:"currentAppName,omitempty"`
+	CompletedServiceKeys []string `json:"completedServiceKeys,omitempty"`
+	Completed            int      `json:"completed"`
+	Total                int      `json:"total"`
+	StartedAt            int64    `json:"startedAt,omitempty"`
 }
 
 // Service 负责执行检查任务与查询检测结果。
@@ -112,12 +115,16 @@ func (s *Service) recoverInterruptedRuns() {
 func (s *Service) CurrentProgress() Progress {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.progress
+	cp := s.progress
+	if len(s.progress.CompletedServiceKeys) > 0 {
+		cp.CompletedServiceKeys = append([]string(nil), s.progress.CompletedServiceKeys...)
+	}
+	return cp
 }
 
 // Subscribe 订阅进度变化事件（用于 SSE）。
 func (s *Service) Subscribe() (ch chan Progress, unsubscribe func()) {
-	ch = make(chan Progress, 16)
+	ch = make(chan Progress, 32)
 	s.mu.Lock()
 	s.subscribers[ch] = struct{}{}
 	ch <- s.progress
@@ -131,6 +138,9 @@ func (s *Service) Subscribe() (ch chan Progress, unsubscribe func()) {
 }
 
 func (s *Service) broadcast(p Progress) {
+	if len(p.CompletedServiceKeys) > 0 {
+		p.CompletedServiceKeys = append([]string(nil), p.CompletedServiceKeys...)
+	}
 	s.mu.Lock()
 	s.progress = p
 	for ch := range s.subscribers {
@@ -203,6 +213,7 @@ type svcRow struct {
 	ImageID       string
 	RepoDigest    string
 	Platform      string
+	LabelsJSON    string
 }
 
 func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, bypassCache bool) {
@@ -210,6 +221,7 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 	var (
 		runID     int64
 		total     int
+		doneKeys  []string
 		completed bool
 	)
 	if s.st != nil {
@@ -236,12 +248,13 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 				cancel()
 			}
 			s.broadcast(Progress{
-				Running:   false,
-				RunID:     runID,
-				Phase:     "done",
-				Completed: total,
-				Total:     total,
-				StartedAt: started,
+				Running:              false,
+				RunID:                runID,
+				Phase:                "done",
+				CompletedServiceKeys: doneKeys,
+				Completed:            total,
+				Total:                total,
+				StartedAt:            started,
 			})
 		}
 		s.finishOrRunPending()
@@ -269,7 +282,7 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 	// 读取待检查的活跃服务
 	query := `
 		SELECT s.key, s.app_key, a.name, COALESCE(a.source,'standalone'), a.host_id, h.name, COALESCE(h.transport,'local'), s.name,
-		       COALESCE(s.image_ref,''), COALESCE(s.image_id,''), COALESCE(s.repo_digest,''), COALESCE(s.platform,'')
+		       COALESCE(s.image_ref,''), COALESCE(s.image_id,''), COALESCE(s.repo_digest,''), COALESCE(s.platform,''), COALESCE(s.labels_json,'')
 		FROM service s
 		JOIN app a ON s.app_key = a.key
 		JOIN host h ON a.host_id = h.id
@@ -288,7 +301,7 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 	} else {
 		for rows.Next() {
 			var r svcRow
-			if rows.Scan(&r.Key, &r.AppKey, &r.AppName, &r.AppSource, &r.HostID, &r.HostName, &r.HostTransport, &r.Name, &r.ImageRef, &r.ImageID, &r.RepoDigest, &r.Platform) == nil {
+			if rows.Scan(&r.Key, &r.AppKey, &r.AppName, &r.AppSource, &r.HostID, &r.HostName, &r.HostTransport, &r.Name, &r.ImageRef, &r.ImageID, &r.RepoDigest, &r.Platform, &r.LabelsJSON) == nil {
 				services = append(services, r)
 			}
 		}
@@ -299,7 +312,16 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 	}
 
 	total = len(services)
-	s.broadcast(Progress{Running: true, RunID: runID, Phase: "checking", Completed: 0, Total: total, StartedAt: started})
+	doneKeys = make([]string, 0, total)
+	s.broadcast(Progress{
+		Running:              true,
+		RunID:                runID,
+		Phase:                "checking",
+		CompletedServiceKeys: doneKeys,
+		Completed:            0,
+		Total:                total,
+		StartedAt:            started,
+	})
 
 	ignoreRules, _ := s.ign.ListAll(ctx)
 	var (
@@ -310,8 +332,22 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 	)
 
 	for idx, svc := range services {
+		s.broadcast(Progress{
+			Running:              true,
+			RunID:                runID,
+			Phase:                "checking",
+			HostName:             svc.HostName,
+			CurrentServiceKey:    svc.Key,
+			CurrentAppName:       svc.AppName,
+			CompletedServiceKeys: doneKeys,
+			Completed:            idx,
+			Total:                total,
+			StartedAt:            started,
+		})
+
 		out, errKind, errMsg, curTags := s.checkSingleService(ctx, svc, bypassCache)
 		isNew := s.saveFinding(ctx, runID, svc, out, errKind, errMsg, curTags)
+		doneKeys = append(doneKeys, svc.Key)
 
 		switch out.Kind {
 		case classify.KindDigestUpdate, classify.KindVersionUpdate:
@@ -338,12 +374,16 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 		}
 
 		s.broadcast(Progress{
-			Running:   true,
-			RunID:     runID,
-			Phase:     "checking",
-			Completed: idx + 1,
-			Total:     total,
-			StartedAt: started,
+			Running:              true,
+			RunID:                runID,
+			Phase:                "checking",
+			HostName:             svc.HostName,
+			CurrentServiceKey:    svc.Key,
+			CurrentAppName:       svc.AppName,
+			CompletedServiceKeys: doneKeys,
+			Completed:            idx + 1,
+			Total:                total,
+			StartedAt:            started,
 		})
 	}
 
@@ -376,12 +416,13 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 
 	completed = true
 	s.broadcast(Progress{
-		Running:   false,
-		RunID:     runID,
-		Phase:     "done",
-		Completed: total,
-		Total:     total,
-		StartedAt: started,
+		Running:              false,
+		RunID:                runID,
+		Phase:                "done",
+		CompletedServiceKeys: doneKeys,
+		Completed:            total,
+		Total:                total,
+		StartedAt:            started,
 	})
 }
 
@@ -404,21 +445,47 @@ func (s *Service) finishOrRunPending() {
 }
 
 func (s *Service) checkSingleService(ctx context.Context, svc svcRow, bypassCache bool) (out classify.Output, errKind, errMsg string, curMatched []string) {
+	var labels map[string]string
+	if svc.LabelsJSON != "" {
+		_ = json.Unmarshal([]byte(svc.LabelsJSON), &labels)
+	}
+	localVerLabel := classify.ExtractVersionLabel(labels)
+
 	if svc.AppSource == "vendor_managed" {
-		return classify.Output{Kind: classify.KindUncomparable}, "", "", nil
+		curVer := localVerLabel
+		if curVer == "" {
+			if pr, err := version.ParseImageRef(svc.ImageRef); err == nil && pr.Tag != "" {
+				curVer = pr.Tag
+			}
+		}
+		return classify.Output{Kind: classify.KindUncomparable, CurrentVersion: curVer}, "", "", nil
 	}
 	ref, err := version.ParseImageRef(svc.ImageRef)
 	if err != nil || strings.HasPrefix(svc.ImageRef, "sha256:") || (svc.RepoDigest == "" && svc.ImageID == "" && !ref.IsPinnedDigest()) {
-		return classify.Output{Kind: classify.KindUncomparable}, "", "", nil
+		curVer := localVerLabel
+		if curVer == "" && err == nil && ref.Tag != "" {
+			curVer = ref.Tag
+		}
+		return classify.Output{Kind: classify.KindUncomparable, CurrentVersion: curVer}, "", "", nil
 	}
 
-	mf, err := s.reg.CheckManifest(ctx, ref, svc.Platform, bypassCache)
+	isDSMAPI := svc.HostTransport == "dsm_api"
+	mf, err := s.reg.CheckManifestEx(ctx, ref, registry.ManifestCheckOptions{
+		HostPlatform:    svc.Platform,
+		BypassCache:     bypassCache,
+		LocalRepoDigest: svc.RepoDigest,
+		NeedConfig:      isDSMAPI && svc.RepoDigest == "",
+	})
 	if err != nil {
 		var re *registry.RegistryError
 		if errors.As(err, &re) {
 			// 仅当远端明确返回 404 且本地无 RepoDigest（如本地构建/导入镜像）时，才归为 uncomparable（审计 M3）
 			if re.Kind == registry.ErrNotFound && svc.RepoDigest == "" && !ref.IsPinnedDigest() {
-				return classify.Output{Kind: classify.KindUncomparable}, "", "", nil
+				curVer := localVerLabel
+				if curVer == "" && ref.Tag != "" {
+					curVer = ref.Tag
+				}
+				return classify.Output{Kind: classify.KindUncomparable, CurrentVersion: curVer}, "", "", nil
 			}
 			errKind = string(re.Kind)
 			errMsg = re.Message
@@ -426,32 +493,44 @@ func (s *Service) checkSingleService(ctx context.Context, svc svcRow, bypassCach
 			errKind = string(registry.ErrRegistry)
 			errMsg = err.Error()
 		}
+		curVer := localVerLabel
+		if curVer == "" && ref.Tag != "" {
+			curVer = ref.Tag
+		}
 		return classify.Output{
-			Kind:  classify.KindCheckFailed,
-			Links: rules.Default().ResolveLinks(ref.Registry, ref.Repository, ""),
+			Kind:           classify.KindCheckFailed,
+			CurrentVersion: curVer,
+			Links:          rules.Default().ResolveLinks(ref.Registry, ref.Repository, ""),
 		}, errKind, errMsg, nil
 	}
 
-	// 获取有限窗口候选标签（用于版本发现与 Digest 反查）
+	// 获取有限窗口候选标签（用于版本发现与 Digest/ConfigDigest 反查）
 	recentTags, _ := s.reg.FetchRecentTags(ctx, ref, 3, bypassCache)
-	if svc.RepoDigest != "" {
-		curMatched = s.reg.LookupTagsByDigest(ctx, ref, svc.RepoDigest, "", svc.Platform, recentTags)
+	localCfgForLookup := ""
+	if svc.RepoDigest == "" && isDSMAPI {
+		localCfgForLookup = svc.ImageID
+	}
+	if svc.RepoDigest != "" || localCfgForLookup != "" {
+		curMatched = s.reg.LookupTagsByDigestOrConfig(ctx, ref, svc.RepoDigest, "", localCfgForLookup, svc.Platform, recentTags)
 	}
 	var remMatched []string
 	if mf != nil {
-		remMatched = s.reg.LookupTagsByDigest(ctx, ref, mf.RepoDigest, mf.PlatformDigest, svc.Platform, recentTags)
+		remMatched = s.reg.LookupTagsByDigestOrConfig(ctx, ref, mf.RepoDigest, mf.PlatformDigest, mf.ConfigDigest, svc.Platform, recentTags)
 	}
 
 	out = classify.Evaluate(classify.Input{
 		Ref:                 ref,
+		ServiceName:         svc.Name,
 		LocalRepoDigest:     svc.RepoDigest,
 		LocalImageID:        svc.ImageID,
+		LocalVersionLabel:   localVerLabel,
+		RemoteVersionLabel:  mf.VersionLabel,
 		RemoteManifest:      mf,
 		CurrentMatchedTags:  curMatched,
 		RemoteMatchedTags:   remMatched,
 		CandidateTags:       recentTags,
 		HostPlatform:        svc.Platform,
-		AllowImageIDCompare: svc.HostTransport == "dsm_api",
+		AllowImageIDCompare: isDSMAPI,
 	})
 	return out, "", "", curMatched
 }

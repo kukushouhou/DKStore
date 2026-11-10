@@ -25,6 +25,9 @@ const (
 	MsgUpdatePanic           = "update.panic"             // 更新任务异常中止: %s
 	MsgUpdateInterrupted     = "update.interrupted"       // 服务重启导致任务中断
 	MsgUpdateRollbackWarning = "update.rollback_warning"  // 回退数据警告
+	MsgUpdateTagNotFound     = "update.tag_not_found"     // 仓库中未找到标签: %s
+	MsgComposeInvalidYAML    = "compose.invalid_yaml"     // Compose YAML 格式无效: %s
+	MsgComposeNotEditable    = "compose.not_editable"     // 当前项目不支持直接编辑配置
 
 	// Docker 引擎更新执行（platform/docker）
 	MsgDockerContainerNotFound = "docker.container_not_found" // 未找到目标服务容器 (%s/%s)
@@ -85,6 +88,9 @@ var engineMessages = map[string][2]string{
 	MsgUpdatePanic:           {"更新任务异常中止：%s", "Update task aborted unexpectedly: %s"},
 	MsgUpdateInterrupted:     {"DKStore 重启导致任务中断，请确认容器状态后重试", "Task was interrupted by a DKStore restart; please verify the container state and retry"},
 	MsgUpdateRollbackWarning: {"注意：回退容器镜像不等于回退业务数据库或持久化卷数据结构；若新版已执行不可逆的数据迁移，请先确认数据兼容性。", "Note: Rolling back the container image does not roll back persistent database schemas or volume data."},
+	MsgUpdateTagNotFound:     {"在镜像仓库中未找到指定版本标签：%s", "Specified version tag %s was not found in the image repository"},
+	MsgComposeInvalidYAML:    {"Compose 配置格式不正确：%s", "Invalid Compose YAML configuration: %s"},
+	MsgComposeNotEditable:    {"当前应用不支持直接编辑 Compose 配置", "Direct Compose configuration editing is not supported for this app"},
 
 	MsgDockerContainerNotFound: {"未找到目标服务容器（%s/%s）", "Target service container not found (%s/%s)"},
 	MsgDockerNoContainerName:   {"无法读取原容器名称", "Unable to read the original container name"},
@@ -129,7 +135,7 @@ var engineMessages = map[string][2]string{
 	MsgRegistryParse:          {"解析 %s 响应失败", "Failed to parse the response from %s"},
 
 	MsgIgnoreNoService:   {"未指定要忽略的服务", "No service specified to ignore"},
-	MsgIgnoreInvalidMode: {"忽略模式无效，仅支持 this_version 或 forever", "Invalid ignore mode; only this_version or forever is supported"},
+	MsgIgnoreInvalidMode: {"忽略模式无效，仅支持 this_version、prefix 或 forever", "Invalid ignore mode; only this_version, prefix, or forever is supported"},
 }
 
 // EngineMessage 按语言渲染引擎消息；未知键原样返回键名。

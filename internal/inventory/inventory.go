@@ -89,9 +89,15 @@ func (s *Service) saveHostInventory(ctx context.Context, hostID string, info *pl
 		for _, svc := range a.Services {
 			seenSvcs[svc.Key] = true
 			repoDigest := pickRepoDigest(svc.ImageRef, svc.RepoDigests)
+			var labelsJSON string
+			if len(svc.Labels) > 0 {
+				if b, err := json.Marshal(svc.Labels); err == nil {
+					labelsJSON = string(b)
+				}
+			}
 			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO service(key, app_key, name, image_ref, image_id, repo_digest, platform, state, gone_at, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+				INSERT INTO service(key, app_key, name, image_ref, image_id, repo_digest, platform, state, labels_json, gone_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
 				ON CONFLICT(key) DO UPDATE SET
 					name=excluded.name,
 					image_ref=excluded.image_ref,
@@ -99,9 +105,10 @@ func (s *Service) saveHostInventory(ctx context.Context, hostID string, info *pl
 					repo_digest=excluded.repo_digest,
 					platform=excluded.platform,
 					state=excluded.state,
+					labels_json=excluded.labels_json,
 					gone_at=NULL,
 					updated_at=excluded.updated_at`,
-				svc.Key, a.Key, svc.Name, svc.ImageRef, svc.ImageID, repoDigest, platStr, svc.State, now,
+				svc.Key, a.Key, svc.Name, svc.ImageRef, svc.ImageID, repoDigest, platStr, svc.State, labelsJSON, now,
 			); err != nil {
 				return err
 			}

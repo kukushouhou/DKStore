@@ -18,6 +18,7 @@ import (
 	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/platform"
 	"github.com/kukushouhou/DKStore/internal/transport"
+	"gopkg.in/yaml.v3"
 )
 
 // HasLocalImage 检查目标主机本地是否仍保留指定 ImageID 或标签镜像。
@@ -460,4 +461,147 @@ func readBodyString(r io.Reader) string {
 	var b bytes.Buffer
 	_, _ = io.Copy(&b, io.LimitReader(r, 4096))
 	return strings.TrimSpace(b.String())
+}
+
+// ValidateComposeYAML 校验 Compose YAML 语法并提取其中的 services.<name>.image 声明映射。
+func ValidateComposeYAML(rawYAML string) (map[string]string, error) {
+	if strings.TrimSpace(rawYAML) == "" {
+		return nil, i18n.NewEngineError(i18n.MsgComposeInvalidYAML, "empty content")
+	}
+	var doc struct {
+		Services map[string]map[string]any `yaml:"services"`
+	}
+	if err := yaml.Unmarshal([]byte(rawYAML), &doc); err != nil {
+		return nil, i18n.NewEngineError(i18n.MsgComposeInvalidYAML, err.Error())
+	}
+	if len(doc.Services) == 0 {
+		return nil, i18n.NewEngineError(i18n.MsgComposeInvalidYAML, "missing services map")
+	}
+	images := make(map[string]string, len(doc.Services))
+	for svcName, svcMap := range doc.Services {
+		if svcMap == nil {
+			continue
+		}
+		if img, ok := svcMap["image"].(string); ok && strings.TrimSpace(img) != "" {
+			images[svcName] = strings.TrimSpace(img)
+		}
+	}
+	return images, nil
+}
+
+func resolvePrimaryComposeFile(project *platform.ProjectInfo) string {
+	if project == nil {
+		return ""
+	}
+	if len(project.ConfigFiles) > 0 && strings.TrimSpace(project.ConfigFiles[0]) != "" {
+		return resolvePath(project.WorkingDir, strings.TrimSpace(project.ConfigFiles[0]))
+	}
+	if strings.TrimSpace(project.WorkingDir) != "" {
+		return resolvePath(project.WorkingDir, "compose.yaml")
+	}
+	return ""
+}
+
+// GetProjectCompose 读取 Compose 项目的当前主 YAML 文件内容。
+func (a *Adapter) GetProjectCompose(ctx context.Context, project *platform.ProjectInfo) (string, error) {
+	p := resolvePrimaryComposeFile(project)
+	if p == "" {
+		return "", i18n.NewEngineError(i18n.MsgComposeNotEditable)
+	}
+	b, err := a.tr.ReadFile(ctx, p)
+	if err != nil && len(project.ConfigFiles) == 0 && project.WorkingDir != "" {
+		// 若未记录 ConfigFiles，依次尝试常见默认文件名
+		for _, alt := range []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml"} {
+			if b2, err2 := a.tr.ReadFile(ctx, resolvePath(project.WorkingDir, alt)); err2 == nil {
+				return string(b2), nil
+			}
+		}
+	}
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// UpdateProjectCompose 备份原 Compose 文件、写入新版 YAML 并执行拉取与重建；失败时自动写回原文件并恢复原容器（附录 D.4）。
+func (a *Adapter) UpdateProjectCompose(
+	ctx context.Context,
+	appName string,
+	project *platform.ProjectInfo,
+	newYAML string,
+	onProgress func(platform.PullProgress),
+) error {
+	if _, err := ValidateComposeYAML(newYAML); err != nil {
+		return err
+	}
+	execTr, ok := a.tr.(transport.ExecutableTransport)
+	if !ok {
+		return &platform.UpdateError{
+			Code:    "capability_unsupported",
+			Message: i18n.EngineDetail(i18n.MsgDockerNoExec),
+		}
+	}
+	composePath := resolvePrimaryComposeFile(project)
+	if composePath == "" {
+		return i18n.NewEngineError(i18n.MsgComposeNotEditable)
+	}
+
+	origBytes, err := a.tr.ReadFile(ctx, composePath)
+	if err != nil {
+		return err
+	}
+	origSum := sha256.Sum256(origBytes)
+	origSHA := hex.EncodeToString(origSum[:])
+
+	emit := func(p platform.PullProgress) {
+		if onProgress != nil {
+			onProgress(p)
+		}
+	}
+	emit(platform.PullProgress{Phase: "precheck", StatusText: "Writing updated compose configuration", Percent: 10})
+
+	newBytes := []byte(newYAML)
+	if err := execTr.WriteFileAtomic(ctx, composePath, newBytes, origSHA); err != nil {
+		if errors.Is(err, transport.ErrFileConflict) {
+			return &platform.UpdateError{
+				Code:    "external_conflict",
+				Message: i18n.EngineDetail(i18n.MsgDockerComposeChanged),
+			}
+		}
+		return &platform.UpdateError{
+			Code:    "recreate_failed",
+			Message: i18n.EngineDetail(i18n.MsgDockerComposeWrite, composePath, err.Error()),
+		}
+	}
+	writtenSum := sha256.Sum256(newBytes)
+	writtenSHA := hex.EncodeToString(writtenSum[:])
+
+	projName := project.Name
+	if projName == "" {
+		projName = appName
+	}
+	cfgFiles := project.ConfigFiles
+	if len(cfgFiles) == 0 {
+		cfgFiles = []string{composePath}
+	}
+
+	emit(platform.PullProgress{Phase: "recreating", StatusText: "Pulling images and recreating Compose project", Percent: 55})
+	if _, err := execTr.ExecComposeProject(ctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, true); err != nil {
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
+		defer cancel()
+		if rErr := execTr.WriteFileAtomic(rctx, composePath, origBytes, writtenSHA); rErr != nil {
+			return &platform.UpdateError{
+				Code:    "recreate_failed",
+				Message: i18n.EngineDetail(i18n.MsgDockerComposeRestoreErr, err.Error(), rErr.Error()),
+			}
+		}
+		_, _ = execTr.ExecComposeProject(rctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, false)
+		return &platform.UpdateError{
+			Code:    "recreate_failed",
+			Message: i18n.EngineDetail(i18n.MsgDockerComposeRestored, err.Error()),
+		}
+	}
+
+	emit(platform.PullProgress{Phase: "done", StatusText: "Compose project updated", Percent: 100})
+	return nil
 }

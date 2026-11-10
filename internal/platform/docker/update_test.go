@@ -48,10 +48,45 @@ services:
 	}
 }
 
+func TestUpdateProjectCompose_RestoresOriginalOnFailure(t *testing.T) {
+	origYAML := "services:\n  web:\n    image: nginx:1.26.0\n"
+	newYAML := "services:\n  web:\n    image: nginx:1.27.3\n"
+	var calls []bool
+	tr := &fakeExecTransport{
+		files: map[string][]byte{
+			"/opt/app/compose.yaml": []byte(origYAML),
+		},
+		composeProjHandler: func(_ string, pullAndRemoveOrphans bool) (string, error) {
+			calls = append(calls, pullAndRemoveOrphans)
+			if pullAndRemoveOrphans {
+				return "pull failed", errors.New("compose up failed")
+			}
+			return "restored", nil
+		},
+	}
+	ad := New("h1", tr)
+	proj := &platform.ProjectInfo{
+		Name:        "app",
+		WorkingDir:  "/opt/app",
+		ConfigFiles: []string{"compose.yaml"},
+	}
+	err := ad.UpdateProjectCompose(context.Background(), "app", proj, newYAML, nil)
+	if err == nil {
+		t.Fatal("expected UpdateProjectCompose error on compose failure")
+	}
+	if string(tr.files["/opt/app/compose.yaml"]) != origYAML {
+		t.Fatalf("expected original compose.yaml to be restored, got:\n%s", string(tr.files["/opt/app/compose.yaml"]))
+	}
+	if len(calls) != 2 || !calls[0] || calls[1] {
+		t.Fatalf("expected [pull+up=true, restore_up=false], got %v", calls)
+	}
+}
+
 type fakeExecTransport struct {
-	doHandler  func(path string) (*http.Response, error)
-	reqHandler func(method, path string, body []byte) (*http.Response, error)
-	files      map[string][]byte
+	doHandler          func(path string) (*http.Response, error)
+	reqHandler         func(method, path string, body []byte) (*http.Response, error)
+	composeProjHandler func(workDir string, pullAndRemoveOrphans bool) (string, error)
+	files              map[string][]byte
 }
 
 func (f *fakeExecTransport) Mode() transport.Mode { return transport.ModeLocal }
@@ -81,6 +116,12 @@ func (f *fakeExecTransport) WriteFileAtomic(_ context.Context, path string, cont
 }
 func (f *fakeExecTransport) ExecComposeService(_ context.Context, _ string, _, _ []string, _, _ string, _ bool) (string, error) {
 	return "compose ok", nil
+}
+func (f *fakeExecTransport) ExecComposeProject(_ context.Context, workDir string, _, _ []string, _ string, pullAndRemoveOrphans bool) (string, error) {
+	if f.composeProjHandler != nil {
+		return f.composeProjHandler(workDir, pullAndRemoveOrphans)
+	}
+	return "compose project ok", nil
 }
 
 var _ transport.ExecutableTransport = (*fakeExecTransport)(nil)

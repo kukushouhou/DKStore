@@ -1,5 +1,5 @@
-// Package registry 实现 OCI/Docker Registry 只读访问、Bearer 鉴权、多架构 Manifest 复核、
-// 有限窗口标签查询（1-3 页）与 Digest 反查版本号（实施文档 §5）。
+// Package registry 实现 OCI/Docker Registry 只读访问、Bearer 鉴权、0 配额损耗检测、多架构 Manifest 复核、
+// 有限窗口标签查询、按需标签搜索与 Digest/ConfigDigest 反查版本号（实施文档 §5 / 附录 D.1 / D.3）。
 package registry
 
 import (
@@ -16,11 +16,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/secret"
 	"github.com/kukushouhou/DKStore/internal/store"
 	"github.com/kukushouhou/DKStore/internal/version"
+	"github.com/kukushouhou/DKStore/rules"
 )
 
 // ErrorKind 表示标准化的 Registry 错误类别（实施文档 §5.7）。
@@ -45,16 +47,27 @@ func (e *RegistryError) Error() string { return i18n.LocalizeDetail(i18n.ZhCN, e
 
 // ManifestResult 是对远端 tag 的 Manifest/Index 检查结果。
 type ManifestResult struct {
-	RepoDigest     string // 顶层 Docker-Content-Digest（Index 或单架构 Manifest）
-	PlatformDigest string // 对应主机 os/arch/variant 的具体 Manifest Digest（若顶层是 Index）
-	ConfigDigest   string // 对应主机架构的镜像 Config Digest（可与本地 ImageInspect.Id 比对）
+	RepoDigest     string `json:"repoDigest,omitempty"`     // 顶层 Docker-Content-Digest（Index 或单架构 Manifest）
+	PlatformDigest string `json:"platformDigest,omitempty"` // 对应主机 os/arch/variant 的具体 Manifest Digest（若顶层是 Index）
+	ConfigDigest   string `json:"configDigest,omitempty"`   // 对应主机架构的镜像 Config Digest（可与本地 ImageInspect.Id 比对）
+	VersionLabel   string `json:"versionLabel,omitempty"`   // OCI Manifest/Index annotations 中的版本号
 }
 
-// TagDigestEntry 表示仓库中一个标签及其关联的 Digest。
+// ManifestCheckOptions 控制 CheckManifestEx 的按需请求行为（避免消耗不必要的拉取配额）。
+type ManifestCheckOptions struct {
+	HostPlatform    string
+	BypassCache     bool
+	LocalRepoDigest string // 本地已知的 RepoDigest；存在时优先走 HEAD 比对免 GET
+	NeedConfig      bool   // 本地缺少 RepoDigest（如群晖 dsm_api 模式）需要比对 ConfigDigest 时设为 true
+}
+
+// TagDigestEntry 表示仓库中一个标签及其关联的 Digest 与更新时间。
 type TagDigestEntry struct {
 	Name            string            `json:"name"`
 	RepoDigest      string            `json:"repoDigest,omitempty"`
+	ConfigDigest    string            `json:"configDigest,omitempty"`
 	PlatformDigests map[string]string `json:"platformDigests,omitempty"` // key: "linux/amd64" 或 "linux/arm/v7"
+	UpdatedAt       int64             `json:"updatedAt,omitempty"`       // Unix 秒（来自 Docker Hub last_updated）
 }
 
 // Creds 是私有仓库的用户名与密码/Token。
@@ -69,7 +82,7 @@ type Client struct {
 	st         *store.Store
 	box        *secret.Box
 	httpClient *http.Client
-	// BaseURLOverride 仅供单元测试把 registry 域名指向 httptest.Server。
+	// BaseURLOverride 仅供单元测试把域名（如 docker.io / hub.docker.com / github.com）指向 httptest.Server。
 	BaseURLOverride map[string]string
 
 	tokenMu sync.Mutex
@@ -100,18 +113,47 @@ func New(st *store.Store, box *secret.Box) *Client {
 	}
 }
 
-// CheckManifest 查询指定镜像引用（tag）在远端的最新 Digest，并在多架构 Index 场景下解析对应平台的 PlatformDigest / ConfigDigest。
+// CheckManifest 查询指定镜像引用（tag）在远端的最新 Digest（兼容简化调用签名）。
 func (c *Client) CheckManifest(ctx context.Context, ref version.ParsedRef, hostPlatform string, bypassCache bool) (*ManifestResult, error) {
+	return c.CheckManifestEx(ctx, ref, ManifestCheckOptions{
+		HostPlatform: hostPlatform,
+		BypassCache:  bypassCache,
+	})
+}
+
+// CheckManifestEx 执行 0 配额优先的 Manifest 检查（附录 D.1）：
+// 1. Docker Hub 标签优先调用 hub.docker.com/v2/repositories/.../tags/{tag}（0 Registry 拉取配额，同时拿到 RepoDigest 与各架构 PlatformDigest）；
+//    仅当调用方明确需要 ConfigDigest（NeedConfig）或网页端接口不可用/未命中（如私有镜像）时，才回退到 Registry v2。
+// 2. Registry v2 在本地已有 RepoDigest 且无需 ConfigDigest 时优先发免费的 HEAD 请求核对 Docker-Content-Digest，一致则直接返回，不消耗拉取配额。
+func (c *Client) CheckManifestEx(ctx context.Context, ref version.ParsedRef, opts ManifestCheckOptions) (*ManifestResult, error) {
 	tag := ref.Tag
 	if tag == "" {
 		tag = ref.Digest
 	}
-	cacheKey := fmt.Sprintf("manifest:%s/%s:%s@%s", ref.Registry, ref.Repository, tag, hostPlatform)
-	if !bypassCache {
+	repoKey := ref.Registry + "/" + ref.Repository
+	cacheKey := fmt.Sprintf("manifest:%s/%s:%s@%s", ref.Registry, ref.Repository, tag, opts.HostPlatform)
+	if !opts.BypassCache {
 		if b, ok := c.getCache(ctx, cacheKey); ok {
 			var res ManifestResult
-			if json.Unmarshal(b, &res) == nil && res.RepoDigest != "" {
+			if json.Unmarshal(b, &res) == nil && res.RepoDigest != "" && (!opts.NeedConfig || res.ConfigDigest != "") {
 				return &res, nil
+			}
+		}
+	}
+
+	localDig := NormalizeDigest(opts.LocalRepoDigest)
+	var hubFallback *ManifestResult
+
+	// 1. Docker Hub 镜像优先走网页端 Tags 接口（0 拉取配额）
+	if ref.Registry == "docker.io" && !strings.HasPrefix(tag, "sha256:") {
+		if fbRes, fbErr := c.fetchDockerHubTagManifest(ctx, ref.Repository, tag, opts.HostPlatform); fbErr == nil && fbRes.RepoDigest != "" {
+			hubFallback = fbRes
+			sameAsLocal := localDig != "" && (fbRes.RepoDigest == localDig || (fbRes.PlatformDigest != "" && fbRes.PlatformDigest == localDig))
+			if !opts.NeedConfig || sameAsLocal {
+				if b, mErr := json.Marshal(fbRes); mErr == nil {
+					c.putCache(ctx, cacheKey, b, 30*time.Minute)
+				}
+				return fbRes, nil
 			}
 		}
 	}
@@ -119,12 +161,40 @@ func (c *Client) CheckManifest(ctx context.Context, ref version.ParsedRef, hostP
 	baseURL := c.registryAPIBase(ref.Registry)
 	manifestURL := fmt.Sprintf("%s/v2/%s/manifests/%s", baseURL, ref.Repository, url.PathEscape(tag))
 
-	// 先发 GET（同时拿顶层 Docker-Content-Digest 和响应体，若是 Index 可直接解析平台 Manifest，无需二次拉取 Index）
+	// 2. 当本地已有 RepoDigest 且无需强制获取 ConfigDigest 时，先发 HEAD 免费核对 Docker-Content-Digest
+	if localDig != "" && !opts.NeedConfig {
+		hResp, _, hErr := c.doRegistryRequest(ctx, ref.Registry, ref.Repository, http.MethodHead, manifestURL, acceptManifestHeaders)
+		if hErr == nil {
+			headDig := NormalizeDigest(hResp.Header.Get("Docker-Content-Digest"))
+			if headDig != "" && headDig == localDig {
+				res := &ManifestResult{RepoDigest: headDig}
+				if b, mErr := json.Marshal(res); mErr == nil {
+					c.putCache(ctx, cacheKey, b, 30*time.Minute)
+				}
+				return res, nil
+			}
+		} else {
+			var re *RegistryError
+			if errors.As(hErr, &re) && (re.Kind == ErrNotFound || re.Kind == ErrRateLimited || re.Kind == ErrAuthRequired) {
+				if hubFallback != nil {
+					return hubFallback, nil
+				}
+				return nil, hErr
+			}
+		}
+	}
+
+	// 3. 发 GET 获取完整 Manifest/Index（必要时进一步解析对应架构的 PlatformDigest 与 ConfigDigest）
 	resp, body, err := c.doRegistryRequest(ctx, ref.Registry, ref.Repository, http.MethodGet, manifestURL, acceptManifestHeaders)
 	if err != nil {
-		// 当国内网络直连 registry-1.docker.io 失败（如 EOF/连接重置）时，自动回退到 Docker Hub Tags API 获取该标签 Digest
+		if hubFallback != nil {
+			if b, mErr := json.Marshal(hubFallback); mErr == nil {
+				c.putCache(ctx, cacheKey, b, 30*time.Minute)
+			}
+			return hubFallback, nil
+		}
 		if ref.Registry == "docker.io" && !strings.HasPrefix(tag, "sha256:") {
-			if fbRes, fbErr := c.fetchDockerHubTagManifest(ctx, ref.Repository, tag, hostPlatform); fbErr == nil && fbRes.RepoDigest != "" {
+			if fbRes, fbErr := c.fetchDockerHubTagManifest(ctx, ref.Repository, tag, opts.HostPlatform); fbErr == nil && fbRes.RepoDigest != "" {
 				if b, mErr := json.Marshal(fbRes); mErr == nil {
 					c.putCache(ctx, cacheKey, b, 30*time.Minute)
 				}
@@ -133,16 +203,19 @@ func (c *Client) CheckManifest(ctx context.Context, ref version.ParsedRef, hostP
 		}
 		return nil, err
 	}
+
 	res := &ManifestResult{
-		RepoDigest: NormalizeDigest(resp.Header.Get("Docker-Content-Digest")),
+		RepoDigest:   NormalizeDigest(resp.Header.Get("Docker-Content-Digest")),
+		VersionLabel: parseAnnotationVersion(body),
 	}
 	ct := strings.ToLower(resp.Header.Get("Content-Type"))
 
 	if strings.Contains(ct, "manifest.list") || strings.Contains(ct, "image.index") {
 		var idx struct {
 			Manifests []struct {
-				Digest   string `json:"digest"`
-				Platform struct {
+				Digest      string            `json:"digest"`
+				Annotations map[string]string `json:"annotations"`
+				Platform    struct {
 					OS      string `json:"os"`
 					Arch    string `json:"architecture"`
 					Variant string `json:"variant"`
@@ -150,26 +223,36 @@ func (c *Client) CheckManifest(ctx context.Context, ref version.ParsedRef, hostP
 			} `json:"manifests"`
 		}
 		// 平台未知时跳过平台级比对（不默认 amd64，审计 M2/H5）
-		if hostPlatform != "" && json.Unmarshal(body, &idx) == nil {
+		if opts.HostPlatform != "" && json.Unmarshal(body, &idx) == nil {
 			plats := make([]string, len(idx.Manifests))
 			for i, m := range idx.Manifests {
 				plats[i] = formatPlatform(m.Platform.OS, m.Platform.Arch, m.Platform.Variant)
 			}
-			if i := selectPlatformIndex(hostPlatform, plats); i >= 0 {
+			if i := selectPlatformIndex(opts.HostPlatform, plats); i >= 0 {
 				res.PlatformDigest = NormalizeDigest(idx.Manifests[i].Digest)
+				if res.VersionLabel == "" {
+					res.VersionLabel = pickAnnotationVersion(idx.Manifests[i].Annotations)
+				}
 			}
 		}
-		// 多架构 Index：再取对应平台的 Manifest 以获得 ConfigDigest（可与本地 ImageID 比对）
-		if res.PlatformDigest != "" {
+		// 多架构 Index：仅在平台摘要与本地摘要不同或明确需要 ConfigDigest 时拉取平台子 Manifest
+		samePlat := localDig != "" && res.PlatformDigest != "" && res.PlatformDigest == localDig
+		if res.PlatformDigest != "" && (!samePlat || opts.NeedConfig) {
 			pURL := fmt.Sprintf("%s/v2/%s/manifests/%s", baseURL, ref.Repository, res.PlatformDigest)
 			if _, pBody, pErr := c.doRegistryRequest(ctx, ref.Registry, ref.Repository, http.MethodGet, pURL, acceptManifestHeaders); pErr == nil {
 				res.ConfigDigest = parseConfigDigest(pBody)
+				if res.VersionLabel == "" {
+					res.VersionLabel = parseAnnotationVersion(pBody)
+				}
 			}
 		}
 	} else {
 		res.ConfigDigest = parseConfigDigest(body)
 	}
 
+	if res.ConfigDigest != "" && tag != "" && !strings.HasPrefix(tag, "sha256:") {
+		c.mergeDigestTagCache(ctx, repoKey, res.ConfigDigest, tag)
+	}
 	if res.RepoDigest != "" {
 		if b, err := json.Marshal(res); err == nil {
 			c.putCache(ctx, cacheKey, b, 30*time.Minute)
@@ -178,7 +261,7 @@ func (c *Client) CheckManifest(ctx context.Context, ref version.ParsedRef, hostP
 	return res, nil
 }
 
-// FetchRecentTags 按实施文档 §5.4 的有限策略获取候选标签列表（含可用 Digest）。
+// FetchRecentTags 按实施文档 §5.4 的有限策略获取候选标签列表（含可用 Digest 与更新时间）。
 // Docker Hub 最多拉取 maxPages（默认 3，每页 100）按更新时间倒序的标签。
 func (c *Client) FetchRecentTags(ctx context.Context, ref version.ParsedRef, maxPages int, bypassCache bool) ([]TagDigestEntry, error) {
 	if maxPages <= 0 || maxPages > 3 {
@@ -201,7 +284,7 @@ func (c *Client) FetchRecentTags(ctx context.Context, ref version.ParsedRef, max
 	if ref.Registry == "docker.io" {
 		entries, err = c.fetchDockerHubTags(ctx, ref.Repository, maxPages)
 	} else {
-		entries, err = c.fetchOCITagsList(ctx, ref.Registry, ref.Repository)
+		entries, err = c.fetchOCITagsList(ctx, ref.Registry, ref.Repository, 5)
 	}
 	if err != nil {
 		return nil, err
@@ -210,6 +293,145 @@ func (c *Client) FetchRecentTags(ctx context.Context, ref version.ParsedRef, max
 		c.putCache(ctx, cacheKey, b, 6*time.Hour)
 	}
 	return entries, nil
+}
+
+// SearchTags 支持弹窗内本地即时筛选（remote=false 或 query=""）与按需远端检索（remote=true && query!=""），
+// 返回最多 20 条匹配标签与当前仓库最高可用版本标签 highestTag（附录 D.3）。
+func (c *Client) SearchTags(ctx context.Context, ref version.ParsedRef, query string, remote bool) ([]TagDigestEntry, string, error) {
+	q := strings.TrimSpace(query)
+	qLower := strings.ToLower(q)
+
+	recent, err := c.FetchRecentTags(ctx, ref, 3, false)
+	if err != nil && (!remote || q == "" || ref.Registry != "docker.io") {
+		return nil, "", err
+	}
+
+	combined := recent
+	if remote && q != "" {
+		if ref.Registry == "docker.io" {
+			remoteHits, rErr := c.searchDockerHubTagsByName(ctx, ref.Repository, q)
+			if rErr != nil && len(recent) == 0 {
+				return nil, "", rErr
+			}
+			if len(remoteHits) > 0 {
+				seen := make(map[string]bool, len(remoteHits)+len(recent))
+				merged := make([]TagDigestEntry, 0, len(remoteHits)+len(recent))
+				for _, e := range remoteHits {
+					if e.Name != "" && !seen[e.Name] {
+						seen[e.Name] = true
+						merged = append(merged, e)
+					}
+				}
+				for _, e := range recent {
+					if e.Name != "" && !seen[e.Name] {
+						seen[e.Name] = true
+						merged = append(merged, e)
+					}
+				}
+				combined = merged
+			}
+		} else if len(combined) == 0 {
+			list, lErr := c.fetchOCITagsList(ctx, ref.Registry, ref.Repository, 5)
+			if lErr != nil {
+				return nil, "", lErr
+			}
+			combined = list
+		}
+	}
+
+	highest := pickHighestRepoTag(recent)
+	if highest == "" {
+		highest = pickHighestRepoTag(combined)
+	}
+
+	ordered := orderTagsForDisplay(combined, ref.Registry == "docker.io")
+	out := make([]TagDigestEntry, 0, 20)
+	for _, e := range ordered {
+		if e.Name == "" {
+			continue
+		}
+		if qLower != "" && !strings.Contains(strings.ToLower(e.Name), qLower) {
+			continue
+		}
+		out = append(out, e)
+		if len(out) >= 20 {
+			break
+		}
+	}
+	return out, highest, nil
+}
+
+func pickHighestRepoTag(entries []TagDigestEntry) string {
+	var best version.ParsedTag
+	hasBest := false
+	for _, e := range entries {
+		pt := version.ParseTag(e.Name)
+		if pt.Scheme == version.SchemeUnknown || pt.Prerelease {
+			continue
+		}
+		// 优先选择无特殊系统变体（或 ls）的标准最高版本
+		if pt.Variant != "" && pt.Variant != "ls" {
+			continue
+		}
+		if !hasBest || version.Compare(pt, best) > 0 || (version.Compare(pt, best) == 0 && pt.Precision > best.Precision) {
+			best = pt
+			hasBest = true
+		}
+	}
+	if hasBest {
+		return best.Raw
+	}
+	for _, e := range entries {
+		pt := version.ParseTag(e.Name)
+		if pt.Scheme != version.SchemeUnknown && !pt.Prerelease {
+			if !hasBest || version.Compare(pt, best) > 0 {
+				best = pt
+				hasBest = true
+			}
+		}
+	}
+	if hasBest {
+		return best.Raw
+	}
+	for _, e := range entries {
+		if e.Name != "" && !rules.Default().IsRollingTag(e.Name) {
+			return e.Name
+		}
+	}
+	if len(entries) > 0 {
+		return entries[0].Name
+	}
+	return ""
+}
+
+func orderTagsForDisplay(entries []TagDigestEntry, alreadyOrderedByTime bool) []TagDigestEntry {
+	if alreadyOrderedByTime || len(entries) <= 1 {
+		return entries
+	}
+	cp := make([]TagDigestEntry, len(entries))
+	copy(cp, entries)
+	sort.SliceStable(cp, func(i, j int) bool {
+		if cp[i].UpdatedAt != cp[j].UpdatedAt {
+			return cp[i].UpdatedAt > cp[j].UpdatedAt
+		}
+		pi := version.ParseTag(cp[i].Name)
+		pj := version.ParseTag(cp[j].Name)
+		iStd := pi.Scheme != version.SchemeUnknown && !pi.Prerelease
+		jStd := pj.Scheme != version.SchemeUnknown && !pj.Prerelease
+		if iStd != jStd {
+			return iStd
+		}
+		if iStd && jStd {
+			if cmp := version.Compare(pi, pj); cmp != 0 {
+				return cmp > 0
+			}
+			if pi.Precision != pj.Precision {
+				return pi.Precision > pj.Precision
+			}
+		}
+		return cp[i].Name > cp[j].Name
+	})
+	return cp
 }
 
 // LookupTagsByDigest 在有限窗口标签集内反查与 targetDigest（或 targetPlatformDigest）匹配的标签列表，并缓存结果（实施文档 §5.5）。
@@ -221,13 +443,32 @@ func (c *Client) LookupTagsByDigest(
 	hostPlatform string,
 	recent []TagDigestEntry,
 ) []string {
-	if targetDigest == "" && targetPlatformDigest == "" {
+	return c.LookupTagsByDigestOrConfig(ctx, ref, targetDigest, targetPlatformDigest, "", hostPlatform, recent)
+}
+
+// LookupTagsByDigestOrConfig 支持按 RepoDigest / PlatformDigest 反查标签，并在本地无 RepoDigest（如群晖 dsm_api 模式）时通过缓存的 ConfigDigest（ImageID）反查。
+func (c *Client) LookupTagsByDigestOrConfig(
+	ctx context.Context,
+	ref version.ParsedRef,
+	targetDigest string,
+	targetPlatformDigest string,
+	targetConfigDigest string,
+	hostPlatform string,
+	recent []TagDigestEntry,
+) []string {
+	targetDigest = NormalizeDigest(targetDigest)
+	targetPlatformDigest = NormalizeDigest(targetPlatformDigest)
+	targetConfigDigest = NormalizeDigest(targetConfigDigest)
+	if targetDigest == "" && targetPlatformDigest == "" && targetConfigDigest == "" {
 		return nil
 	}
 	repoKey := ref.Registry + "/" + ref.Repository
 	lookupKey := targetDigest
 	if lookupKey == "" {
 		lookupKey = targetPlatformDigest
+	}
+	if lookupKey == "" {
+		lookupKey = targetConfigDigest
 	}
 	if cached := c.getDigestTagCache(ctx, repoKey, lookupKey); len(cached) > 0 {
 		return cached
@@ -251,16 +492,20 @@ func (c *Client) LookupTagsByDigest(
 			add(e.Name)
 			continue
 		}
+		if targetConfigDigest != "" && e.ConfigDigest != "" && NormalizeDigest(e.ConfigDigest) == targetConfigDigest {
+			add(e.Name)
+			continue
+		}
 		if pd := lookupPlatformDigest(e.PlatformDigests, hostPlatform); pd != "" {
-			if pd == targetDigest || pd == targetPlatformDigest {
+			if (targetDigest != "" && pd == targetDigest) || (targetPlatformDigest != "" && pd == targetPlatformDigest) {
 				add(e.Name)
 			}
 		}
 	}
 
-	// 对 GHCR / 标准 OCI 仓库（recent 只有名字没有 digest），只对最高的最多 5 个可解析版本标签做 HEAD 比对
-	if len(matched) == 0 && ref.Registry != "docker.io" && len(recent) > 0 {
-		candidates := pickTopVersionTags(recent, 5)
+	// 对非 Docker Hub 的 OCI 仓库（recent 只有名字没有 digest），挑选最多 12 个候选标签（含标准版本标签及日期/构建别名标签）做免费 HEAD 比对
+	if len(matched) == 0 && (targetDigest != "" || targetPlatformDigest != "") && ref.Registry != "docker.io" && len(recent) > 0 {
+		candidates := pickCandidateTagsForLookup(recent, 12)
 		baseURL := c.registryAPIBase(ref.Registry)
 		for _, tagName := range candidates {
 			u := fmt.Sprintf("%s/v2/%s/manifests/%s", baseURL, ref.Repository, url.PathEscape(tagName))
@@ -269,8 +514,21 @@ func (c *Client) LookupTagsByDigest(
 				continue
 			}
 			dig := NormalizeDigest(resp.Header.Get("Docker-Content-Digest"))
-			if dig != "" && (dig == targetDigest || dig == targetPlatformDigest) {
+			if dig != "" && ((targetDigest != "" && dig == targetDigest) || (targetPlatformDigest != "" && dig == targetPlatformDigest)) {
 				add(tagName)
+			}
+		}
+	}
+
+	// 若仅提供 targetConfigDigest（本地无 RepoDigest），在已缓存的 manifest:* 记录与 digest_tag_cache 中匹配 ConfigDigest
+	if len(matched) == 0 && targetConfigDigest != "" {
+		if cached := c.getDigestTagCache(ctx, repoKey, targetConfigDigest); len(cached) > 0 {
+			for _, t := range cached {
+				add(t)
+			}
+		} else {
+			for _, t := range c.lookupCachedManifestTagsByConfig(ctx, ref.Registry, ref.Repository, targetConfigDigest) {
+				add(t)
 			}
 		}
 	}
@@ -281,27 +539,72 @@ func (c *Client) LookupTagsByDigest(
 	return matched
 }
 
-func pickTopVersionTags(entries []TagDigestEntry, limit int) []string {
+func pickCandidateTagsForLookup(entries []TagDigestEntry, limit int) []string {
 	var parsed []version.ParsedTag
+	var aliases []string
 	for _, e := range entries {
-		pt := version.ParseTag(e.Name)
-		if pt.Scheme != version.SchemeUnknown && !pt.Prerelease && pt.Precision >= 2 {
+		name := strings.TrimSpace(e.Name)
+		if name == "" || rules.Default().IsRollingTag(name) {
+			continue
+		}
+		pt := version.ParseTag(name)
+		if pt.Scheme != version.SchemeUnknown && !pt.Prerelease {
 			parsed = append(parsed, pt)
+		} else if pt.Scheme == version.SchemeUnknown {
+			aliases = append(aliases, name)
 		}
 	}
-	// 简单选择前 limit 个最高版本
-	var out []string
-	for len(out) < limit && len(parsed) > 0 {
-		bestIdx := 0
-		for i := 1; i < len(parsed); i++ {
-			if version.Compare(parsed[i], parsed[bestIdx]) > 0 {
-				bestIdx = i
+	sort.SliceStable(parsed, func(i, j int) bool {
+		iMulti := parsed[i].Precision >= 2
+		jMulti := parsed[j].Precision >= 2
+		if iMulti != jMulti {
+			return iMulti
+		}
+		if cmp := version.Compare(parsed[i], parsed[j]); cmp != 0 {
+			return cmp > 0
+		}
+		return parsed[i].Precision > parsed[j].Precision
+	})
+
+	seen := make(map[string]bool, limit)
+	out := make([]string, 0, limit)
+	for _, pt := range parsed {
+		if len(out) >= limit {
+			break
+		}
+		if !seen[pt.Raw] {
+			seen[pt.Raw] = true
+			out = append(out, pt.Raw)
+		}
+	}
+	if len(out) < limit && len(aliases) > 0 {
+		sort.SliceStable(aliases, func(i, j int) bool {
+			di, dj := hasAnyDigit(aliases[i]), hasAnyDigit(aliases[j])
+			if di != dj {
+				return di
+			}
+			return aliases[i] > aliases[j]
+		})
+		for _, a := range aliases {
+			if len(out) >= limit {
+				break
+			}
+			if !seen[a] {
+				seen[a] = true
+				out = append(out, a)
 			}
 		}
-		out = append(out, parsed[bestIdx].Raw)
-		parsed = append(parsed[:bestIdx], parsed[bestIdx+1:]...)
 	}
 	return out
+}
+
+func hasAnyDigit(s string) bool {
+	for _, r := range s {
+		if unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) fetchDockerHubTagManifest(ctx context.Context, repository, tag, hostPlatform string) (*ManifestResult, error) {
@@ -344,7 +647,61 @@ func (c *Client) fetchDockerHubTagManifest(ctx context.Context, repository, tag,
 			}
 		}
 	}
+	if res.RepoDigest == "" && len(payload.Images) == 1 && payload.Images[0].Digest != "" {
+		res.RepoDigest = NormalizeDigest(payload.Images[0].Digest)
+	}
 	return res, nil
+}
+
+type dockerHubTagsPayload struct {
+	Next    string `json:"next"`
+	Results []struct {
+		Name        string `json:"name"`
+		Digest      string `json:"digest"`
+		LastUpdated string `json:"last_updated"`
+		Images      []struct {
+			OS      string `json:"os"`
+			Arch    string `json:"architecture"`
+			Variant string `json:"variant"`
+			Digest  string `json:"digest"`
+		} `json:"images"`
+	} `json:"results"`
+}
+
+func parseHubTimestamp(raw string) int64 {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return 0
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, s); err == nil && t.Year() > 1970 {
+			return t.Unix()
+		}
+	}
+	return 0
+}
+
+func decodeDockerHubTagEntries(body []byte) ([]TagDigestEntry, string, error) {
+	var payload dockerHubTagsPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, "", err
+	}
+	out := make([]TagDigestEntry, 0, len(payload.Results))
+	for _, r := range payload.Results {
+		pMap := make(map[string]string, len(r.Images))
+		for _, im := range r.Images {
+			if im.Digest != "" {
+				pMap[formatPlatform(im.OS, im.Arch, im.Variant)] = NormalizeDigest(im.Digest)
+			}
+		}
+		out = append(out, TagDigestEntry{
+			Name:            r.Name,
+			RepoDigest:      NormalizeDigest(r.Digest),
+			PlatformDigests: pMap,
+			UpdatedAt:       parseHubTimestamp(r.LastUpdated),
+		})
+	}
+	return out, payload.Next, nil
 }
 
 func (c *Client) fetchDockerHubTags(ctx context.Context, repository string, maxPages int) ([]TagDigestEntry, error) {
@@ -366,58 +723,94 @@ func (c *Client) fetchDockerHubTags(ctx context.Context, repository string, maxP
 		if resp.StatusCode != http.StatusOK {
 			return nil, classifyHTTPStatus("Docker Hub", resp.StatusCode)
 		}
-		var payload struct {
-			Next    string `json:"next"`
-			Results []struct {
-				Name   string `json:"name"`
-				Digest string `json:"digest"`
-				Images []struct {
-					OS      string `json:"os"`
-					Arch    string `json:"architecture"`
-					Variant string `json:"variant"`
-					Digest  string `json:"digest"`
-				} `json:"images"`
-			} `json:"results"`
-		}
-		if err := json.Unmarshal(body, &payload); err != nil {
+		items, next, err := decodeDockerHubTagEntries(body)
+		if err != nil {
 			return nil, &RegistryError{Kind: ErrRegistry, Message: i18n.EngineDetail(i18n.MsgRegistryParse, "Docker Hub")}
 		}
-		for _, r := range payload.Results {
-			pMap := make(map[string]string, len(r.Images))
-			for _, im := range r.Images {
-				if im.Digest != "" {
-					pMap[formatPlatform(im.OS, im.Arch, im.Variant)] = NormalizeDigest(im.Digest)
-				}
-			}
-			out = append(out, TagDigestEntry{
-				Name:            r.Name,
-				RepoDigest:      NormalizeDigest(r.Digest),
-				PlatformDigests: pMap,
-			})
-		}
-		nextURL = payload.Next
+		out = append(out, items...)
+		nextURL = next
 	}
 	return out, nil
 }
 
-func (c *Client) fetchOCITagsList(ctx context.Context, reg, repo string) ([]TagDigestEntry, error) {
-	base := c.registryAPIBase(reg)
-	u := fmt.Sprintf("%s/v2/%s/tags/list?n=1000", base, repo)
-	_, body, err := c.doRegistryRequest(ctx, reg, repo, http.MethodGet, u, "application/json")
+func (c *Client) searchDockerHubTagsByName(ctx context.Context, repository, query string) ([]TagDigestEntry, error) {
+	u := fmt.Sprintf("%s/v2/repositories/%s/tags?page_size=20&ordering=last_updated&name=%s",
+		c.hubAPIBase(), repository, url.QueryEscape(query))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, err
+		return nil, &RegistryError{Kind: ErrNetwork, Message: i18n.EngineDetail(i18n.MsgRegistryNetwork, "Docker Hub", err.Error())}
 	}
-	var payload struct {
-		Tags []string `json:"tags"`
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, &RegistryError{Kind: ErrNetwork, Message: i18n.EngineDetail(i18n.MsgRegistryNetwork, "Docker Hub", err.Error())}
 	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, &RegistryError{Kind: ErrRegistry, Message: i18n.EngineDetail(i18n.MsgRegistryParse, reg)}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, classifyHTTPStatus("Docker Hub", resp.StatusCode)
 	}
-	out := make([]TagDigestEntry, 0, len(payload.Tags))
-	for _, t := range payload.Tags {
-		out = append(out, TagDigestEntry{Name: t})
+	items, _, err := decodeDockerHubTagEntries(body)
+	if err != nil {
+		return nil, &RegistryError{Kind: ErrRegistry, Message: i18n.EngineDetail(i18n.MsgRegistryParse, "Docker Hub")}
+	}
+	return items, nil
+}
+
+func (c *Client) fetchOCITagsList(ctx context.Context, reg, repo string, maxPages int) ([]TagDigestEntry, error) {
+	if maxPages <= 0 {
+		maxPages = 1
+	}
+	base := c.registryAPIBase(reg)
+	nextURL := fmt.Sprintf("%s/v2/%s/tags/list?n=1000", base, repo)
+	var out []TagDigestEntry
+	seen := make(map[string]bool)
+
+	for page := 0; page < maxPages && nextURL != ""; page++ {
+		resp, body, err := c.doRegistryRequest(ctx, reg, repo, http.MethodGet, nextURL, "application/json")
+		if err != nil {
+			if page > 0 && len(out) > 0 {
+				break
+			}
+			return nil, err
+		}
+		var payload struct {
+			Tags []string `json:"tags"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return nil, &RegistryError{Kind: ErrRegistry, Message: i18n.EngineDetail(i18n.MsgRegistryParse, reg)}
+		}
+		for _, t := range payload.Tags {
+			if t != "" && !seen[t] {
+				seen[t] = true
+				out = append(out, TagDigestEntry{Name: t})
+			}
+		}
+		nextURL = parseLinkNextURL(base, resp.Header.Get("Link"))
 	}
 	return out, nil
+}
+
+func parseLinkNextURL(baseURL, linkHeader string) string {
+	for _, part := range strings.Split(linkHeader, ",") {
+		part = strings.TrimSpace(part)
+		if !strings.Contains(strings.ToLower(part), `rel="next"`) && !strings.Contains(strings.ToLower(part), `rel=next`) {
+			continue
+		}
+		start := strings.Index(part, "<")
+		end := strings.Index(part, ">")
+		if start < 0 || end <= start+1 {
+			continue
+		}
+		raw := strings.TrimSpace(part[start+1 : end])
+		if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+			return raw
+		}
+		if strings.HasPrefix(raw, "/") {
+			return strings.TrimRight(baseURL, "/") + raw
+		}
+		return strings.TrimRight(baseURL, "/") + "/" + raw
+	}
+	return ""
 }
 
 func (c *Client) doRegistryRequest(ctx context.Context, reg, repo, method, targetURL, accept string) (*http.Response, []byte, error) {
@@ -556,6 +949,19 @@ func (c *Client) registryAPIBase(reg string) string {
 	return "https://" + reg
 }
 
+// HubAPIBase 返回 Docker Hub Web API 基础地址（支持单元测试覆盖）。
+func (c *Client) HubAPIBase() string { return c.hubAPIBase() }
+
+// GitHubBase 返回 GitHub 基础地址（支持单元测试覆盖）。
+func (c *Client) GitHubBase() string {
+	if c.BaseURLOverride != nil {
+		if u, ok := c.BaseURLOverride["github.com"]; ok {
+			return u
+		}
+	}
+	return "https://github.com"
+}
+
 func (c *Client) hubAPIBase() string {
 	if c.BaseURLOverride != nil {
 		if u, ok := c.BaseURLOverride["hub.docker.com"]; ok {
@@ -587,6 +993,16 @@ func (c *Client) setCachedToken(key, tok string) {
 	c.tokenMu.Lock()
 	defer c.tokenMu.Unlock()
 	c.tokens[key] = cachedToken{token: tok, expiresAt: time.Now().Add(4 * time.Minute)}
+}
+
+// GetCache 从 SQLite registry_cache 读取未过期的缓存字节。
+func (c *Client) GetCache(ctx context.Context, key string) ([]byte, bool) {
+	return c.getCache(ctx, key)
+}
+
+// PutCache 将字节以指定 TTL 写入 SQLite registry_cache。
+func (c *Client) PutCache(ctx context.Context, key string, val []byte, ttl time.Duration) {
+	c.putCache(ctx, key, val, ttl)
 }
 
 func (c *Client) getCache(ctx context.Context, key string) ([]byte, bool) {
@@ -635,6 +1051,52 @@ func (c *Client) putDigestTagCache(ctx context.Context, repo, digest string, tag
 		INSERT INTO digest_tag_cache(repo, digest, tags_json) VALUES (?, ?, ?)
 		ON CONFLICT(repo, digest) DO UPDATE SET tags_json=excluded.tags_json`,
 		repo, digest, string(b))
+}
+
+func (c *Client) mergeDigestTagCache(ctx context.Context, repo, digest, tag string) {
+	if c.st == nil || digest == "" || tag == "" {
+		return
+	}
+	existing := c.getDigestTagCache(ctx, repo, digest)
+	for _, t := range existing {
+		if t == tag {
+			return
+		}
+	}
+	existing = append(existing, tag)
+	c.putDigestTagCache(ctx, repo, digest, existing)
+}
+
+func (c *Client) lookupCachedManifestTagsByConfig(ctx context.Context, reg, repo, configDigest string) []string {
+	if c.st == nil || configDigest == "" {
+		return nil
+	}
+	prefix := fmt.Sprintf("manifest:%s/%s:", reg, repo)
+	rows, err := c.st.DB.QueryContext(ctx, `SELECT k, v FROM registry_cache WHERE k LIKE ?`, prefix+"%")
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	seen := make(map[string]bool)
+	for rows.Next() {
+		var k string
+		var v []byte
+		if rows.Scan(&k, &v) != nil {
+			continue
+		}
+		var mr ManifestResult
+		if json.Unmarshal(v, &mr) != nil || NormalizeDigest(mr.ConfigDigest) != configDigest {
+			continue
+		}
+		rest := strings.TrimPrefix(k, prefix)
+		tag, _, _ := strings.Cut(rest, "@")
+		if tag != "" && !strings.HasPrefix(tag, "sha256:") && !seen[tag] {
+			seen[tag] = true
+			out = append(out, tag)
+		}
+	}
+	return out
 }
 
 // ListCredentials 返回已配置的私有仓库凭证（不含密码明文）。
@@ -752,6 +1214,26 @@ func parseConfigDigest(body []byte) string {
 		return ""
 	}
 	return NormalizeDigest(mf.Config.Digest)
+}
+
+func parseAnnotationVersion(body []byte) string {
+	var mf struct {
+		Annotations map[string]string `json:"annotations"`
+	}
+	if json.Unmarshal(body, &mf) != nil {
+		return ""
+	}
+	return pickAnnotationVersion(mf.Annotations)
+}
+
+func pickAnnotationVersion(ann map[string]string) string {
+	if len(ann) == 0 {
+		return ""
+	}
+	if v := strings.TrimSpace(ann["org.opencontainers.image.version"]); v != "" {
+		return v
+	}
+	return strings.TrimSpace(ann["org.label-schema.version"])
 }
 
 type platformParts struct{ os, arch, variant string }

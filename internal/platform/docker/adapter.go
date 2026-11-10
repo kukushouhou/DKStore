@@ -551,7 +551,11 @@ func filterLabels(in map[string]string) map[string]string {
 	}
 	keep := make(map[string]string)
 	for k, v := range in {
-		if strings.HasPrefix(k, "org.opencontainers.image.") || strings.HasPrefix(k, "com.docker.compose.") {
+		if strings.HasPrefix(k, "org.opencontainers.image.") ||
+			strings.HasPrefix(k, "org.label-schema.") ||
+			strings.HasPrefix(k, "net.unraid.docker.") ||
+			strings.HasPrefix(k, "com.docker.compose.") ||
+			k == "homepage.icon" {
 			keep[k] = v
 		}
 	}

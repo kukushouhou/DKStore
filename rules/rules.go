@@ -14,9 +14,10 @@ import (
 //go:embed *.yaml
 var rulesFS embed.FS
 
-// DatabaseRule 定义一种数据库的识别与系列判断规则。
+// DatabaseRule 定义一种数据库或有状态中间件的识别与系列判断规则。
 type DatabaseRule struct {
 	Name    string   `yaml:"name"`
+	Kind    string   `yaml:"kind"` // "database" | "mq" | "middleware"（缺省为 "database"）
 	Images  []string `yaml:"images"`
 	Pattern string   `yaml:"pattern"`
 	Series  string   `yaml:"series"` // "major" | "minor"
@@ -72,6 +73,9 @@ func load() (*Set, error) {
 		return nil, err
 	}
 	for i := range dbFile.Databases {
+		if strings.TrimSpace(dbFile.Databases[i].Kind) == "" {
+			dbFile.Databases[i].Kind = "database"
+		}
 		if p := dbFile.Databases[i].Pattern; p != "" {
 			re, err := regexp.Compile("(?i)" + p)
 			if err != nil {

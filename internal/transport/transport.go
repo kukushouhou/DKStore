@@ -52,12 +52,13 @@ type Transport interface {
 	Close() error
 }
 
-// ExecutableTransport 扩展 Transport，提供镜像拉取、容器重建、Compose 单服务更新与冲突校验写入能力。
+// ExecutableTransport 扩展 Transport，提供镜像拉取、容器重建、Compose 单服务更新、整项目配置更新与冲突校验写入能力。
 type ExecutableTransport interface {
 	Transport
 	RequestDocker(ctx context.Context, method, path string, body io.Reader, headers map[string]string) (*http.Response, error)
 	WriteFileAtomic(ctx context.Context, path string, data []byte, expectedSHA256 string) error
 	ExecComposeService(ctx context.Context, workDir string, configFiles, envFiles []string, projectName, serviceName string, startContainer bool) (string, error)
+	ExecComposeProject(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, pullAndRemoveOrphans bool) (string, error)
 }
 
 const maxFileSize = 2 << 20 // 2 MiB
@@ -198,6 +199,51 @@ func (l *LocalTransport) ExecComposeService(ctx context.Context, workDir string,
 		return strings.TrimSpace(string(out)), fmt.Errorf("%s compose: %w (%s)", name, err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func (l *LocalTransport) ExecComposeProject(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, pullAndRemoveOrphans bool) (string, error) {
+	baseFlags := buildComposeBaseFlags(workDir, configFiles, envFiles, projectName)
+	env := append(os.Environ(), "PATH="+os.Getenv("PATH")+":/usr/local/bin:/var/packages/ContainerManager/target/usr/bin:/var/packages/Docker/target/usr/bin")
+	newCmd := func(name string, a ...string) *exec.Cmd {
+		c := exec.CommandContext(ctx, name, a...)
+		if workDir != "" {
+			c.Dir = workDir
+		}
+		c.Env = env
+		return c
+	}
+	usePlugin := newCmd("docker", "compose", "version").Run() == nil
+	runSub := func(subArgs ...string) (string, error) {
+		full := append(append([]string(nil), baseFlags...), subArgs...)
+		name, cmdArgs := "docker", append([]string{"compose"}, full...)
+		if !usePlugin {
+			if _, lerr := exec.LookPath("docker-compose"); lerr == nil {
+				name, cmdArgs = "docker-compose", full
+			}
+		}
+		out, err := newCmd(name, cmdArgs...).CombinedOutput()
+		if err != nil {
+			return strings.TrimSpace(string(out)), fmt.Errorf("%s compose: %w (%s)", name, err, strings.TrimSpace(string(out)))
+		}
+		return strings.TrimSpace(string(out)), nil
+	}
+	var outputs []string
+	if pullAndRemoveOrphans {
+		if out, err := runSub("pull"); err != nil {
+			return out, err
+		} else if out != "" {
+			outputs = append(outputs, out)
+		}
+		out, err := runSub("up", "-d", "--remove-orphans")
+		if err != nil {
+			return out, err
+		}
+		if out != "" {
+			outputs = append(outputs, out)
+		}
+		return strings.Join(outputs, "\n"), nil
+	}
+	return runSub("up", "-d")
 }
 
 func (l *LocalTransport) Close() error {
@@ -616,6 +662,38 @@ func (t *SSHTransport) ExecComposeService(ctx context.Context, workDir string, c
 	return strings.TrimSpace(string(out)), nil
 }
 
+func (t *SSHTransport) ExecComposeProject(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, pullAndRemoveOrphans bool) (string, error) {
+	if err := t.ensureClient(ctx); err != nil {
+		return "", err
+	}
+	baseFlags := buildComposeBaseFlags(workDir, configFiles, envFiles, projectName)
+	var outputs []string
+	runSub := func(subArgs ...string) (string, error) {
+		args := append(append([]string(nil), baseFlags...), subArgs...)
+		out, err := t.runPrivilegedCmd(ctx, "sh -c "+shellQuote(composeShellScript(workDir, args)), nil)
+		if err != nil {
+			return strings.TrimSpace(string(out)), fmt.Errorf("remote docker compose: %w (%s)", err, strings.TrimSpace(string(out)))
+		}
+		return strings.TrimSpace(string(out)), nil
+	}
+	if pullAndRemoveOrphans {
+		if out, err := runSub("pull"); err != nil {
+			return out, err
+		} else if out != "" {
+			outputs = append(outputs, out)
+		}
+		out, err := runSub("up", "-d", "--remove-orphans")
+		if err != nil {
+			return out, err
+		}
+		if out != "" {
+			outputs = append(outputs, out)
+		}
+		return strings.Join(outputs, "\n"), nil
+	}
+	return runSub("up", "-d")
+}
+
 // ExecSynoWebAPIProjectList 在群晖主机上通过只读 synowebapi 查询 Container Manager 原生项目列表。
 func (t *SSHTransport) ExecSynoWebAPIProjectList(ctx context.Context) ([]byte, error) {
 	if err := t.ensureClient(ctx); err != nil {
@@ -766,7 +844,7 @@ func (b *syncBuffer) Bytes() []byte {
 	return append([]byte(nil), b.buf.Bytes()...)
 }
 
-func buildComposeArgs(workDir string, configFiles, envFiles []string, projectName, serviceName string, startContainer bool) []string {
+func buildComposeBaseFlags(workDir string, configFiles, envFiles []string, projectName string) []string {
 	var args []string
 	if projectName != "" {
 		args = append(args, "-p", projectName)
@@ -785,6 +863,11 @@ func buildComposeArgs(workDir string, configFiles, envFiles []string, projectNam
 		}
 		args = append(args, "--env-file", p)
 	}
+	return args
+}
+
+func buildComposeArgs(workDir string, configFiles, envFiles []string, projectName, serviceName string, startContainer bool) []string {
+	args := buildComposeBaseFlags(workDir, configFiles, envFiles, projectName)
 	if startContainer {
 		args = append(args, "up", "-d", "--no-deps", "--", serviceName)
 	} else {
