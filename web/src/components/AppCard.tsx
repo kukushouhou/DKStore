@@ -547,66 +547,67 @@ export default function AppCard({ app, onChanged }: Props) {
                   {svc.hint && <Alert type="info" showIcon title={svc.hint} />}
                   {svc.errorMsg && <Alert type="error" showIcon title={svc.errorMsg} />}
 
-                  {hasUpdate && (
-                    <Card
-                      size="small"
-                      type="inner"
-                      title={t.detail.howToUpdateTitle}
-                      extra={
-                        <Button
-                          size="small"
-                          type="text"
-                          icon={<CopyOutlined />}
-                          onClick={() => {
-                            navigator.clipboard.writeText(cmd)
-                            message.success(t.detail.copied)
-                          }}
-                        >
-                          {t.detail.copyCmd}
-                        </Button>
-                      }
-                    >
-                      <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 8 }}>
-                        {t.detail.howToUpdateDesc}
-                      </Typography.Paragraph>
-                      <Typography.Text code style={{ fontSize: 12, wordBreak: 'break-all' }}>
-                        {cmd}
-                      </Typography.Text>
-                    </Card>
-                  )}
-
                   <Collapse
                     ghost
                     size="small"
                     items={[
                       {
                         key: 'tech',
-                        label: t.detail.techInfo,
+                        label: t.detail.techCollapseTitle,
                         children: (
-                          <Descriptions column={1} size="small">
-                            <Descriptions.Item label={t.detail.imageRef}>
-                              <Typography.Text code>{svc.imageRef}</Typography.Text>
-                            </Descriptions.Item>
-                            {svc.repoDigest && (
-                              <Descriptions.Item label={t.detail.localDigest}>
-                                <Typography.Text code style={{ fontSize: 11, wordBreak: 'break-all' }}>
-                                  {svc.repoDigest}
+                          <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                            <Descriptions column={1} size="small">
+                              <Descriptions.Item label={t.detail.imageRef}>
+                                <Typography.Text code>{svc.imageRef}</Typography.Text>
+                              </Descriptions.Item>
+                              {svc.repoDigest && (
+                                <Descriptions.Item label={t.detail.localDigest}>
+                                  <Typography.Text code style={{ fontSize: 11, wordBreak: 'break-all' }}>
+                                    {svc.repoDigest}
+                                  </Typography.Text>
+                                </Descriptions.Item>
+                              )}
+                              {svc.targetDigest && (
+                                <Descriptions.Item label={t.detail.targetDigest}>
+                                  <Typography.Text code style={{ fontSize: 11, wordBreak: 'break-all' }}>
+                                    {svc.targetDigest}
+                                  </Typography.Text>
+                                </Descriptions.Item>
+                              )}
+                              {(svc.targetTags?.length ?? 0) > 0 && (
+                                <Descriptions.Item label={t.detail.matchedTags}>
+                                  {svc.targetTags?.join(', ')}
+                                </Descriptions.Item>
+                              )}
+                            </Descriptions>
+                            {hasUpdate && (
+                              <Card
+                                size="small"
+                                type="inner"
+                                title={t.detail.howToUpdateTitle}
+                                extra={
+                                  <Button
+                                    size="small"
+                                    type="text"
+                                    icon={<CopyOutlined />}
+                                    onClick={() => {
+                                      navigator.clipboard.writeText(cmd)
+                                      message.success(t.detail.copied)
+                                    }}
+                                  >
+                                    {t.detail.copyCmd}
+                                  </Button>
+                                }
+                              >
+                                <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 8 }}>
+                                  {t.detail.howToUpdateDesc}
+                                </Typography.Paragraph>
+                                <Typography.Text code style={{ fontSize: 12, wordBreak: 'break-all' }}>
+                                  {cmd}
                                 </Typography.Text>
-                              </Descriptions.Item>
+                              </Card>
                             )}
-                            {svc.targetDigest && (
-                              <Descriptions.Item label={t.detail.targetDigest}>
-                                <Typography.Text code style={{ fontSize: 11, wordBreak: 'break-all' }}>
-                                  {svc.targetDigest}
-                                </Typography.Text>
-                              </Descriptions.Item>
-                            )}
-                            {(svc.targetTags?.length ?? 0) > 0 && (
-                              <Descriptions.Item label={t.detail.matchedTags}>
-                                {svc.targetTags?.join(', ')}
-                              </Descriptions.Item>
-                            )}
-                          </Descriptions>
+                          </Space>
                         ),
                       },
                     ]}

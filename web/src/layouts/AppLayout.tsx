@@ -3,10 +3,13 @@ import { Button, Card, Flex, Grid, Input, Layout, Menu, Segmented, Space, Spin, 
 import {
   AppstoreOutlined,
   CloudServerOutlined,
+  ContainerOutlined,
   GlobalOutlined,
   HistoryOutlined,
   LockOutlined,
+  ReloadOutlined,
   SettingOutlined,
+  SafetyCertificateOutlined,
 } from '@ant-design/icons'
 import { Outlet, useLocation, useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -27,10 +30,12 @@ export default function AppLayout() {
   const auth = useQuery({ queryKey: ['authStatus'], queryFn: api.authStatus })
   const [pw, setPw] = useState('')
   const [loggingIn, setLoggingIn] = useState(false)
+  const [inSetupStep2, setInSetupStep2] = useState(false)
 
   const canSubscribeEvents =
     Boolean(auth.data) &&
     auth.data?.mode !== 'setup_required' &&
+    auth.data?.mode !== 'host_login_required' &&
     (auth.data?.mode !== 'password' || auth.data.authenticated)
   useEvents(canSubscribeEvents)
 
@@ -46,6 +51,7 @@ export default function AppLayout() {
 
   const items = [
     { key: '/', icon: <AppstoreOutlined />, label: t.nav.updates },
+    { key: '/containers', icon: <ContainerOutlined />, label: t.nav.containers },
     { key: '/hosts', icon: <CloudServerOutlined />, label: t.nav.hosts },
     { key: '/history', icon: <HistoryOutlined />, label: t.nav.history },
     { key: '/settings', icon: <SettingOutlined />, label: t.nav.settings },
@@ -77,7 +83,7 @@ export default function AppLayout() {
     }
   }
 
-  if (auth.isPending) {
+  if (auth.isPending && !inSetupStep2) {
     return (
       <Flex align="center" justify="center" style={{ minHeight: '100vh' }}>
         <Spin />
@@ -85,8 +91,54 @@ export default function AppLayout() {
     )
   }
 
-  if (auth.data?.mode === 'setup_required') {
-    return <SetupPage deviceAuthHint={auth.data.deviceAuthHint} />
+  if (auth.data?.mode === 'host_login_required' && !inSetupStep2) {
+    return (
+      <Flex align="center" justify="center" style={{ minHeight: '100vh', padding: 16 }}>
+        <Card style={{ width: 440 }}>
+          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+            <Flex justify="space-between" align="center">
+              <Typography.Title level={4} style={{ margin: 0 }}>
+                <SafetyCertificateOutlined /> {t.auth.hostLoginTitle}
+              </Typography.Title>
+              <Segmented
+                size="small"
+                value={locale}
+                onChange={(v) => setLocale(v as Locale)}
+                options={[
+                  { label: '中文', value: 'zh-CN' },
+                  { label: 'EN', value: 'en-US' },
+                ]}
+              />
+            </Flex>
+            <Typography.Paragraph type="secondary" style={{ marginBottom: 4 }}>
+              {t.auth.hostLoginDesc}
+            </Typography.Paragraph>
+            <Button
+              type="primary"
+              block
+              icon={<ReloadOutlined />}
+              loading={auth.isFetching}
+              onClick={() => auth.refetch()}
+            >
+              {t.auth.hostLoginRetry}
+            </Button>
+          </Space>
+        </Card>
+      </Flex>
+    )
+  }
+
+  if (auth.data?.mode === 'setup_required' || inSetupStep2) {
+    return (
+      <SetupPage
+        authStatus={auth.data}
+        onStepChange={setInSetupStep2}
+        onDone={() => {
+          setInSetupStep2(false)
+          qc.invalidateQueries()
+        }}
+      />
+    )
   }
 
   if (auth.data?.mode === 'password' && !auth.data.authenticated) {

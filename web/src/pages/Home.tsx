@@ -3,6 +3,7 @@ import {
   Alert,
   Badge,
   Button,
+  Card,
   Col,
   Collapse,
   Empty,
@@ -13,8 +14,9 @@ import {
   Space,
   Typography,
 } from 'antd'
-import { SyncOutlined, WarningOutlined } from '@ant-design/icons'
+import { PlusOutlined, SyncOutlined, WarningOutlined } from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useNavigate } from 'react-router'
 import { api, type AppCardItem } from '../api/client'
 import AppCard from '../components/AppCard'
 import { useI18n } from '../i18n'
@@ -23,6 +25,7 @@ import { useUIStore } from '../store/ui'
 export default function HomePage() {
   const { locale, t } = useI18n()
   const qc = useQueryClient()
+  const navigate = useNavigate()
   const [hostFilter, setHostFilter] = useState<string>('')
   const liveProgress = useUIStore((s) => s.liveProgress)
   const setLiveProgress = useUIStore((s) => s.setLiveProgress)
@@ -75,6 +78,18 @@ export default function HomePage() {
 
   const hosts = overview.data?.hosts ?? []
   const failed = overview.data?.failed ?? []
+
+  if (!overview.isPending && hosts.length === 0) {
+    return (
+      <Card style={{ textAlign: 'center', padding: '48px 16px' }}>
+        <Empty description={t.home.emptyNoHosts}>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/hosts')}>
+            {t.home.emptyNoHostsBtn}
+          </Button>
+        </Empty>
+      </Card>
+    )
+  }
 
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>

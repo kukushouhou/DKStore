@@ -28,9 +28,10 @@ const (
 
 // 访问模式（GET /auth/status 的 mode 字段）。
 const (
-	ModeDevice        = "device"
-	ModePassword      = "password"
-	ModeSetupRequired = "setup_required"
+	ModeDevice            = "device"
+	ModePassword          = "password"
+	ModeSetupRequired     = "setup_required"
+	ModeHostLoginRequired = "host_login_required"
 )
 
 // 错误（其 Error() 即 API 错误码）。
@@ -96,39 +97,66 @@ func (s *Service) PasswordSet(ctx context.Context) bool {
 }
 
 // Status 计算当前请求的访问模式与认证状态。
+//
+// 规则：
+//  1. 未设置管理员密码（未完成首次初始化）：
+//     - 若为宿主套件安装且宿主核验器可用，必须先通过宿主登录态核验才允许进入 ModeSetupRequired；
+//       未登录宿主后台的其他浏览器返回 ModeHostLoginRequired（防止未登录访客抢先初始化）。
+//     - 其他环境（Docker / 独立二进制）直接返回 ModeSetupRequired。
+//  2. 已设置管理员密码（已完成初始化）：
+//     - 若持有有效密码会话 Cookie → ModePassword, Authenticated=true；
+//     - 若来自可信宿主后台（host.Supported && Verify.OK）→ ModeDevice, Authenticated=true（免二次登录）；
+//     - 其他浏览器 / 外部链接访问 → ModePassword, Authenticated=false（展示密码登录页）。
 func (s *Service) Status(ctx context.Context, r *http.Request) StatusInfo {
 	info := StatusInfo{InstallMode: s.host.InstallMode()}
-	if s.PasswordSet(ctx) {
+	if !s.PasswordSet(ctx) {
+		if s.host.Supported() {
+			res := s.host.Verify(ctx, r)
+			if res.OK {
+				info.Mode = ModeSetupRequired
+				info.HostUser = res.User
+				return info
+			}
+			if res.Reason != hostauth.ReasonUnavailable && res.Reason != hostauth.ReasonUnsupportedMode {
+				info.Mode = ModeHostLoginRequired
+				info.HintCode = res.Reason
+				return info
+			}
+		}
+		info.Mode = ModeSetupRequired
+		return info
+	}
+
+	if s.hasSession(r) {
 		info.Mode = ModePassword
-		info.Authenticated = s.hasSession(r)
+		info.Authenticated = true
 		return info
 	}
 	if s.host.Supported() {
-		res := s.host.Verify(ctx, r)
-		if res.OK {
+		if res := s.host.Verify(ctx, r); res.OK {
 			info.Mode = ModeDevice
 			info.Authenticated = true
 			info.HostUser = res.User
 			return info
 		}
-		info.HintCode = res.Reason
 	}
-	info.Mode = ModeSetupRequired
+	info.Mode = ModePassword
+	info.Authenticated = false
 	return info
 }
 
 // Authorize 判断请求能否访问业务接口；不通过时返回 API 错误码（unauthorized / setup_required）。
 func (s *Service) Authorize(ctx context.Context, r *http.Request) (ok bool, code string) {
-	if s.PasswordSet(ctx) {
-		if s.hasSession(r) {
-			return true, ""
-		}
-		return false, "unauthorized"
+	if !s.PasswordSet(ctx) {
+		return false, ErrSetupRequired.Error()
+	}
+	if s.hasSession(r) {
+		return true, ""
 	}
 	if s.host.Supported() && s.host.Verify(ctx, r).OK {
 		return true, ""
 	}
-	return false, ErrSetupRequired.Error()
+	return false, "unauthorized"
 }
 
 // IsAuthenticated 判断请求是否通过认证（等价于 Authorize 的 ok）。

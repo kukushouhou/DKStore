@@ -481,9 +481,10 @@ type dsmContainerDetailed struct {
 		Labels map[string]string `json:"Labels"`
 	} `json:"Config"`
 	State struct {
-		Status  string `json:"Status"`
-		Running bool   `json:"Running"`
-		Health  struct {
+		Status    string `json:"Status"`
+		Running   bool   `json:"Running"`
+		StartedAt string `json:"StartedAt"`
+		Health    struct {
 			Status string `json:"Status"`
 		} `json:"Health"`
 	} `json:"State"`
@@ -496,12 +497,45 @@ type dsmContainerListItem struct {
 	ImageAlt  string            `json:"image"`
 	ImageID   string            `json:"ImageID"`
 	Status    string            `json:"status"`
+	UpStatus  string            `json:"up_status"`
 	IsPackage bool              `json:"is_package"`
 	Labels    map[string]string `json:"Labels"`
 	State     struct {
-		Status  string `json:"Status"`
-		Running bool   `json:"Running"`
+		Status    string `json:"Status"`
+		Running   bool   `json:"Running"`
+		StartedAt string `json:"StartedAt"`
+		Health    struct {
+			Status string `json:"Status"`
+		} `json:"Health"`
 	} `json:"State"`
+}
+
+type dsmCPUUsage struct {
+	TotalUsage  uint64   `json:"total_usage"`
+	PercpuUsage []uint64 `json:"percpu_usage"`
+}
+
+type dsmCPUStats struct {
+	CPUUsage       dsmCPUUsage `json:"cpu_usage"`
+	SystemCPUUsage uint64      `json:"system_cpu_usage"`
+	OnlineCPUs     int         `json:"online_cpus"`
+}
+
+type dsmMemoryStats struct {
+	Usage    uint64            `json:"usage"`
+	MaxUsage uint64            `json:"max_usage"`
+	Limit    uint64            `json:"limit"`
+	Stats    map[string]uint64 `json:"stats"`
+}
+
+type dsmContainerStat struct {
+	Name        string         `json:"name"`
+	CPU         float64        `json:"cpu"`
+	Memory      int64          `json:"memory"`
+	MemoryLimit int64          `json:"memory_limit"`
+	CPUStats    dsmCPUStats    `json:"cpu_stats"`
+	PreCPUStats dsmCPUStats    `json:"precpu_stats"`
+	MemoryStats dsmMemoryStats `json:"memory_stats"`
 }
 
 type dsmImageListItem struct {
@@ -547,6 +581,38 @@ func (c *dsmClient) ListContainers(ctx context.Context) ([]dsmContainerListItem,
 		return nil, err
 	}
 	return data.Containers, nil
+}
+
+func (c *dsmClient) ContainerStats(ctx context.Context) (map[string]dsmContainerStat, error) {
+	var raw json.RawMessage
+	if err := c.call(ctx, "SYNO.Docker.Container", "1", "stats", nil, &raw); err != nil {
+		return nil, err
+	}
+	out := make(map[string]dsmContainerStat)
+	var wrap struct {
+		Containers []dsmContainerStat          `json:"containers"`
+		Stats      map[string]dsmContainerStat `json:"stats"`
+	}
+	if json.Unmarshal(raw, &wrap) == nil && (len(wrap.Containers) > 0 || len(wrap.Stats) > 0) {
+		for k, v := range wrap.Stats {
+			out[strings.TrimPrefix(k, "/")] = v
+		}
+		for _, item := range wrap.Containers {
+			name := strings.TrimPrefix(item.Name, "/")
+			if name != "" {
+				out[name] = item
+			}
+		}
+		return out, nil
+	}
+	var direct map[string]dsmContainerStat
+	if err := json.Unmarshal(raw, &direct); err != nil {
+		return nil, err
+	}
+	for k, v := range direct {
+		out[strings.TrimPrefix(k, "/")] = v
+	}
+	return out, nil
 }
 
 func (c *dsmClient) ListImages(ctx context.Context) ([]dsmImageListItem, error) {

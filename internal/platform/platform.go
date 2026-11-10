@@ -31,6 +31,41 @@ type UpdateCapableAdapter interface {
 	HasLocalImage(ctx context.Context, imageIDOrRef string) bool
 }
 
+// ContainerRuntimeStat 描述单个容器的实时运行状态与资源占用。
+type ContainerRuntimeStat struct {
+	ID         string  `json:"id"`
+	Name       string  `json:"name"`
+	Service    string  `json:"service,omitempty"`
+	Image      string  `json:"image"`
+	State      string  `json:"state"`            // running | exited | stopped | restarting | paused
+	Health     string  `json:"health,omitempty"` // healthy | unhealthy | starting | ""
+	Uptime     string  `json:"uptime,omitempty"` // 如 "Up 3 days" 或基于 StartedAt 计算的时长秒数
+	StartedAt  int64   `json:"startedAt,omitempty"`
+	CPUPercent float64 `json:"cpuPercent"` // 0-100+ 百分比（保留 1-2 位小数）
+	MemUsage   int64   `json:"memUsage"`   // 字节数
+	MemLimit   int64   `json:"memLimit"`   // 字节数
+}
+
+// AppRuntimeTree 描述应用（多容器项目或独立容器）的树状实时运行状态。
+type AppRuntimeTree struct {
+	Key          string                 `json:"key"`
+	HostID       string                 `json:"hostId"`
+	HostName     string                 `json:"hostName"`
+	Name         string                 `json:"name"`
+	Source       SourceKind             `json:"source"`
+	RunningCount int                    `json:"runningCount"`
+	TotalCount   int                    `json:"totalCount"`
+	CPUPercent   float64                `json:"cpuPercent"`
+	MemUsage     int64                  `json:"memUsage"`
+	Containers   []ContainerRuntimeStat `json:"containers"`
+}
+
+// RuntimeStatAdapter 扩展 Adapter，提供容器树状实时运行状态采集。
+type RuntimeStatAdapter interface {
+	Adapter
+	ListRuntimeApps(ctx context.Context) ([]AppRuntimeTree, error)
+}
+
 // PullProgress 描述更新执行中的实时进度（分层下载字节数/总字节数/百分比与阶段状态，立项文档 §7.3）。
 type PullProgress struct {
 	Phase           string `json:"phase"`           // precheck | pulling | recreating | verifying | done

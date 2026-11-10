@@ -8,12 +8,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/platform"
@@ -69,11 +72,13 @@ func (a *Adapter) Probe(ctx context.Context) (*platform.HostInfo, error) {
 }
 
 type containerSummary struct {
-	ID     string            `json:"Id"`
-	Names  []string          `json:"Names"`
-	Image  string            `json:"Image"`
-	State  string            `json:"State"`
-	Labels map[string]string `json:"Labels"`
+	ID      string            `json:"Id"`
+	Names   []string          `json:"Names"`
+	Image   string            `json:"Image"`
+	State   string            `json:"State"`
+	Status  string            `json:"Status"`
+	Created int64             `json:"Created"`
+	Labels  map[string]string `json:"Labels"`
 }
 
 type containerInspect struct {
@@ -221,6 +226,216 @@ func (a *Adapter) ListApps(ctx context.Context) ([]platform.App, error) {
 		})
 		a.enrichComposeSource(ctx, app)
 		result = append(result, *app)
+	}
+	result = append(result, standaloneApps...)
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Source != result[j].Source {
+			return result[i].Source < result[j].Source
+		}
+		return result[i].Name < result[j].Name
+	})
+	return result, nil
+}
+
+type dockerCPUUsage struct {
+	TotalUsage  uint64   `json:"total_usage"`
+	PercpuUsage []uint64 `json:"percpu_usage"`
+}
+
+type dockerCPUStats struct {
+	CPUUsage       dockerCPUUsage `json:"cpu_usage"`
+	SystemCPUUsage uint64         `json:"system_cpu_usage"`
+	OnlineCPUs     int            `json:"online_cpus"`
+}
+
+type dockerMemoryStats struct {
+	Usage uint64            `json:"usage"`
+	Limit uint64            `json:"limit"`
+	Stats map[string]uint64 `json:"stats"`
+}
+
+type dockerContainerStats struct {
+	CPUStats    dockerCPUStats    `json:"cpu_stats"`
+	PreCPUStats dockerCPUStats    `json:"precpu_stats"`
+	MemoryStats dockerMemoryStats `json:"memory_stats"`
+}
+
+func computeStats(st dockerContainerStats) (cpuPct float64, memUsage int64, memLimit int64) {
+	if st.PreCPUStats.SystemCPUUsage > 0 && st.CPUStats.SystemCPUUsage > st.PreCPUStats.SystemCPUUsage && st.CPUStats.CPUUsage.TotalUsage > st.PreCPUStats.CPUUsage.TotalUsage {
+		cpuDelta := st.CPUStats.CPUUsage.TotalUsage - st.PreCPUStats.CPUUsage.TotalUsage
+		sysDelta := st.CPUStats.SystemCPUUsage - st.PreCPUStats.SystemCPUUsage
+		onlineCPUs := st.CPUStats.OnlineCPUs
+		if onlineCPUs <= 0 {
+			onlineCPUs = len(st.CPUStats.CPUUsage.PercpuUsage)
+		}
+		if onlineCPUs <= 0 {
+			onlineCPUs = 1
+		}
+		pct := (float64(cpuDelta) / float64(sysDelta)) * float64(onlineCPUs) * 100.0
+		cpuPct = math.Round(pct*100) / 100
+	}
+	inactive := st.MemoryStats.Stats["inactive_file"]
+	if st.MemoryStats.Usage > inactive {
+		memUsage = int64(st.MemoryStats.Usage - inactive)
+	}
+	memLimit = int64(st.MemoryStats.Limit)
+	return
+}
+
+func parseHealthFromStatus(status string) string {
+	s := strings.ToLower(status)
+	switch {
+	case strings.Contains(s, "(healthy)"):
+		return "healthy"
+	case strings.Contains(s, "(unhealthy)"):
+		return "unhealthy"
+	case strings.Contains(s, "(health: starting)"), strings.Contains(s, "(starting)"):
+		return "starting"
+	default:
+		return ""
+	}
+}
+
+// ListRuntimeApps 采集主机上全部容器的树状实时运行状态与资源占用。
+func (a *Adapter) ListRuntimeApps(ctx context.Context) ([]platform.AppRuntimeTree, error) {
+	var list []containerSummary
+	if err := a.getJSON(ctx, "/containers/json?all=1", &list); err != nil {
+		return nil, i18n.NewEngineError(i18n.MsgDockerListFailed, i18n.DetailOf(err))
+	}
+
+	var filtered []containerSummary
+	for _, cs := range list {
+		if cs.Labels["dkstore.self"] == "true" {
+			continue
+		}
+		filtered = append(filtered, cs)
+	}
+
+	type statVal struct {
+		cpu      float64
+		memUsage int64
+		memLimit int64
+	}
+	statsMap := make(map[string]statVal, len(filtered))
+	var mu sync.Mutex
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+
+	for _, cs := range filtered {
+		if strings.ToLower(cs.State) != "running" {
+			continue
+		}
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
+			sCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			var st dockerContainerStats
+			if err := a.getJSON(sCtx, "/containers/"+url.PathEscape(id)+"/stats?stream=false", &st); err != nil {
+				return
+			}
+			cpu, memU, memL := computeStats(st)
+			mu.Lock()
+			statsMap[id] = statVal{cpu: cpu, memUsage: memU, memLimit: memL}
+			mu.Unlock()
+		}(cs.ID)
+	}
+	wg.Wait()
+
+	composeMap := make(map[string]*platform.AppRuntimeTree)
+	var standaloneApps []platform.AppRuntimeTree
+
+	for _, cs := range filtered {
+		cName := ""
+		if len(cs.Names) > 0 {
+			cName = strings.TrimPrefix(cs.Names[0], "/")
+		}
+		if cName == "" {
+			cName = cs.ID[:minLen(len(cs.ID), 12)]
+		}
+		state := strings.ToLower(strings.TrimSpace(cs.State))
+		if state == "" {
+			state = "unknown"
+		}
+		sv := statsMap[cs.ID]
+		cStat := platform.ContainerRuntimeStat{
+			ID:         cs.ID[:minLen(len(cs.ID), 12)],
+			Name:       cName,
+			Service:    strings.TrimSpace(cs.Labels["com.docker.compose.service"]),
+			Image:      cs.Image,
+			State:      state,
+			Health:     parseHealthFromStatus(cs.Status),
+			Uptime:     cs.Status,
+			StartedAt:  cs.Created,
+			CPUPercent: sv.cpu,
+			MemUsage:   sv.memUsage,
+			MemLimit:   sv.memLimit,
+		}
+
+		projName := strings.TrimSpace(cs.Labels["com.docker.compose.project"])
+		workDir := strings.TrimSpace(cs.Labels["com.docker.compose.project.working_dir"])
+		if projName != "" {
+			appKey := fmt.Sprintf("%s/compose/%s", a.hostID, projName)
+			tree, exists := composeMap[appKey]
+			if !exists {
+				src := platform.SourceCompose
+				if strings.HasPrefix(workDir, "/var/packages/") {
+					src = platform.SourceVendorManaged
+				}
+				tree = &platform.AppRuntimeTree{
+					Key:    appKey,
+					HostID: a.hostID,
+					Name:   projName,
+					Source: src,
+				}
+				composeMap[appKey] = tree
+			} else if strings.HasPrefix(workDir, "/var/packages/") {
+				tree.Source = platform.SourceVendorManaged
+			}
+			tree.TotalCount++
+			if state == "running" {
+				tree.RunningCount++
+			}
+			tree.CPUPercent = math.Round((tree.CPUPercent+cStat.CPUPercent)*100) / 100
+			tree.MemUsage += cStat.MemUsage
+			tree.Containers = append(tree.Containers, cStat)
+			continue
+		}
+
+		src := platform.SourceStandalone
+		if strings.HasPrefix(workDir, "/var/packages/") {
+			src = platform.SourceVendorManaged
+		}
+		appKey := fmt.Sprintf("%s/container/%s", a.hostID, cName)
+		runCnt := 0
+		if state == "running" {
+			runCnt = 1
+		}
+		standaloneApps = append(standaloneApps, platform.AppRuntimeTree{
+			Key:          appKey,
+			HostID:       a.hostID,
+			Name:         cName,
+			Source:       src,
+			RunningCount: runCnt,
+			TotalCount:   1,
+			CPUPercent:   cStat.CPUPercent,
+			MemUsage:     cStat.MemUsage,
+			Containers:   []platform.ContainerRuntimeStat{cStat},
+		})
+	}
+
+	var result []platform.AppRuntimeTree
+	for _, tree := range composeMap {
+		sort.Slice(tree.Containers, func(i, j int) bool {
+			return tree.Containers[i].Name < tree.Containers[j].Name
+		})
+		result = append(result, *tree)
 	}
 	result = append(result, standaloneApps...)
 	sort.Slice(result, func(i, j int) bool {

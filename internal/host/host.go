@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -150,6 +151,72 @@ func (r *Registry) EnsureLocalHost(ctx context.Context) error {
 		Transport: "local",
 	}, i18n.ZhCN)
 	return err
+}
+
+// LocalStatus 返回是否已存在本机设备、是否可一键添加本机设备以及本机 Docker Socket 状态（ok | socket_missing | permission_denied）。
+func (r *Registry) LocalStatus(ctx context.Context) (hasLocalHost bool, canAddLocal bool, localStatus string) {
+	var count int
+	_ = r.st.DB.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM host
+		WHERE transport = 'local'
+		   OR LOWER(COALESCE(address,'')) LIKE '%127.0.0.1%'
+		   OR LOWER(COALESCE(address,'')) LIKE '%localhost%'
+		   OR LOWER(COALESCE(dsm_url,'')) LIKE '%127.0.0.1%'
+		   OR LOWER(COALESCE(dsm_url,'')) LIKE '%localhost%'
+	`).Scan(&count)
+	hasLocalHost = count > 0
+
+	sock := transport.DefaultLocalSocket()
+	if _, err := os.Stat(sock); err != nil {
+		localStatus = "socket_missing"
+		return hasLocalHost, false, localStatus
+	}
+	pCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	lTr := transport.NewLocal(sock)
+	defer lTr.Close()
+	if _, err := docker.New("probe", lTr).Probe(pCtx); err != nil {
+		localStatus = "permission_denied"
+	} else {
+		localStatus = "ok"
+	}
+	canAddLocal = !hasLocalHost && localStatus == "ok"
+	return
+}
+
+// ListRuntimeContainers 采集全部（或指定）主机上容器的树状实时运行状态。
+func (r *Registry) ListRuntimeContainers(ctx context.Context, hostIDFilter string) ([]platform.AppRuntimeTree, error) {
+	hosts, err := r.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filter := strings.TrimSpace(hostIDFilter)
+	out := make([]platform.AppRuntimeTree, 0)
+	for _, h := range hosts {
+		if filter != "" && h.ID != filter {
+			continue
+		}
+		ad, _, err := r.OpenAdapter(ctx, h.ID)
+		if err != nil {
+			continue
+		}
+		rtAd, ok := ad.(platform.RuntimeStatAdapter)
+		if !ok {
+			_ = ad.Close()
+			continue
+		}
+		apps, err := rtAd.ListRuntimeApps(ctx)
+		_ = ad.Close()
+		if err != nil {
+			continue
+		}
+		for i := range apps {
+			apps[i].HostID = h.ID
+			apps[i].HostName = h.Name
+			out = append(out, apps[i])
+		}
+	}
+	return out, nil
 }
 
 const hostColumns = `id, name, kind, transport, COALESCE(address,''), COALESCE(port,0),
@@ -333,6 +400,13 @@ func (r *Registry) applyDeviceTokenNonce(in *CreateOrUpdateInput) {
 func (r *Registry) Create(ctx context.Context, in CreateOrUpdateInput, lang i18n.Lang) (*Host, error) {
 	if err := normalizeInput(&in, false); err != nil {
 		return nil, err
+	}
+	if in.Transport == "local" {
+		var localCnt int
+		_ = r.st.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM host WHERE transport = 'local'`).Scan(&localCnt)
+		if localCnt > 0 {
+			return nil, i18n.NewHostError("host.err.local_exists", nil)
+		}
 	}
 	in.SSHHostKey = "" // 首次连接自动记录指纹（TOFU）
 	in.DSMDeviceToken = ""

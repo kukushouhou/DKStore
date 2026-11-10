@@ -1,7 +1,7 @@
 #!/bin/sh
 # Synology DSM 7 SPK INFO.sh for DKStore
 package="dkstore"
-version="0.2.0-0002"
+version="0.2.0-0003"
 os_min_ver="7.0-40000"
 description="DKStore: Cross-Platform Docker App Update Center with One-Click Upgrade & Rollback."
 description_chs="DKStore：跨平台 Docker 应用更新中心（支持群晖 Container Manager 项目识别、单服务安全升级与历史回退）。"

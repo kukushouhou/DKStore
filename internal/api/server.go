@@ -64,6 +64,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/password", s.requireAuth(s.handleSetPassword))
 	mux.HandleFunc("GET /api/v1/overview", s.requireAuth(s.handleOverview))
 	mux.HandleFunc("GET /api/v1/apps", s.requireAuth(s.handleGetApp))
+	mux.HandleFunc("GET /api/v1/containers", s.requireAuth(s.handleListContainers))
 	mux.HandleFunc("POST /api/v1/check", s.requireAuth(s.handleTriggerCheck))
 	mux.HandleFunc("GET /api/v1/check/current", s.requireAuth(s.handleCurrentCheck))
 	mux.HandleFunc("GET /api/v1/events", s.requireAuth(s.handleEvents))
@@ -135,12 +136,20 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	st := s.d.Auth.Status(r.Context(), r)
+	var hasLocalHost, canAddLocal bool
+	localStatus := "socket_missing"
+	if s.d.Hosts != nil {
+		hasLocalHost, canAddLocal, localStatus = s.d.Hosts.LocalStatus(r.Context())
+	}
 	resp := map[string]any{
 		"mode":          st.Mode,
 		"authenticated": st.Authenticated,
 		"installMode":   st.InstallMode,
+		"hasLocalHost":  hasLocalHost,
+		"canAddLocal":   canAddLocal,
+		"localStatus":   localStatus,
 	}
-	if st.Mode == auth.ModeSetupRequired && st.HintCode != "" {
+	if !st.Authenticated && st.HintCode != "" {
 		if hint := i18n.HostAuthHint(s.langOf(r), st.HintCode); hint != "" {
 			resp["deviceAuthHint"] = hint
 		}
@@ -182,8 +191,13 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleSetup 首次设置管理员密码（仅未设置密码时可用），成功后直接登录。
+// handleSetup 首次设置管理员密码（仅未设置密码时可用；套件模式下必须已通过宿主管理员认证），成功后直接登录。
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
+	st := s.d.Auth.Status(r.Context(), r)
+	if st.Mode == auth.ModeDevice && !st.Authenticated {
+		writeError(w, s.langOf(r), http.StatusUnauthorized, "unauthorized", "")
+		return
+	}
 	var body struct {
 		Password string `json:"password"`
 	}
@@ -240,6 +254,16 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, card)
+}
+
+func (s *Server) handleListContainers(w http.ResponseWriter, r *http.Request) {
+	hostID := strings.TrimSpace(r.URL.Query().Get("hostId"))
+	items, err := s.d.Hosts.ListRuntimeContainers(r.Context(), hostID)
+	if err != nil {
+		writeError(w, s.langOf(r), http.StatusInternalServerError, "db_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Server) handleTriggerCheck(w http.ResponseWriter, r *http.Request) {
@@ -357,7 +381,13 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 		writeError(w, s.langOf(r), http.StatusInternalServerError, "db_error", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": list})
+	hasLocalHost, canAddLocal, localStatus := s.d.Hosts.LocalStatus(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":        list,
+		"hasLocalHost": hasLocalHost,
+		"canAddLocal":  canAddLocal,
+		"localStatus":  localStatus,
+	})
 }
 
 func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request) {

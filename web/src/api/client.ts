@@ -39,8 +39,8 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T
 }
 
-/** 访问模式：device=宿主设备管理员登录态；password=DKStore 自有密码；setup_required=必须先设置密码。 */
-export type AuthMode = 'device' | 'password' | 'setup_required'
+/** 访问模式：device=宿主设备管理员登录态；password=DKStore 自有密码；setup_required=必须先设置密码；host_login_required=套件模式未登录宿主后台。 */
+export type AuthMode = 'device' | 'password' | 'setup_required' | 'host_login_required'
 
 export interface AuthStatus {
   mode: AuthMode
@@ -48,6 +48,43 @@ export interface AuthStatus {
   installMode: string
   /** 宿主登录态核验失败原因（已本地化），仅群晖/OpenWrt 套件安装时可能给出。 */
   deviceAuthHint?: string
+  hasLocalHost?: boolean
+  canAddLocal?: boolean
+  localStatus?: 'ok' | 'socket_missing' | 'permission_denied' | string
+}
+
+export interface HostsListResponse {
+  items: HostItem[]
+  hasLocalHost?: boolean
+  canAddLocal?: boolean
+  localStatus?: string
+}
+
+export interface ContainerRuntimeStat {
+  id: string
+  name: string
+  service?: string
+  image: string
+  state: string
+  health?: string
+  uptime?: string
+  startedAt?: number
+  cpuPercent: number
+  memUsage: number
+  memLimit: number
+}
+
+export interface AppRuntimeTree {
+  key: string
+  hostId: string
+  hostName: string
+  name: string
+  source: 'standalone' | 'compose' | 'dsm_project' | 'vendor_managed'
+  runningCount: number
+  totalCount: number
+  cpuPercent: number
+  memUsage: number
+  containers: ContainerRuntimeStat[]
 }
 
 export interface HostInfo {
@@ -331,7 +368,7 @@ export const api = {
   removeIgnoreByApp: (appKey: string) =>
     request<{ ok: boolean }>(`/ignore?appKey=${encodeURIComponent(appKey)}`, { method: 'DELETE' }),
 
-  listHosts: () => request<{ items: HostItem[] }>('/hosts'),
+  listHosts: () => request<HostsListResponse>('/hosts'),
   createHost: (input: HostInput) =>
     request<HostItem>('/hosts', { method: 'POST', body: JSON.stringify(input) }),
   updateHost: (id: string, input: HostInput) =>
@@ -341,6 +378,11 @@ export const api = {
   testHost: (input: HostInput) =>
     request<HostTestResult>('/hosts/test', { method: 'POST', body: JSON.stringify(input) }),
   keygen: () => request<{ privateKey: string; authorizedKey: string }>('/hosts/keygen', { method: 'POST' }),
+
+  listContainers: (hostId?: string) =>
+    request<{ items: AppRuntimeTree[] }>(
+      hostId ? `/containers?hostId=${encodeURIComponent(hostId)}` : '/containers',
+    ),
 
   getSettings: () => request<AppSettings>('/settings'),
   saveSettings: (cfg: AppSettings) =>

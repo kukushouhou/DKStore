@@ -62,10 +62,11 @@ func TestStatusModes(t *testing.T) {
 	}{
 		{"docker no pw", fakeHost{hostauth.ModeDocker, okHost}, "", ModeSetupRequired, false, "", false, "setup_required"},
 		{"binary no pw", fakeHost{hostauth.ModeBinary, okHost}, "", ModeSetupRequired, false, "", false, "setup_required"},
-		{"syno device ok", fakeHost{hostauth.ModeSynology, okHost}, "", ModeDevice, true, "", true, ""},
-		{"owrt device ok", fakeHost{hostauth.ModeOpenWrt, okHost}, "", ModeDevice, true, "", true, ""},
-		{"syno device fail", fakeHost{hostauth.ModeSynology, failHost}, "", ModeSetupRequired, false, hostauth.ReasonNoCookie, false, "setup_required"},
-		{"pw set, host ok ignored", fakeHost{hostauth.ModeSynology, okHost}, hashPassword("secret1"), ModePassword, false, "", false, "unauthorized"},
+		{"syno uninit trusted", fakeHost{hostauth.ModeSynology, okHost}, "", ModeSetupRequired, false, "", false, "setup_required"},
+		{"owrt uninit trusted", fakeHost{hostauth.ModeOpenWrt, okHost}, "", ModeSetupRequired, false, "", false, "setup_required"},
+		{"syno uninit untrusted blocked", fakeHost{hostauth.ModeSynology, failHost}, "", ModeHostLoginRequired, false, hostauth.ReasonNoCookie, false, "setup_required"},
+		{"pw set, trusted host auto login", fakeHost{hostauth.ModeSynology, okHost}, hashPassword("secret1"), ModeDevice, true, "", true, ""},
+		{"pw set, untrusted browser needs pw", fakeHost{hostauth.ModeSynology, failHost}, hashPassword("secret1"), ModePassword, false, "", false, "unauthorized"},
 		{"pw set docker", fakeHost{hostauth.ModeDocker, failHost}, hashPassword("secret1"), ModePassword, false, "", false, "unauthorized"},
 	}
 	for _, c := range cases {

@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
 import {
-  Alert,
   Button,
   Card,
   Col,
@@ -172,14 +171,7 @@ export default function SettingsPage() {
               </Button>
             )}
           </Space>
-          {selfUpdateQuery.data?.preserveNote && (
-            <Alert
-              type={selfUpdateQuery.data.hasUpdate ? 'info' : 'success'}
-              showIcon
-              title={selfUpdateQuery.data.preserveNote}
-            />
-          )}
-          {selfUpdateQuery.data?.commandHint && (
+          {selfUpdateQuery.data?.hasUpdate && selfUpdateQuery.data?.commandHint && (
             <Typography.Text code style={{ fontSize: 12 }}>
               {selfUpdateQuery.data.commandHint}
             </Typography.Text>
@@ -332,9 +324,6 @@ export default function SettingsPage() {
       </Card>
 
       <Card title={t.settings.securityTitle}>
-        {authQuery.data?.mode === 'device' && (
-          <Alert type="info" showIcon title={t.settings.deviceModeDesc} style={{ marginBottom: 12 }} />
-        )}
         <Row gutter={[12, 12]} style={{ maxWidth: 860 }}>
           {authQuery.data?.mode !== 'device' && (
             <Col xs={24} md={7}>

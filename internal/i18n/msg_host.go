@@ -19,6 +19,7 @@ var hostMessages = map[string]hostMsg{
 	"host.verify_failed":     {"连接校验未通过，请检查地址与凭据", "Connection verification failed, please check the address and credentials"},
 	"host.secret_load":       {"读取已保存的凭据失败", "Failed to load saved credentials"},
 	"host.save_failed":       {"保存设备失败", "Failed to save device"},
+	"host.err.local_exists":  {"已添加过本机设备，无需重复添加", "Local host has already been added"},
 
 	// SSH 指纹
 	"host.fp":         {"主机指纹 %s", "Host fingerprint %s"},

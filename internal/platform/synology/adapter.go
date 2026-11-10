@@ -10,7 +10,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -618,10 +620,10 @@ func (a *Adapter) ListApps(ctx context.Context) ([]platform.App, error) {
 			}
 		}
 
-		// 兜底识别群晖套件中心（/var/packages/...）托管的容器
-		if app.Project != nil && strings.HasPrefix(app.Project.WorkingDir, "/var/packages/") {
-			app.Source = platform.SourceVendorManaged
-		}
+	// 兜底识别群晖套件中心（/var/packages/...）托管的容器
+	if app.Project != nil && strings.HasPrefix(app.Project.WorkingDir, "/var/packages/") {
+		app.Source = platform.SourceVendorManaged
+	}
 	}
 
 	return apps, nil
@@ -794,6 +796,361 @@ func (a *Adapter) listAppsViaDSMAPI(ctx context.Context) ([]platform.App, error)
 	}
 
 	return apps, nil
+}
+
+func computeDSMStat(st dsmContainerStat) (cpuPct float64, memUsage int64, memLimit int64) {
+	if st.PreCPUStats.SystemCPUUsage > 0 && st.CPUStats.SystemCPUUsage > st.PreCPUStats.SystemCPUUsage && st.CPUStats.CPUUsage.TotalUsage > st.PreCPUStats.CPUUsage.TotalUsage {
+		cpuDelta := st.CPUStats.CPUUsage.TotalUsage - st.PreCPUStats.CPUUsage.TotalUsage
+		sysDelta := st.CPUStats.SystemCPUUsage - st.PreCPUStats.SystemCPUUsage
+		onlineCPUs := st.CPUStats.OnlineCPUs
+		if onlineCPUs <= 0 {
+			onlineCPUs = len(st.CPUStats.CPUUsage.PercpuUsage)
+		}
+		if onlineCPUs <= 0 {
+			onlineCPUs = 1
+		}
+		pct := (float64(cpuDelta) / float64(sysDelta)) * float64(onlineCPUs) * 100.0
+		cpuPct = math.Round(pct*100) / 100
+	} else if st.CPU > 0 {
+		cpuPct = math.Round(st.CPU*100) / 100
+	}
+	if st.MemoryStats.Usage > 0 {
+		inactive := st.MemoryStats.Stats["inactive_file"]
+		if st.MemoryStats.Usage > inactive {
+			memUsage = int64(st.MemoryStats.Usage - inactive)
+		}
+		memLimit = int64(st.MemoryStats.Limit)
+	} else {
+		memUsage = st.Memory
+		memLimit = st.MemoryLimit
+	}
+	return
+}
+
+func parseDSMStartedAt(raw string) int64 {
+	s := strings.TrimSpace(raw)
+	if s == "" || strings.HasPrefix(s, "0001-") {
+		return 0
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, s); err == nil && t.Year() > 1970 {
+			return t.Unix()
+		}
+	}
+	return 0
+}
+
+// ListRuntimeApps 采集群晖主机上全部容器与项目的树状实时运行状态与资源占用。
+func (a *Adapter) ListRuntimeApps(ctx context.Context) ([]platform.AppRuntimeTree, error) {
+	if a.dock == nil {
+		return a.listRuntimeAppsViaDSMAPI(ctx)
+	}
+
+	trees, err := a.dock.ListRuntimeApps(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	projs, _ := a.listDSMProjects(ctx)
+	byName := make(map[string]dsmProject, len(projs))
+	for _, p := range projs {
+		if p.Name != "" {
+			byName[strings.ToLower(p.Name)] = p
+		}
+	}
+
+	for i := range trees {
+		t := &trees[i]
+		if p, ok := byName[strings.ToLower(t.Name)]; ok {
+			if p.IsPackage || strings.HasPrefix(p.Path, "/var/packages/") {
+				t.Source = platform.SourceVendorManaged
+			} else {
+				t.Source = platform.SourceDSMProject
+				t.Key = fmt.Sprintf("%s/dsm_project/%s", a.hostID, t.Name)
+			}
+		}
+	}
+	return trees, nil
+}
+
+func (a *Adapter) listRuntimeAppsViaDSMAPI(ctx context.Context) ([]platform.AppRuntimeTree, error) {
+	if a.dsmCli == nil {
+		return nil, i18n.NewHostError("dsm.not_configured", nil)
+	}
+	stats1, _ := a.dsmCli.ContainerStats(ctx)
+	projs, err := a.dsmCli.ListProjects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	containers, err := a.dsmCli.ListContainers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(150 * time.Millisecond):
+	}
+	statsMap, _ := a.dsmCli.ContainerStats(ctx)
+	if len(statsMap) == 0 {
+		statsMap = stats1
+	} else {
+		for k, cur := range statsMap {
+			if cur.PreCPUStats.SystemCPUUsage == 0 {
+				if prev, ok := stats1[k]; ok {
+					cur.PreCPUStats = prev.CPUStats
+					statsMap[k] = cur
+				}
+			}
+		}
+	}
+
+	byID := make(map[string]dsmContainerListItem, len(containers))
+	byName := make(map[string]dsmContainerListItem, len(containers))
+	for _, c := range containers {
+		if c.ID != "" {
+			byID[c.ID] = c
+		}
+		n := strings.TrimPrefix(c.Name, "/")
+		if n != "" {
+			byName[n] = c
+		}
+	}
+
+	lookupStat := func(id, name string) (float64, int64, int64) {
+		if st, ok := statsMap[name]; ok {
+			return computeDSMStat(st)
+		}
+		if st, ok := statsMap[id]; ok {
+			return computeDSMStat(st)
+		}
+		return 0, 0, 0
+	}
+
+	claimed := make(map[string]bool)
+	var out []platform.AppRuntimeTree
+
+	for _, p := range projs {
+		detail, err := a.dsmCli.GetProject(ctx, p.ID)
+		if err != nil {
+			continue
+		}
+		for _, cid := range detail.ContainerIDs {
+			claimed[cid] = true
+		}
+
+		src := platform.SourceDSMProject
+		appKeyPrefix := "dsm_project"
+		if detail.IsPackage || strings.HasPrefix(detail.Path, "/var/packages/") {
+			src = platform.SourceVendorManaged
+			appKeyPrefix = "compose"
+		}
+		appKey := fmt.Sprintf("%s/%s/%s", a.hostID, appKeyPrefix, detail.Name)
+		tree := platform.AppRuntimeTree{
+			Key:    appKey,
+			HostID: a.hostID,
+			Name:   detail.Name,
+			Source: src,
+		}
+
+		for _, c := range detail.Containers {
+			claimed[c.ID] = true
+			cName := strings.TrimPrefix(c.Name, "/")
+			if cName == "" {
+				cName = shortID(c.ID)
+			}
+			claimed[cName] = true
+
+			listItem, hasList := byID[c.ID]
+			if !hasList {
+				listItem, hasList = byName[cName]
+			}
+
+			state := strings.ToLower(strings.TrimSpace(c.State.Status))
+			if state == "" && hasList {
+				state = strings.ToLower(strings.TrimSpace(listItem.State.Status))
+				if state == "" {
+					state = strings.ToLower(strings.TrimSpace(listItem.Status))
+				}
+			}
+			if state == "" {
+				if c.State.Running || (hasList && listItem.State.Running) {
+					state = "running"
+				} else {
+					state = "stopped"
+				}
+			}
+
+			startedAt := parseDSMStartedAt(c.State.StartedAt)
+			if startedAt == 0 && hasList {
+				startedAt = parseDSMStartedAt(listItem.State.StartedAt)
+			}
+			uptime := ""
+			if hasList {
+				uptime = listItem.UpStatus
+			}
+			health := strings.ToLower(strings.TrimSpace(c.State.Health.Status))
+			if health == "" && hasList {
+				health = strings.ToLower(strings.TrimSpace(listItem.State.Health.Status))
+			}
+
+			imgRef := c.Config.Image
+			if imgRef == "" && hasList {
+				imgRef = containerImageRef(listItem)
+			}
+			if imgRef == "" {
+				imgRef = c.Image
+			}
+
+			var cpu float64
+			var memU, memL int64
+			if state == "running" {
+				cpu, memU, memL = lookupStat(c.ID, cName)
+			}
+
+			cStat := platform.ContainerRuntimeStat{
+				ID:         shortID(c.ID),
+				Name:       cName,
+				Service:    strings.TrimSpace(c.Config.Labels["com.docker.compose.service"]),
+				Image:      imgRef,
+				State:      state,
+				Health:     health,
+				Uptime:     uptime,
+				StartedAt:  startedAt,
+				CPUPercent: cpu,
+				MemUsage:   memU,
+				MemLimit:   memL,
+			}
+			tree.TotalCount++
+			if state == "running" {
+				tree.RunningCount++
+			}
+			tree.CPUPercent = math.Round((tree.CPUPercent+cpu)*100) / 100
+			tree.MemUsage += memU
+			tree.Containers = append(tree.Containers, cStat)
+		}
+
+		sort.Slice(tree.Containers, func(i, j int) bool {
+			return tree.Containers[i].Name < tree.Containers[j].Name
+		})
+		out = append(out, tree)
+	}
+
+	composeGroups := make(map[string]*platform.AppRuntimeTree)
+	for _, c := range containers {
+		cName := strings.TrimPrefix(c.Name, "/")
+		if claimed[c.ID] || (cName != "" && claimed[cName]) {
+			continue
+		}
+		if c.Labels["dkstore.self"] == "true" {
+			continue
+		}
+		if cName == "" {
+			cName = shortID(c.ID)
+		}
+		state := strings.ToLower(strings.TrimSpace(c.State.Status))
+		if state == "" {
+			state = strings.ToLower(strings.TrimSpace(c.Status))
+		}
+		if state == "" {
+			if c.State.Running {
+				state = "running"
+			} else {
+				state = "stopped"
+			}
+		}
+
+		var cpu float64
+		var memU, memL int64
+		if state == "running" {
+			cpu, memU, memL = lookupStat(c.ID, cName)
+		}
+		cStat := platform.ContainerRuntimeStat{
+			ID:         shortID(c.ID),
+			Name:       cName,
+			Service:    strings.TrimSpace(c.Labels["com.docker.compose.service"]),
+			Image:      containerImageRef(c),
+			State:      state,
+			Health:     strings.ToLower(strings.TrimSpace(c.State.Health.Status)),
+			Uptime:     c.UpStatus,
+			StartedAt:  parseDSMStartedAt(c.State.StartedAt),
+			CPUPercent: cpu,
+			MemUsage:   memU,
+			MemLimit:   memL,
+		}
+
+		projName := strings.TrimSpace(c.Labels["com.docker.compose.project"])
+		workDir := strings.TrimSpace(c.Labels["com.docker.compose.project.working_dir"])
+		if projName != "" {
+			already := false
+			for _, existing := range out {
+				if strings.EqualFold(existing.Name, projName) {
+					already = true
+					break
+				}
+			}
+			if already {
+				continue
+			}
+			appKey := fmt.Sprintf("%s/compose/%s", a.hostID, projName)
+			grp, exists := composeGroups[appKey]
+			if !exists {
+				src := platform.SourceCompose
+				if c.IsPackage || strings.HasPrefix(workDir, "/var/packages/") {
+					src = platform.SourceVendorManaged
+				}
+				grp = &platform.AppRuntimeTree{
+					Key:    appKey,
+					HostID: a.hostID,
+					Name:   projName,
+					Source: src,
+				}
+				composeGroups[appKey] = grp
+			}
+			grp.TotalCount++
+			if state == "running" {
+				grp.RunningCount++
+			}
+			grp.CPUPercent = math.Round((grp.CPUPercent+cpu)*100) / 100
+			grp.MemUsage += memU
+			grp.Containers = append(grp.Containers, cStat)
+			continue
+		}
+
+		src := platform.SourceStandalone
+		if c.IsPackage || strings.HasPrefix(workDir, "/var/packages/") {
+			src = platform.SourceVendorManaged
+		}
+		runCnt := 0
+		if state == "running" {
+			runCnt = 1
+		}
+		out = append(out, platform.AppRuntimeTree{
+			Key:          fmt.Sprintf("%s/container/%s", a.hostID, cName),
+			HostID:       a.hostID,
+			Name:         cName,
+			Source:       src,
+			RunningCount: runCnt,
+			TotalCount:   1,
+			CPUPercent:   cpu,
+			MemUsage:     memU,
+			Containers:   []platform.ContainerRuntimeStat{cStat},
+		})
+	}
+
+	for _, grp := range composeGroups {
+		sort.Slice(grp.Containers, func(i, j int) bool {
+			return grp.Containers[i].Name < grp.Containers[j].Name
+		})
+		out = append(out, *grp)
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Source != out[j].Source {
+			return out[i].Source < out[j].Source
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
 }
 
 func parseServicesFromComposeYAML(raw string) map[string]string {

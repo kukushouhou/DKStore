@@ -16,6 +16,7 @@ export function useEvents(enabled: boolean) {
         useUIStore.getState().setLiveProgress(p)
         if (!p.running && p.phase === 'done') {
           qc.invalidateQueries({ queryKey: ['overview'] })
+          qc.invalidateQueries({ queryKey: ['containers'] })
           qc.invalidateQueries({ queryKey: ['check-runs'] })
         }
       } catch {
@@ -28,6 +29,7 @@ export function useEvents(enabled: boolean) {
         useUIStore.getState().upsertUpdateJob(job)
         if (job.status === 'succeeded' || job.status === 'failed') {
           qc.invalidateQueries({ queryKey: ['overview'] })
+          qc.invalidateQueries({ queryKey: ['containers'] })
           qc.invalidateQueries({ queryKey: ['updates'] })
         }
       } catch {

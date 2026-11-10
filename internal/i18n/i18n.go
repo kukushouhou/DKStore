@@ -59,34 +59,29 @@ func FormatReason(lang Lang, reason, dbName, fromVer, toVer string) string {
 	switch reason {
 	case "major_bump":
 		if lang == EnUS {
-			return fmt.Sprintf("Major version upgrade (%s → %s) may contain breaking changes. Please review the official release notes before updating.", fromVer, toVer)
+			return fmt.Sprintf("Major version upgrade (%s → %s). Please check the release notes before updating.", fromVer, toVer)
 		}
-		return fmt.Sprintf("跨大版本升级（%s → %s），可能包含破坏性变更，请先查阅官方更新说明。", fromVer, toVer)
-	case "database":
+		return fmt.Sprintf("跨大版本升级（%s → %s），建议先查看新版更新说明。", fromVer, toVer)
+	case "database", "database_suspected":
 		if lang == EnUS {
-			return fmt.Sprintf("%s is a database service. Please read the official release notes and back up your data before updating.", dbName)
+			return fmt.Sprintf("This is a %s database service. Please back up your data before updating.", dbName)
 		}
-		return fmt.Sprintf("%s 属于数据库服务，升级前请阅读官方发行说明并确认数据已备份。", dbName)
-	case "database_suspected":
-		if lang == EnUS {
-			return fmt.Sprintf("Identified as a suspected %s database image; placed in Caution Updates under conservative database rules.", dbName)
-		}
-		return fmt.Sprintf("该镜像识别为疑似 %s 数据库，已按数据库保守规则归入谨慎更新。", dbName)
+		return fmt.Sprintf("这是 %s 数据库服务，升级前建议先备份好数据。", dbName)
 	case "database_cross_series":
 		if lang == EnUS {
-			return fmt.Sprintf("Target image (%s → %s) crosses %s release series! Please read the upgrade guide and back up your data first.", fromVer, toVer, dbName)
+			return fmt.Sprintf("%s database major upgrade (%s → %s). Please back up your data and read the upgrade guide first!", dbName, fromVer, toVer)
 		}
-		return fmt.Sprintf("目标镜像（%s → %s）已跨 %s 数据库发行系列，请务必先阅读升级说明并备份数据！", fromVer, toVer, dbName)
+		return fmt.Sprintf("%s 数据库跨大版本升级（%s → %s），请先备份数据并查阅升级说明！", dbName, fromVer, toVer)
 	case "pinned_digest":
 		if lang == EnUS {
-			return "This service pins a specific SHA256 digest. The remote tag has new content, but pinned digests will not update automatically."
+			return "This container is pinned to a fixed version and will not update automatically."
 		}
-		return "该镜像已固定 SHA256 摘要；远端标签已有新内容，固定摘要不会自动跟随更新。"
+		return "当前容器锁定了固定版本，不会自动跟随更新。"
 	case "republished":
 		if lang == EnUS {
-			return "The image for the same version tag has been rebuilt and republished."
+			return "The developer republished the package for this version."
 		}
-		return "同版本标签镜像已重新构建发布。"
+		return "开发者重新发布了该版本的安装包。"
 	default:
 		return ""
 	}
@@ -452,9 +447,9 @@ func FormatRollbackReason(lang Lang, code string) string {
 	if lang == EnUS {
 		switch code {
 		case "no_exact_version_tag":
-			return "Old rolling image digest could not be matched to a specific verifiable version tag; rollback is unavailable."
+			return "Used a floating version (e.g. latest) before updating and the old local package was cleaned up; cannot roll back."
 		case "tag_overwritten":
-			return "The historical version tag in the remote registry now points to a different digest and no local backup image exists."
+			return "The old version package has been cleaned up; cannot roll back."
 		case "target_unreachable":
 			return "Unable to verify historical tag in the remote registry (offline or authentication required)."
 		case "compose_unwritable":
@@ -467,9 +462,9 @@ func FormatRollbackReason(lang Lang, code string) string {
 	}
 	switch code {
 	case "no_exact_version_tag":
-		return "旧镜像摘要未匹配到明确且可验证的版本号标签（如滚动 latest），按安全策略不提供回退。"
+		return "升级前使用的是浮动版本（如 latest）且本机旧安装包已清理，无法回退。"
 	case "tag_overwritten":
-		return "远端仓库中该历史版本标签指向的摘要已发生变化，且本地旧镜像已清理，无法无歧义回退。"
+		return "旧版本安装包已被清理，无法回退。"
 	case "target_unreachable":
 		return "无法连接远端仓库验证历史标签有效性，暂不可回退。"
 	case "compose_unwritable":

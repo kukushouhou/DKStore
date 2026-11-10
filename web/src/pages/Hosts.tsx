@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Alert,
   Badge,
@@ -14,12 +14,14 @@ import {
   Popconfirm,
   Radio,
   Row,
+  Segmented,
   Space,
-  Steps,
   Tag,
   Timeline,
+  Tooltip,
   Typography,
   message,
+  theme,
 } from 'antd'
 import {
   CheckCircleOutlined,
@@ -27,9 +29,12 @@ import {
   CloudServerOutlined,
   CopyOutlined,
   DeleteOutlined,
+  DesktopOutlined,
   EditOutlined,
+  HddOutlined,
   KeyOutlined,
   PlusOutlined,
+  SafetyCertificateOutlined,
   SyncOutlined,
   WarningOutlined,
 } from '@ant-design/icons'
@@ -37,42 +42,103 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError, type HostInput, type HostItem, type HostTestResult } from '../api/client'
 import { useI18n } from '../i18n'
 
+type PlatformId = 'synology' | 'linux' | 'local'
+
+interface PlatformSpec {
+  id: PlatformId
+  kind: 'synology' | 'docker'
+  transports: ('dsm_api' | 'ssh' | 'local')[]
+  defaultTransport: 'dsm_api' | 'ssh' | 'local'
+}
+
+const PLATFORM_SPECS: PlatformSpec[] = [
+  {
+    id: 'synology',
+    kind: 'synology',
+    transports: ['dsm_api', 'ssh'],
+    defaultTransport: 'dsm_api',
+  },
+  {
+    id: 'linux',
+    kind: 'docker',
+    transports: ['ssh'],
+    defaultTransport: 'ssh',
+  },
+  {
+    id: 'local',
+    kind: 'docker',
+    transports: ['local'],
+    defaultTransport: 'local',
+  },
+]
+
 export default function HostsPage() {
   const { locale, t } = useI18n()
+  const { token } = theme.useToken()
   const qc = useQueryClient()
   const hostsQuery = useQuery({ queryKey: ['hosts', locale], queryFn: api.listHosts })
 
-  const [wizardOpen, setWizardOpen] = useState(false)
+  const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<HostItem | null>(null)
-  const [step, setStep] = useState(0)
+  const [platformId, setPlatformId] = useState<PlatformId>('synology')
+  const [showOtpField, setShowOtpField] = useState(false)
   const [form] = Form.useForm<HostInput>()
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<HostTestResult | null>(null)
   const [generatedPubKey, setGeneratedPubKey] = useState('')
   const [saving, setSaving] = useState(false)
 
+  const canAddLocal = Boolean(hostsQuery.data?.canAddLocal)
+
+  const visiblePlatforms = useMemo(() => {
+    return PLATFORM_SPECS.filter((p) => {
+      if (p.id === 'local') {
+        if (editing) return editing.transport === 'local'
+        return canAddLocal
+      }
+      if (editing && editing.transport === 'local') {
+        return false
+      }
+      return true
+    })
+  }, [canAddLocal, editing])
+
+  const selectPlatform = (nextId: PlatformId) => {
+    const spec = PLATFORM_SPECS.find((p) => p.id === nextId) ?? PLATFORM_SPECS[0]
+    setPlatformId(spec.id)
+    setTestResult(null)
+    form.setFieldsValue({
+      kind: spec.kind,
+      transport: spec.defaultTransport,
+    })
+  }
+
   const openAdd = () => {
     setEditing(null)
-    setStep(0)
     setTestResult(null)
     setGeneratedPubKey('')
+    setShowOtpField(false)
     form.resetFields()
+    setPlatformId('synology')
     form.setFieldsValue({
       name: '',
-      kind: 'docker',
-      transport: 'ssh',
+      kind: 'synology',
+      transport: 'dsm_api',
       port: 22,
       sshAuth: 'password',
     })
-    setWizardOpen(true)
+    setModalOpen(true)
   }
 
   const openEdit = (h: HostItem) => {
     setEditing(h)
-    setStep(0)
     setTestResult(null)
     setGeneratedPubKey('')
+    setShowOtpField(false)
     form.resetFields()
+    const initPlatform: PlatformId =
+      h.transport === 'local' ? 'local' : h.kind === 'synology' ? 'synology' : 'linux'
+    setPlatformId(initPlatform)
     form.setFieldsValue({
       name: h.name,
       kind: h.kind,
@@ -84,7 +150,7 @@ export default function HostsPage() {
       dsmUrl: h.dsmUrl,
       dsmUser: h.dsmUser,
     })
-    setWizardOpen(true)
+    setModalOpen(true)
   }
 
   const runTest = async () => {
@@ -92,9 +158,11 @@ export default function HostsPage() {
     setTesting(true)
     setTestResult(null)
     try {
-      // 编辑已有设备时带上 hostId，后端复用已保存的密码 / 私钥 / 设备令牌
       const res = await api.testHost(editing ? { ...vals, hostId: editing.id } : vals)
       setTestResult(res)
+      if (res.needOtp) {
+        setShowOtpField(true)
+      }
     } catch (e) {
       message.error((e as Error).message)
     } finally {
@@ -113,8 +181,12 @@ export default function HostsPage() {
   }
 
   const handleSave = async () => {
+    try {
+      await form.validateFields()
+    } catch {
+      return
+    }
     const vals = { ...(form.getFieldsValue(true) as HostInput) }
-    // 测试连接拿到的 DSM 设备令牌已在服务端暂存，保存时带回 nonce 复用，避免同一动态码被用两次
     if (testResult?.deviceTokenNonce) {
       vals.deviceTokenNonce = testResult.deviceTokenNonce
     }
@@ -127,13 +199,16 @@ export default function HostsPage() {
         await api.createHost(vals)
       }
       message.success(t.hosts.saved)
-      setWizardOpen(false)
+      setModalOpen(false)
       qc.invalidateQueries({ queryKey: ['hosts'] })
       qc.invalidateQueries({ queryKey: ['overview'] })
+      qc.invalidateQueries({ queryKey: ['containers'] })
     } catch (e) {
       if (e instanceof ApiError && e.testResult) {
         setTestResult(e.testResult)
-        setStep(2)
+        if (e.testResult.needOtp) {
+          setShowOtpField(true)
+        }
       }
       message.error((e as Error).message)
     } finally {
@@ -142,9 +217,32 @@ export default function HostsPage() {
   }
 
   const hosts = hostsQuery.data?.items ?? []
-  const kindVal = Form.useWatch('kind', form)
   const transportVal = Form.useWatch('transport', form)
   const authVal = Form.useWatch('sshAuth', form)
+  const currentSpec = PLATFORM_SPECS.find((p) => p.id === platformId) ?? PLATFORM_SPECS[0]
+
+  const platformMeta = (id: PlatformId) => {
+    switch (id) {
+      case 'synology':
+        return {
+          icon: <HddOutlined style={{ fontSize: 20, color: token.colorPrimary }} />,
+          title: t.hosts.platformSynology,
+          desc: t.hosts.platformSynologyDesc,
+        }
+      case 'linux':
+        return {
+          icon: <CloudServerOutlined style={{ fontSize: 20, color: token.colorPrimary }} />,
+          title: t.hosts.platformLinux,
+          desc: t.hosts.platformLinuxDesc,
+        }
+      case 'local':
+        return {
+          icon: <DesktopOutlined style={{ fontSize: 20, color: token.colorPrimary }} />,
+          title: t.hosts.platformLocal,
+          desc: t.hosts.platformLocalDesc,
+        }
+    }
+  }
 
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
@@ -171,22 +269,34 @@ export default function HostsPage() {
                   </Space>
                 }
                 extra={
-                  <Badge
-                    status={
-                      h.status === 'online'
-                        ? 'success'
-                        : h.status === 'offline'
-                          ? 'error'
-                          : 'default'
-                    }
-                    text={
-                      h.status === 'online'
-                        ? t.hosts.online
-                        : h.status === 'offline'
-                          ? t.hosts.offline
-                          : t.hosts.unknown
-                    }
-                  />
+                  <Space size={8}>
+                    {h.sshHostKey && !h.sshHostKeyChangedAt && (
+                      <Tooltip title={`${t.hosts.fingerprintTitle}: ${h.sshHostKey}`}>
+                        <Tag
+                          icon={<SafetyCertificateOutlined />}
+                          style={{ cursor: 'pointer', margin: 0 }}
+                        >
+                          SSH
+                        </Tag>
+                      </Tooltip>
+                    )}
+                    <Badge
+                      status={
+                        h.status === 'online'
+                          ? 'success'
+                          : h.status === 'offline'
+                            ? 'error'
+                            : 'default'
+                      }
+                      text={
+                        h.status === 'online'
+                          ? t.hosts.online
+                          : h.status === 'offline'
+                            ? t.hosts.offline
+                            : t.hosts.unknown
+                      }
+                    />
+                  </Space>
                 }
                 actions={[
                   <Button
@@ -223,6 +333,7 @@ export default function HostsPage() {
                         message.success(t.hosts.deleted)
                         qc.invalidateQueries({ queryKey: ['hosts'] })
                         qc.invalidateQueries({ queryKey: ['overview'] })
+                        qc.invalidateQueries({ queryKey: ['containers'] })
                       } catch (e) {
                         message.error((e as Error).message)
                       }
@@ -232,7 +343,7 @@ export default function HostsPage() {
                   </Popconfirm>,
                 ]}
               >
-                <Space direction="vertical" size={6}>
+                <Space direction="vertical" size={6} style={{ width: '100%' }}>
                   <Space wrap>
                     {h.kind === 'synology' && <Tag color="geekblue">Synology DSM</Tag>}
                     <Tag>
@@ -258,23 +369,28 @@ export default function HostsPage() {
                       Docker {h.info.dockerVersion} · {h.info.platformVersion || h.info.os} ({h.info.os}/{h.info.arch || t.hosts.archUnknown})
                     </Typography.Text>
                   )}
-                  {h.sshHostKey && (
-                    <Typography.Text type="secondary" style={{ fontSize: 11, fontFamily: 'monospace' }}>
-                      {h.sshHostKey}
-                    </Typography.Text>
-                  )}
                   {h.transport === 'ssh' && Boolean(h.sshHostKeyChangedAt) && (
-                    <Typography.Text type="warning" style={{ fontSize: 12 }}>
-                      <WarningOutlined /> {t.hosts.fingerprintChanged}
-                      {h.sshHostKeyChangedAt
-                        ? ` · ${new Date(h.sshHostKeyChangedAt * 1000).toLocaleString(locale)}`
-                        : ''}
-                      {h.sshPrevHostKey && (
-                        <div style={{ fontSize: 11, fontFamily: 'monospace' }}>
-                          {t.hosts.fingerprintPrevious}: {h.sshPrevHostKey}
-                        </div>
-                      )}
-                    </Typography.Text>
+                    <Alert
+                      type="warning"
+                      showIcon
+                      icon={<WarningOutlined />}
+                      style={{ padding: '6px 10px', marginTop: 4 }}
+                      title={
+                        <span style={{ fontSize: 12 }}>
+                          {t.hosts.fingerprintChanged}
+                          {h.sshHostKeyChangedAt
+                            ? ` · ${new Date(h.sshHostKeyChangedAt * 1000).toLocaleString(locale)}`
+                            : ''}
+                        </span>
+                      }
+                      description={
+                        h.sshPrevHostKey ? (
+                          <Typography.Text type="secondary" style={{ fontSize: 11, fontFamily: 'monospace' }}>
+                            {t.hosts.fingerprintPrevious}: {h.sshPrevHostKey}
+                          </Typography.Text>
+                        ) : undefined
+                      }
+                    />
                   )}
                 </Space>
               </Card>
@@ -284,120 +400,143 @@ export default function HostsPage() {
       )}
 
       <Modal
-        open={wizardOpen}
+        open={modalOpen}
         title={editing ? t.hosts.editHost : t.hosts.addHost}
-        width={640}
-        onCancel={() => setWizardOpen(false)}
+        width={620}
+        onCancel={() => setModalOpen(false)}
         footer={
-          <Flex justify="space-between">
-            <div>
-              {step > 0 && (
-                <Button onClick={() => setStep(step - 1)}>{t.hosts.prevStep}</Button>
-              )}
-            </div>
-            <Space>
-              <Button onClick={() => setWizardOpen(false)}>{t.ignoreModal.cancel}</Button>
-              {step === 1 && (
-                <Button
-                  icon={<SyncOutlined spin={testing} />}
-                  loading={testing}
-                  onClick={() => {
-                    setStep(2)
-                    runTest()
-                  }}
-                >
-                  {t.hosts.testBtn}
-                </Button>
-              )}
-              {step === 0 ? (
-                <Button type="primary" onClick={() => setStep(1)}>
-                  {t.hosts.nextStep}
-                </Button>
-              ) : (
-                <Button
-                  type="primary"
-                  loading={saving}
-                  onClick={handleSave}
-                >
-                  {t.hosts.saveBtn}
-                </Button>
-              )}
-            </Space>
+          <Flex justify="flex-end" gap={8}>
+            <Button onClick={() => setModalOpen(false)}>{t.ignoreModal.cancel}</Button>
+            <Button
+              icon={<SyncOutlined spin={testing} />}
+              loading={testing}
+              onClick={runTest}
+            >
+              {testing ? t.hosts.testing : t.hosts.testBtn}
+            </Button>
+            <Button type="primary" loading={saving} onClick={handleSave}>
+              {t.hosts.saveBtn}
+            </Button>
           </Flex>
         }
       >
-        <Space direction="vertical" size="large" style={{ width: '100%' }}>
-          <Steps
-            size="small"
-            current={step}
-            items={[
-              { title: t.hosts.stepType },
-              { title: t.hosts.stepConn },
-              { title: t.hosts.stepTest },
-            ]}
-          />
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          {/* 1. 平台选择横向卡片（表驱动） */}
+          {visiblePlatforms.length > 1 && (
+            <div>
+              <Typography.Text strong style={{ display: 'block', marginBottom: 8 }}>
+                {t.hosts.platformLabel}
+              </Typography.Text>
+              <Row gutter={[12, 12]}>
+                {visiblePlatforms.map((p) => {
+                  const meta = platformMeta(p.id)
+                  const active = platformId === p.id
+                  return (
+                    <Col key={p.id} xs={24} sm={visiblePlatforms.length === 3 ? 8 : 12}>
+                      <Card
+                        size="small"
+                        hoverable
+                        onClick={() => selectPlatform(p.id)}
+                        style={{
+                          height: '100%',
+                          borderColor: active ? token.colorPrimary : token.colorBorderSecondary,
+                          background: active ? token.colorPrimaryBg : token.colorBgContainer,
+                          borderRadius: 10,
+                        }}
+                      >
+                        <Flex align="flex-start" gap={10}>
+                          {meta.icon}
+                          <div style={{ minWidth: 0 }}>
+                            <Typography.Text strong style={{ display: 'block', fontSize: 14 }}>
+                              {meta.title}
+                            </Typography.Text>
+                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                              {meta.desc}
+                            </Typography.Text>
+                          </div>
+                        </Flex>
+                      </Card>
+                    </Col>
+                  )
+                })}
+              </Row>
+            </div>
+          )}
 
-          <Form form={form} layout="vertical">
-            {step === 0 && (
-              <>
-                <Form.Item name="name" label={t.hosts.nameLabel} rules={[{ required: true }]}>
-                  <Input placeholder={t.hosts.namePlaceholder} />
-                </Form.Item>
-                <Form.Item name="kind" label={t.hosts.kindLabel}>
-                  <Radio.Group
-                    style={{ display: 'flex', flexDirection: 'column', gap: 10 }}
-                    onChange={(e) => {
-                      if (e.target.value === 'synology') {
-                        form.setFieldsValue({ transport: 'dsm_api' })
-                      } else if (form.getFieldValue('transport') === 'dsm_api') {
-                        form.setFieldsValue({ transport: 'ssh' })
-                      }
-                    }}
-                  >
-                    <Radio value="docker">{t.hosts.kindDocker}</Radio>
-                    <Radio value="synology">{t.hosts.kindSynology}</Radio>
-                  </Radio.Group>
-                </Form.Item>
-                <Form.Item name="transport" label={t.hosts.transportLabel}>
-                  <Radio.Group style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                    {kindVal === 'synology' && (
-                      <Radio value="dsm_api">{t.hosts.transportDSMAPI}</Radio>
-                    )}
-                    <Radio value="ssh">{t.hosts.transportSSH}</Radio>
-                    <Radio value="local">{t.hosts.transportLocal}</Radio>
-                  </Radio.Group>
-                </Form.Item>
-              </>
-            )}
+          <Form form={form} layout="vertical" style={{ marginTop: 4 }}>
+            <Form.Item name="kind" hidden>
+              <Input />
+            </Form.Item>
+            <Form.Item name="transport" hidden>
+              <Input />
+            </Form.Item>
 
-            {step === 1 && transportVal === 'local' && (
-              <Alert type="info" showIcon title="/var/run/docker.sock" />
-            )}
-
-            {step === 1 && transportVal === 'dsm_api' && (
-              <>
-                <Alert
-                  type="info"
-                  showIcon
-                  style={{ marginBottom: 12 }}
-                  title={t.hosts.saveReconnectHint}
+            {/* 2. 连接方式切换（当平台支持多种连接方式时显示 Segmented） */}
+            {currentSpec.transports.length > 1 && (
+              <Form.Item label={t.hosts.connMethodLabel} style={{ marginBottom: 16 }}>
+                <Segmented
+                  block
+                  value={transportVal || currentSpec.defaultTransport}
+                  onChange={(v) => {
+                    setTestResult(null)
+                    form.setFieldsValue({ transport: v as HostInput['transport'] })
+                  }}
+                  options={currentSpec.transports.map((tr) => ({
+                    label: tr === 'dsm_api' ? t.hosts.connDsmApi : t.hosts.connSsh,
+                    value: tr,
+                  }))}
                 />
+              </Form.Item>
+            )}
+
+            {/* 3. 表单输入区 */}
+            <Form.Item name="name" label={t.hosts.nameLabel} rules={[{ required: true }]}>
+              <Input placeholder={t.hosts.namePlaceholder} />
+            </Form.Item>
+
+            {transportVal === 'local' && (
+              <Alert type="info" showIcon title={t.hosts.connLocal} />
+            )}
+
+            {transportVal === 'dsm_api' && (
+              <>
                 <Form.Item name="dsmUrl" label={t.hosts.dsmUrlLabel} rules={[{ required: true }]}>
                   <Input placeholder="http://192.168.1.10:5000" />
                 </Form.Item>
-                <Form.Item name="dsmUser" label={t.hosts.dsmUserLabel} rules={[{ required: true }]}>
-                  <Input placeholder="admin" />
-                </Form.Item>
-                <Form.Item name="dsmSecret" label={t.hosts.dsmSecretLabel} rules={[{ required: !editing }]}>
-                  <Input.Password />
-                </Form.Item>
-                <Form.Item name="dsmOtpCode" label={t.hosts.dsmOtpLabel}>
-                  <Input placeholder={t.hosts.dsmOtpPlaceholder} maxLength={8} />
-                </Form.Item>
+                <Row gutter={12}>
+                  <Col xs={24} sm={12}>
+                    <Form.Item name="dsmUser" label={t.hosts.dsmUserLabel} rules={[{ required: true }]}>
+                      <Input placeholder="admin" />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} sm={12}>
+                    <Form.Item
+                      name="dsmSecret"
+                      label={t.hosts.dsmSecretLabel}
+                      rules={[{ required: !editing }]}
+                    >
+                      <Input.Password />
+                    </Form.Item>
+                  </Col>
+                </Row>
+                {showOtpField || testResult?.needOtp ? (
+                  <Form.Item name="dsmOtpCode" label={t.hosts.dsmOtpLabel} style={{ marginBottom: 4 }}>
+                    <Input placeholder={t.hosts.dsmOtpPlaceholder} maxLength={8} />
+                  </Form.Item>
+                ) : (
+                  <Button
+                    type="link"
+                    size="small"
+                    style={{ padding: 0 }}
+                    onClick={() => setShowOtpField(true)}
+                  >
+                    {t.hosts.dsmOtpToggle}
+                  </Button>
+                )}
               </>
             )}
 
-            {step === 1 && transportVal === 'ssh' && (
+            {transportVal === 'ssh' && (
               <>
                 <Row gutter={12}>
                   <Col span={17}>
@@ -411,15 +550,21 @@ export default function HostsPage() {
                     </Form.Item>
                   </Col>
                 </Row>
-                <Form.Item name="sshUser" label={t.hosts.userLabel} rules={[{ required: true }]}>
-                  <Input placeholder="root / ubuntu" />
-                </Form.Item>
-                <Form.Item name="sshAuth" label={t.hosts.authTypeLabel}>
-                  <Radio.Group>
-                    <Radio value="password">{t.hosts.authPassword}</Radio>
-                    <Radio value="key">{t.hosts.authKey}</Radio>
-                  </Radio.Group>
-                </Form.Item>
+                <Row gutter={12}>
+                  <Col xs={24} sm={12}>
+                    <Form.Item name="sshUser" label={t.hosts.userLabel} rules={[{ required: true }]}>
+                      <Input placeholder="root / admin" />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} sm={12}>
+                    <Form.Item name="sshAuth" label={t.hosts.authTypeLabel}>
+                      <Radio.Group>
+                        <Radio value="password">{t.hosts.authPassword}</Radio>
+                        <Radio value="key">{t.hosts.authKey}</Radio>
+                      </Radio.Group>
+                    </Form.Item>
+                  </Col>
+                </Row>
                 {authVal === 'key' ? (
                   <>
                     <Space style={{ marginBottom: 8 }}>
@@ -452,82 +597,69 @@ export default function HostsPage() {
                       />
                     )}
                     <Form.Item name="sshSecret" label={t.hosts.privateKeyLabel}>
-                      <Input.TextArea rows={4} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" />
+                      <Input.TextArea rows={3} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" />
                     </Form.Item>
-                    <Form.Item name="sshPassphrase" label={t.hosts.passphraseLabel}>
+                    <Form.Item name="sshPassphrase" label={t.hosts.passphraseLabel} style={{ marginBottom: 4 }}>
                       <Input.Password />
                     </Form.Item>
                   </>
                 ) : (
-                  <Form.Item name="sshSecret" label={t.hosts.passwordLabel}>
+                  <Form.Item name="sshSecret" label={t.hosts.passwordLabel} style={{ marginBottom: 4 }}>
                     <Input.Password />
                   </Form.Item>
                 )}
               </>
             )}
+          </Form>
 
-            {step === 2 && (
-              <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-                <Button icon={<SyncOutlined spin={testing} />} loading={testing} onClick={runTest}>
-                  {testing ? t.hosts.testing : t.hosts.testBtn}
-                </Button>
-
-                {testResult && (
-                  <>
-                    <Alert
-                      type={testResult.ok ? 'success' : 'error'}
-                      showIcon
-                      title={testResult.ok ? t.hosts.testPassed : t.hosts.testFailed}
-                    />
-                    <Timeline
-                      items={testResult.steps.map((s) => ({
-                        color: s.status === 'ok' ? 'green' : 'red',
-                        dot:
-                          s.status === 'ok' ? <CheckCircleOutlined /> : <CloseCircleOutlined />,
-                        children: (
-                          <div>
-                            <Typography.Text strong>{s.step}</Typography.Text>
-                            <div>
-                              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                                {s.message}
-                              </Typography.Text>
-                            </div>
-                          </div>
-                        ),
-                      }))}
-                    />
-                    {testResult.needOtp && (
-                      <Card size="small">
-                        <Form.Item name="dsmOtpCode" label={t.hosts.dsmOtpLabel} style={{ marginBottom: 8 }}>
-                          <Input placeholder={t.hosts.dsmOtpPlaceholder} maxLength={8} />
-                        </Form.Item>
-                      </Card>
-                    )}
-                    {transportVal === 'ssh' && testResult.presentedHostKey && (
-                      <Card size="small" title={t.hosts.fingerprintTitle}>
-                        <Space direction="vertical">
-                          <Typography.Text code>{testResult.presentedHostKey}</Typography.Text>
-                          {testResult.hostKeyChanged && (
-                            <Typography.Text type="warning">
-                              <WarningOutlined /> {t.hosts.fingerprintChanged}
-                              {testResult.previousHostKey && (
-                                <div style={{ fontSize: 11, fontFamily: 'monospace' }}>
-                                  {t.hosts.fingerprintPrevious}: {testResult.previousHostKey}
-                                </div>
-                              )}
-                            </Typography.Text>
-                          )}
+          {/* 4. 内联测试诊断结果 */}
+          {testResult && (
+            <Card
+              size="small"
+              style={{
+                background: token.colorFillAlter,
+                borderRadius: 8,
+              }}
+            >
+              <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                <Alert
+                  type={testResult.ok ? 'success' : 'error'}
+                  showIcon
+                  title={testResult.ok ? t.hosts.testPassed : t.hosts.testFailed}
+                />
+                <Timeline
+                  style={{ marginTop: 8, marginBottom: 0 }}
+                  items={testResult.steps.map((s) => ({
+                    color: s.status === 'ok' ? 'green' : 'red',
+                    dot: s.status === 'ok' ? <CheckCircleOutlined /> : <CloseCircleOutlined />,
+                    children: (
+                      <div>
+                        <Typography.Text strong>{s.step}</Typography.Text>
+                        <div>
                           <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                            {t.hosts.fingerprintAutoHint}
+                            {s.message}
                           </Typography.Text>
-                        </Space>
-                      </Card>
-                    )}
-                  </>
+                        </div>
+                      </div>
+                    ),
+                  }))}
+                />
+                {transportVal === 'ssh' && testResult.hostKeyChanged && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    icon={<WarningOutlined />}
+                    title={t.hosts.fingerprintChanged}
+                    description={
+                      testResult.previousHostKey
+                        ? `${t.hosts.fingerprintPrevious}: ${testResult.previousHostKey}`
+                        : undefined
+                    }
+                  />
                 )}
               </Space>
-            )}
-          </Form>
+            </Card>
+          )}
         </Space>
       </Modal>
     </Space>

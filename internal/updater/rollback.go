@@ -90,7 +90,10 @@ func (s *Service) VerifyRollback(ctx context.Context, jobID string, lang i18n.La
 	if err != nil {
 		return nil, err
 	}
-	warn := i18n.EngineMessage(lang, i18n.MsgUpdateRollbackWarning)
+	warn := "提示：回退只会恢复软件版本，不会还原已修改的数据文件。"
+	if lang == i18n.EnUS {
+		warn = "Note: Rolling back restores the app version only and does not revert modified data files."
+	}
 
 	if !j.RollbackEligible || j.RollbackRef == "" {
 		code := j.RollbackReason
