@@ -37,7 +37,6 @@ export default function SettingsPage() {
   const [oldPw, setOldPw] = useState('')
   const [newPw, setNewPw] = useState('')
   const [confirmPw, setConfirmPw] = useState('')
-  const authQuery = useQuery({ queryKey: ['authStatus'], queryFn: api.authStatus })
   const [saving, setSaving] = useState(false)
   const [testingNotify, setTestingNotify] = useState(false)
 
@@ -91,8 +90,7 @@ export default function SettingsPage() {
   }
 
   const onUpdatePw = async () => {
-    const deviceMode = authQuery.data?.mode === 'device'
-    if ((!deviceMode && !oldPw) || !newPw) {
+    if (!oldPw || !newPw) {
       message.error(t.settings.pwRequired)
       return
     }
@@ -105,12 +103,7 @@ export default function SettingsPage() {
       return
     }
     try {
-      if (deviceMode) {
-        // 设备登录模式下尚未设置 DKStore 密码：走首次设置接口
-        await api.setupPassword(newPw)
-      } else {
-        await api.setPassword(oldPw, newPw)
-      }
+      await api.setPassword(oldPw, newPw)
       setOldPw('')
       setNewPw('')
       setConfirmPw('')
@@ -325,16 +318,14 @@ export default function SettingsPage() {
 
       <Card title={t.settings.securityTitle}>
         <Row gutter={[12, 12]} style={{ maxWidth: 860 }}>
-          {authQuery.data?.mode !== 'device' && (
-            <Col xs={24} md={7}>
-              <Input.Password
-                placeholder={t.settings.oldPw}
-                value={oldPw}
-                onChange={(e) => setOldPw(e.target.value)}
-                autoComplete="current-password"
-              />
-            </Col>
-          )}
+          <Col xs={24} md={7}>
+            <Input.Password
+              placeholder={t.settings.oldPw}
+              value={oldPw}
+              onChange={(e) => setOldPw(e.target.value)}
+              autoComplete="current-password"
+            />
+          </Col>
           <Col xs={24} md={7}>
             <Input.Password
               placeholder={t.settings.newPw}
@@ -355,7 +346,7 @@ export default function SettingsPage() {
           </Col>
           <Col xs={24} md={3}>
             <Button onClick={onUpdatePw}>
-              {authQuery.data?.mode === 'device' ? t.settings.setPwBtn : t.settings.updatePw}
+              {t.settings.updatePw}
             </Button>
           </Col>
         </Row>

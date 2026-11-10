@@ -116,7 +116,7 @@ export default function ContainersPage() {
   }, [rawTrees, stateFilter, keyword])
 
   const multiContainerKeys = useMemo(
-    () => filteredTrees.filter((a) => a.containers.length > 1 || a.source === 'compose' || a.source === 'dsm_project').map((a) => a.key),
+    () => filteredTrees.filter((a) => a.containers.length > 1).map((a) => a.key),
     [filteredTrees],
   )
 
@@ -143,6 +143,27 @@ export default function ContainersPage() {
     if (c.state !== 'running') {
       return t.containers.stateStopped
     }
+    if (c.uptime) {
+      const cleaned = c.uptime.replace(/\s*\([^)]*\)\s*$/, '').trim()
+      if (locale === 'zh-CN' && /^up\s+/i.test(cleaned)) {
+        const body = cleaned.replace(/^up\s+/i, '').trim()
+        if (/^about an hour/i.test(body)) return '已运行 1 小时'
+        if (/^about a minute/i.test(body) || /^less than a second/i.test(body)) return t.containers.uptimeJustNow
+        const m = body.match(/^(\d+)\s+(second|minute|hour|day|week|month|year)s?/i)
+        if (m) {
+          const n = Number(m[1])
+          const unit = m[2].toLowerCase()
+          if (unit === 'day') return `已运行 ${n} 天`
+          if (unit === 'week') return `已运行 ${n * 7} 天`
+          if (unit === 'month') return `已运行 ${n * 30} 天`
+          if (unit === 'year') return `已运行 ${n * 365} 天`
+          if (unit === 'hour') return `已运行 ${n} 小时`
+          if (unit === 'minute') return `已运行 ${n} 分钟`
+          return t.containers.uptimeJustNow
+        }
+      }
+      if (cleaned) return cleaned
+    }
     if (c.startedAt && c.startedAt > 0) {
       const nowSec = Math.floor(Date.now() / 1000)
       const diff = Math.max(0, nowSec - c.startedAt)
@@ -160,7 +181,6 @@ export default function ContainersPage() {
       }
       return t.containers.uptimeJustNow
     }
-    if (c.uptime) return c.uptime
     return t.containers.stateRunning
   }
 
@@ -212,7 +232,7 @@ export default function ContainersPage() {
   const renderContainerMetrics = (c: ContainerRuntimeStat) => {
     const isRunning = c.state === 'running'
     return (
-      <Space size={16} wrap style={{ justifyContent: 'flex-end' }}>
+      <Space size={12} style={{ justifyContent: 'flex-end', flexShrink: 0 }}>
         {renderStateBadge(c)}
         <Typography.Text type="secondary" style={{ fontSize: 12, minWidth: 110, display: 'inline-block' }}>
           {formatUptime(c)}
@@ -226,7 +246,7 @@ export default function ContainersPage() {
         <Typography.Text
           code
           ellipsis={{ tooltip: c.image }}
-          style={{ fontSize: 12, maxWidth: 240 }}
+          style={{ fontSize: 12, maxWidth: 190 }}
         >
           {c.image}
         </Typography.Text>
@@ -324,18 +344,15 @@ export default function ContainersPage() {
       ) : (
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
           {filteredTrees.map((app) => {
-            const isProject =
-              app.containers.length > 1 ||
-              app.source === 'compose' ||
-              app.source === 'dsm_project'
+            const isProject = app.containers.length > 1
             const collapsed = Boolean(collapsedKeys[app.key])
 
             if (!isProject && app.containers.length === 1) {
               const c = app.containers[0]
               return (
                 <Card key={app.key} size="small" styles={{ body: { padding: '12px 16px' } }}>
-                  <Flex justify="space-between" align="center" wrap gap={12}>
-                    <Space size={10} wrap>
+                  <Flex justify="space-between" align="center" gap={12}>
+                    <Space size={8} style={{ minWidth: 0 }}>
                       <Avatar
                         size={32}
                         shape="square"
@@ -347,9 +364,12 @@ export default function ContainersPage() {
                       >
                         {app.name.slice(0, 2).toUpperCase()}
                       </Avatar>
-                      <Typography.Text strong style={{ fontSize: 15 }}>
-                        {c.name || app.name}
+                      <Typography.Text strong style={{ fontSize: 15, whiteSpace: 'nowrap' }}>
+                        {app.name}
                       </Typography.Text>
+                      {c.name && c.name !== app.name && (
+                        <Tag style={{ margin: 0, fontSize: 11 }}>{c.name}</Tag>
+                      )}
                       {sourceTag(app.source)}
                       <Tag variant="filled" style={{ margin: 0 }}>
                         {app.hostName}
