@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -840,4 +841,104 @@ func (c *dsmClient) UpgradeByRepository(ctx context.Context, repository string) 
 			}
 		}
 	}
+}
+
+// GetContainerProfile 读取单个容器的 DSM profile 配置及当前运行状态。
+// 参考群晖前端 BJ(profile) 逻辑：若 port_bindings 中某项的 type 为 "tcp_udp"，拆分为 "tcp" 与 "udp" 两条记录以兼容 create 接口。
+func (c *dsmClient) GetContainerProfile(ctx context.Context, name string) (profile map[string]any, running bool, err error) {
+	var data struct {
+		Profile map[string]any `json:"profile"`
+		Details struct {
+			State struct {
+				Running bool `json:"Running"`
+			} `json:"State"`
+		} `json:"details"`
+	}
+	if err := c.call(ctx, "SYNO.Docker.Container", "1", "get", map[string]string{
+		"name": jsonParam(name),
+	}, &data); err != nil {
+		return nil, false, err
+	}
+	if data.Profile == nil {
+		return nil, false, fmt.Errorf("empty container profile for %s", name)
+	}
+	normalizeProfilePortBindings(data.Profile)
+	return data.Profile, data.Details.State.Running, nil
+}
+
+// StopContainer 停止指定名称的独立容器。
+func (c *dsmClient) StopContainer(ctx context.Context, name string) error {
+	return c.call(ctx, "SYNO.Docker.Container", "1", "stop", map[string]string{
+		"name": jsonParam(name),
+	}, nil)
+}
+
+// DeleteContainer 删除指定名称的独立容器（不保留旧 profile，以便随后同名重建）。
+func (c *dsmClient) DeleteContainer(ctx context.Context, name string) error {
+	return c.call(ctx, "SYNO.Docker.Container", "1", "delete", map[string]string{
+		"name":             jsonParam(name),
+		"force":            "false",
+		"preserve_profile": "false",
+	}, nil)
+}
+
+// CreateContainer 根据 DSM profile 创建独立容器，并按 runInstantly 决定是否立即启动。
+func (c *dsmClient) CreateContainer(ctx context.Context, profile map[string]any, runInstantly bool) error {
+	return c.call(ctx, "SYNO.Docker.Container", "1", "create", map[string]string{
+		"is_run_instantly": strconv.FormatBool(runInstantly),
+		"profile":          jsonParam(profile),
+	}, nil)
+}
+
+// normalizeProfilePortBindings 将 profile["port_bindings"] 中 type=="tcp_udp" 的条目拆分为 tcp 与 udp 两条。
+func normalizeProfilePortBindings(profile map[string]any) {
+	if profile == nil {
+		return
+	}
+	raw, ok := profile["port_bindings"].([]any)
+	if !ok || len(raw) == 0 {
+		return
+	}
+	expanded := make([]any, 0, len(raw))
+	changed := false
+	for _, item := range raw {
+		m, ok := item.(map[string]any)
+		if !ok {
+			expanded = append(expanded, item)
+			continue
+		}
+		if strings.EqualFold(anyString(m["type"]), "tcp_udp") {
+			changed = true
+			tcpItem := cloneProfile(m)
+			tcpItem["type"] = "tcp"
+			udpItem := cloneProfile(m)
+			udpItem["type"] = "udp"
+			expanded = append(expanded, tcpItem, udpItem)
+		} else {
+			expanded = append(expanded, item)
+		}
+	}
+	if changed {
+		profile["port_bindings"] = expanded
+	}
+}
+
+// cloneProfile 深拷贝容器 profile 字典，避免修改新配置时污染失败回滚用的备份。
+func cloneProfile(src map[string]any) map[string]any {
+	if src == nil {
+		return nil
+	}
+	b, err := json.Marshal(src)
+	if err != nil {
+		out := make(map[string]any, len(src))
+		for k, v := range src {
+			out[k] = v
+		}
+		return out
+	}
+	var dst map[string]any
+	if err := json.Unmarshal(b, &dst); err != nil {
+		return nil
+	}
+	return dst
 }

@@ -31,6 +31,12 @@ export default function AppLayout() {
   const [pw, setPw] = useState('')
   const [loggingIn, setLoggingIn] = useState(false)
   const [inSetupStep2, setInSetupStep2] = useState(false)
+  const [skippedLocal, setSkippedLocal] = useState(
+    () => typeof window !== 'undefined' && localStorage.getItem('dkstore_skipped_local') === '1',
+  )
+  const [dismissedRemind, setDismissedRemind] = useState(
+    () => typeof window !== 'undefined' && localStorage.getItem('dkstore_dismiss_local_remind') === '1',
+  )
 
   const canSubscribeEvents =
     Boolean(auth.data) &&
@@ -38,6 +44,12 @@ export default function AppLayout() {
     auth.data?.mode !== 'host_login_required' &&
     (auth.data?.mode !== 'password' || auth.data.authenticated)
   useEvents(canSubscribeEvents)
+
+  const hostsQuery = useQuery({
+    queryKey: ['hosts', locale],
+    queryFn: api.listHosts,
+    enabled: canSubscribeEvents,
+  })
 
   // 任一业务请求返回 401（会话过期 / 需要初始化 / 设备登录态失效）时重新获取访问状态，切换到对应页面
   useEffect(() => {
@@ -135,6 +147,8 @@ export default function AppLayout() {
         onStepChange={setInSetupStep2}
         onDone={() => {
           setInSetupStep2(false)
+          setSkippedLocal(localStorage.getItem('dkstore_skipped_local') === '1')
+          setDismissedRemind(localStorage.getItem('dkstore_dismiss_local_remind') === '1')
           qc.invalidateQueries()
         }}
       />
@@ -174,6 +188,23 @@ export default function AppLayout() {
       </Flex>
     )
   }
+
+  const hostItems = hostsQuery.data?.items ?? []
+  const hasLocalInHosts =
+    Boolean(hostsQuery.data?.hasLocalHost) ||
+    hostItems.some((h) => {
+      if (h.transport === 'local') return true
+      const addr = (h.address || '').trim().toLowerCase()
+      if (addr === '127.0.0.1' || addr === 'localhost' || addr === '::1') return true
+      const url = (h.dsmUrl || '').trim().toLowerCase()
+      return url.includes('//127.0.0.1') || url.includes('//localhost') || url.includes('//[::1]')
+    })
+  const hasLocalHost = auth.data?.hasLocalHost !== false || hasLocalInHosts
+  const showLocalRemind =
+    Boolean(hostsQuery.data) &&
+    (auth.data?.installMode !== 'docker' || skippedLocal) &&
+    !hasLocalHost &&
+    !dismissedRemind
 
   return (
     <Layout style={{ minHeight: '100vh', background: 'transparent' }}>
@@ -228,6 +259,58 @@ export default function AppLayout() {
           padding: screens.md ? 32 : 16,
         }}
       >
+        {showLocalRemind && (
+          <Flex
+            align="center"
+            justify="space-between"
+            wrap
+            gap={12}
+            style={{
+              padding: '10px 16px',
+              marginBottom: 16,
+              borderRadius: 12,
+              background: token.colorBgContainer,
+              border: `1px solid ${token.colorBorderSecondary}`,
+            }}
+          >
+            <Flex align="center" gap={10} style={{ fontSize: 12 }}>
+              <span
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  background: token.colorPrimary,
+                  flexShrink: 0,
+                }}
+              />
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {t.auth.localRemindText}
+              </Typography.Text>
+            </Flex>
+            <Flex align="center" gap={4}>
+              <Button
+                type="text"
+                size="small"
+                style={{ fontSize: 12, fontWeight: 500, color: token.colorPrimary }}
+                onClick={() => navigate('/hosts?connectLocal=1')}
+              >
+                {t.auth.localRemindConnectBtn}
+              </Button>
+              <Button
+                type="text"
+                size="small"
+                title={t.auth.localRemindDismissTitle}
+                style={{ fontSize: 12, color: token.colorTextSecondary, paddingInline: 6 }}
+                onClick={() => {
+                  localStorage.setItem('dkstore_dismiss_local_remind', '1')
+                  setDismissedRemind(true)
+                }}
+              >
+                ✕
+              </Button>
+            </Flex>
+          </Flex>
+        )}
         <Outlet />
       </Layout.Content>
     </Layout>

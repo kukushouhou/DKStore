@@ -353,14 +353,208 @@ func TestProjectUpdateSuccess(t *testing.T) {
 	}
 }
 
-func TestStandaloneTagChangeRejected(t *testing.T) {
-	pulled := false
+func TestStandaloneTagChangeUpgradeSuccess(t *testing.T) {
+	oldTimeout, oldInterval, oldPoll := verifyTimeout, verifyInterval, taskPollInterval
+	verifyTimeout, verifyInterval, taskPollInterval = 200*time.Millisecond, 20*time.Millisecond, 10*time.Millisecond
+	defer func() { verifyTimeout, verifyInterval, taskPollInterval = oldTimeout, oldInterval, oldPoll }()
+
+	var (
+		mu             sync.Mutex
+		calls          []string
+		running        = true
+		deleted        = false
+		curImg         = "nginx:1.26"
+		curImageID     = "sha256:old"
+		createdProfile map[string]any
+		createdRun     string
+	)
 	f := &fakeDSM{handler: func(api, method string, form map[string]string, sid string) (any, int) {
+		mu.Lock()
+		defer mu.Unlock()
+		key := api + "." + method
+		calls = append(calls, key)
+		switch key {
+		case "SYNO.Docker.Container.list":
+			if deleted {
+				return map[string]any{"containers": []any{}}, 0
+			}
+			return map[string]any{"containers": []any{map[string]any{
+				"id": "c1", "name": "nginx", "Image": curImg, "ImageID": curImageID,
+				"status": "running",
+				"State":  map[string]any{"Running": running, "Status": "running"},
+			}}}, 0
+		case "SYNO.Docker.Container.get":
+			return map[string]any{
+				"profile": map[string]any{
+					"name":  "nginx",
+					"image": "nginx:1.26",
+					"port_bindings": []any{
+						map[string]any{"container_port": 80, "host_port": 8080, "type": "tcp_udp"},
+						map[string]any{"container_port": 443, "host_port": 8443, "type": "tcp"},
+					},
+				},
+				"details": map[string]any{
+					"State": map[string]any{"Running": true},
+				},
+			}, 0
+		case "SYNO.Docker.Image.pull_start":
+			if !running || deleted {
+				t.Errorf("old container must remain running during pull (running=%v, deleted=%v)", running, deleted)
+			}
+			return map[string]any{"task_id": "pull-1"}, 0
+		case "SYNO.Docker.Image.pull_status":
+			return map[string]any{"finished": true, "downloaded": 1.0}, 0
+		case "SYNO.Docker.Image.list":
+			return map[string]any{"images": []any{
+				map[string]any{"id": "sha256:new", "repository": "nginx", "tags": []string{"1.27"}},
+				map[string]any{"id": "sha256:old", "repository": "nginx", "tags": []string{"1.26"}},
+			}}, 0
+		case "SYNO.Docker.Container.stop":
+			running = false
+			return map[string]any{}, 0
+		case "SYNO.Docker.Container.delete":
+			if form["force"] != "false" || form["preserve_profile"] != "false" {
+				t.Errorf("unexpected delete params: %v", form)
+			}
+			deleted = true
+			return map[string]any{}, 0
+		case "SYNO.Docker.Container.create":
+			createdRun = form["is_run_instantly"]
+			_ = json.Unmarshal([]byte(form["profile"]), &createdProfile)
+			deleted = false
+			running = createdRun == "true"
+			curImg, _ = createdProfile["image"].(string)
+			curImageID = "sha256:new"
+			return map[string]any{}, 0
+		}
+		return map[string]any{}, 0
+	}}
+
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	ad := New("h1", nil, DSMConfig{URL: srv.URL, Username: "admin", Secret: "x"})
+	defer ad.Close()
+
+	res, err := ad.UpdateService(context.Background(), platform.UpdateRequest{
+		AppName: "nginx", ServiceName: "nginx", Source: platform.SourceStandalone,
+		OldImageRef: "nginx:1.26", TargetImageRef: "nginx:1.27",
+	}, nil)
+	if err != nil {
+		t.Fatalf("expected upgrade success, got %v", err)
+	}
+	if res.NewImageID != "sha256:new" || createdRun != "true" || curImg != "nginx:1.27" {
+		t.Fatalf("unexpected result=%+v createdRun=%q curImg=%q", res, createdRun, curImg)
+	}
+	// 验证 tcp_udp 端口绑定被拆分为 tcp + udp 两条，加上原有 443/tcp 共 3 条
+	pbs, _ := createdProfile["port_bindings"].([]any)
+	if len(pbs) != 3 {
+		t.Fatalf("expected 3 port_bindings after tcp_udp split, got %v", pbs)
+	}
+	wantSeq := []string{
+		"SYNO.Docker.Container.list",
+		"SYNO.Docker.Container.get",
+		"SYNO.Docker.Image.pull_start",
+		"SYNO.Docker.Image.pull_status",
+		"SYNO.Docker.Image.list",
+		"SYNO.Docker.Container.stop",
+		"SYNO.Docker.Container.delete",
+		"SYNO.Docker.Container.create",
+		"SYNO.Docker.Container.list",
+	}
+	if strings.Join(calls, ",") != strings.Join(wantSeq, ",") {
+		t.Fatalf("unexpected call order:\ngot:  %v\nwant: %v", calls, wantSeq)
+	}
+}
+
+func TestStandaloneTagChangeCreateFailsRestoresBackup(t *testing.T) {
+	oldTimeout, oldInterval, oldPoll := verifyTimeout, verifyInterval, taskPollInterval
+	verifyTimeout, verifyInterval, taskPollInterval = 200*time.Millisecond, 20*time.Millisecond, 10*time.Millisecond
+	defer func() { verifyTimeout, verifyInterval, taskPollInterval = oldTimeout, oldInterval, oldPoll }()
+
+	var (
+		mu             sync.Mutex
+		createdImages  []string
+		restoredRunArg string
+	)
+	f := &fakeDSM{handler: func(api, method string, form map[string]string, sid string) (any, int) {
+		mu.Lock()
+		defer mu.Unlock()
 		switch api + "." + method {
 		case "SYNO.Docker.Container.list":
-			return map[string]any{"containers": []any{map[string]any{"id": "c1", "name": "nginx", "Image": "nginx:1.26", "ImageID": "sha256:old"}}}, 0
+			return map[string]any{"containers": []any{map[string]any{
+				"id": "c1", "name": "nginx", "Image": "nginx:1.26", "ImageID": "sha256:old",
+				"State": map[string]any{"Running": true, "Status": "running"},
+			}}}, 0
+		case "SYNO.Docker.Container.get":
+			return map[string]any{
+				"profile": map[string]any{"name": "nginx", "image": "nginx:1.26"},
+				"details": map[string]any{"State": map[string]any{"Running": true}},
+			}, 0
+		case "SYNO.Docker.Image.pull_start":
+			return map[string]any{}, 0
+		case "SYNO.Docker.Image.list":
+			return map[string]any{"images": []any{map[string]any{"id": "sha256:new", "repository": "nginx", "tags": []string{"1.27"}}}}, 0
+		case "SYNO.Docker.Container.stop", "SYNO.Docker.Container.delete":
+			return map[string]any{}, 0
+		case "SYNO.Docker.Container.create":
+			var prof map[string]any
+			_ = json.Unmarshal([]byte(form["profile"]), &prof)
+			img, _ := prof["image"].(string)
+			createdImages = append(createdImages, img)
+			if img == "nginx:1.27" {
+				return nil, 1300 // 模拟新配置创建失败
+			}
+			restoredRunArg = form["is_run_instantly"]
+			return map[string]any{}, 0
+		}
+		return map[string]any{}, 0
+	}}
+
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	ad := New("h1", nil, DSMConfig{URL: srv.URL, Username: "admin", Secret: "x"})
+	defer ad.Close()
+
+	_, err := ad.UpdateService(context.Background(), platform.UpdateRequest{
+		AppName: "nginx", ServiceName: "nginx", Source: platform.SourceStandalone,
+		OldImageRef: "nginx:1.26", TargetImageRef: "nginx:1.27",
+	}, nil)
+	var ue *platform.UpdateError
+	if !errors.As(err, &ue) || ue.Code != "recreate_failed" {
+		t.Fatalf("expected recreate_failed, got %v", err)
+	}
+	if len(createdImages) != 2 || createdImages[0] != "nginx:1.27" || createdImages[1] != "nginx:1.26" || restoredRunArg != "true" {
+		t.Fatalf("expected backup profile restore with nginx:1.26 (run=true), got images=%v run=%q", createdImages, restoredRunArg)
+	}
+}
+
+func TestCLIComposeContainerRejectedAndClassified(t *testing.T) {
+	pulled := false
+	stopped := false
+	f := &fakeDSM{handler: func(api, method string, form map[string]string, sid string) (any, int) {
+		switch api + "." + method {
+		case "SYNO.Docker.Project.list":
+			return map[string]any{}, 0
+		case "SYNO.Docker.Container.list":
+			return map[string]any{"containers": []any{
+				map[string]any{
+					"id":      "c1",
+					"name":    "mycli-web-1",
+					"Image":   "nginx:1.26",
+					"ImageID": "sha256:old",
+					"status":  "running",
+					"Labels": map[string]string{
+						"com.docker.compose.project": "mycli",
+						"com.docker.compose.service": "web",
+					},
+				},
+			}}, 0
+		case "SYNO.Docker.Image.list":
+			return map[string]any{"images": []any{}}, 0
 		case "SYNO.Docker.Image.pull_start":
 			pulled = true
+		case "SYNO.Docker.Container.stop":
+			stopped = true
 		}
 		return map[string]any{}, 0
 	}}
@@ -368,16 +562,64 @@ func TestStandaloneTagChangeRejected(t *testing.T) {
 	defer srv.Close()
 	ad := New("h1", nil, DSMConfig{URL: srv.URL, Username: "admin", Secret: "x"})
 	defer ad.Close()
-	_, err := ad.UpdateService(context.Background(), platform.UpdateRequest{
-		AppName: "nginx", ServiceName: "nginx", Source: platform.SourceStandalone,
-		OldImageRef: "nginx:1.26", TargetImageRef: "nginx:1.27",
+
+	// 1) ListApps 应将未登记在 DSM Project 中但带有 com.docker.compose.project 标签的容器归类为 SourceCompose
+	apps, err := ad.ListApps(context.Background())
+	if err != nil {
+		t.Fatalf("ListApps failed: %v", err)
+	}
+	if len(apps) != 1 || apps[0].Source != platform.SourceCompose || apps[0].Name != "mycli" {
+		t.Fatalf("expected CLI compose app classified as SourceCompose, got %+v", apps)
+	}
+	if apps[0].Project == nil || apps[0].Project.DSMProjectID != "" {
+		t.Fatalf("expected empty DSMProjectID for CLI compose app, got %+v", apps[0].Project)
+	}
+
+	// 2) UpdateService 跨版本更新该命令行容器时应直接返回 dsm_cli_compose_unsupported 通俗提示，且不拉取、不停容器
+	_, err = ad.UpdateService(context.Background(), platform.UpdateRequest{
+		AppName: "mycli", ServiceName: "web", Source: platform.SourceCompose,
+		Project: apps[0].Project, OldImageRef: "nginx:1.26", TargetImageRef: "nginx:1.27",
 	}, nil)
 	var ue *platform.UpdateError
-	if !errors.As(err, &ue) || ue.Code != "dsm_tag_change_unsupported" {
-		t.Fatalf("expected dsm_tag_change_unsupported, got %v", err)
+	if !errors.As(err, &ue) || ue.Code != "dsm_cli_compose_unsupported" {
+		t.Fatalf("expected dsm_cli_compose_unsupported, got %v", err)
 	}
-	if pulled {
-		t.Fatal("must not pull image when tag change is unsupported")
+	if !strings.Contains(ue.Message, "SSH") {
+		t.Fatalf("expected SSH hint in error message, got %q", ue.Message)
+	}
+	if pulled || stopped {
+		t.Fatalf("must not pull or stop CLI compose container (pulled=%v, stopped=%v)", pulled, stopped)
+	}
+
+	// 3) 即使调用方传了 SourceStandalone 且列表未带标签，只要 GetContainerProfile 读出 com.docker.compose.project 标签也应拦截
+	f2 := &fakeDSM{handler: func(api, method string, form map[string]string, sid string) (any, int) {
+		switch api + "." + method {
+		case "SYNO.Docker.Container.list":
+			return map[string]any{"containers": []any{map[string]any{"id": "c2", "name": "cli-only", "Image": "nginx:1.26", "ImageID": "sha256:old"}}}, 0
+		case "SYNO.Docker.Container.get":
+			return map[string]any{
+				"profile": map[string]any{
+					"name":   "cli-only",
+					"image":  "nginx:1.26",
+					"labels": map[string]any{"com.docker.compose.project": "cli-proj"},
+				},
+				"details": map[string]any{"State": map[string]any{"Running": true}},
+			}, 0
+		case "SYNO.Docker.Image.pull_start":
+			pulled = true
+		}
+		return map[string]any{}, 0
+	}}
+	srv2 := httptest.NewServer(f2)
+	defer srv2.Close()
+	ad2 := New("h2", nil, DSMConfig{URL: srv2.URL, Username: "admin", Secret: "x"})
+	defer ad2.Close()
+	_, err = ad2.UpdateService(context.Background(), platform.UpdateRequest{
+		AppName: "cli-only", ServiceName: "cli-only", Source: platform.SourceStandalone,
+		OldImageRef: "nginx:1.26", TargetImageRef: "nginx:1.27",
+	}, nil)
+	if !errors.As(err, &ue) || ue.Code != "dsm_cli_compose_unsupported" || pulled {
+		t.Fatalf("expected profile compose label rejected without pull, err=%v pulled=%v", err, pulled)
 	}
 }
 

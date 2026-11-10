@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Alert,
   Badge,
@@ -38,6 +38,7 @@ import {
   SyncOutlined,
   WarningOutlined,
 } from '@ant-design/icons'
+import { useSearchParams } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError, type HostInput, type HostItem, type HostTestResult } from '../api/client'
 import { useI18n } from '../i18n'
@@ -76,6 +77,7 @@ export default function HostsPage() {
   const { locale, t } = useI18n()
   const { token } = theme.useToken()
   const qc = useQueryClient()
+  const [searchParams, setSearchParams] = useSearchParams()
   const hostsQuery = useQuery({ queryKey: ['hosts', locale], queryFn: api.listHosts })
 
   const [modalOpen, setModalOpen] = useState(false)
@@ -134,6 +136,31 @@ export default function HostsPage() {
     })
     setModalOpen(true)
   }
+
+  useEffect(() => {
+    if (searchParams.get('connectLocal') === '1') {
+      setEditing(null)
+      setTestResult(null)
+      setGeneratedPubKey('')
+      setOtpModalOpen(false)
+      setOtpCode('')
+      form.resetFields()
+      setPlatformId('synology')
+      form.setFieldsValue({
+        name: t.auth.spkDefaultName,
+        kind: 'synology',
+        transport: 'dsm_api',
+        dsmUrl: 'http://127.0.0.1:5000',
+        address: '127.0.0.1',
+        port: 22,
+        sshAuth: 'password',
+      })
+      setModalOpen(true)
+      const next = new URLSearchParams(searchParams)
+      next.delete('connectLocal')
+      setSearchParams(next, { replace: true })
+    }
+  }, [form, searchParams, setSearchParams, t.auth.spkDefaultName])
 
   const openEdit = (h: HostItem) => {
     setEditing(h)
@@ -225,6 +252,7 @@ export default function HostsPage() {
       setOtpCode('')
       message.success(t.hosts.saved)
       setModalOpen(false)
+      qc.invalidateQueries({ queryKey: ['authStatus'] })
       qc.invalidateQueries({ queryKey: ['hosts'] })
       qc.invalidateQueries({ queryKey: ['overview'] })
       qc.invalidateQueries({ queryKey: ['containers'] })
@@ -507,21 +535,51 @@ export default function HostsPage() {
               <Input />
             </Form.Item>
 
-            {/* 2. 连接方式切换（当平台支持多种连接方式时显示 Segmented） */}
+            {/* 2. 连接方式切换（当平台支持多种连接方式时显示 Segmented + 对称优缺点提示卡片） */}
             {currentSpec.transports.length > 1 && (
               <Form.Item label={t.hosts.connMethodLabel} style={{ marginBottom: 16 }}>
-                <Segmented
-                  block
-                  value={transportVal || currentSpec.defaultTransport}
-                  onChange={(v) => {
-                    setTestResult(null)
-                    form.setFieldsValue({ transport: v as HostInput['transport'] })
-                  }}
-                  options={currentSpec.transports.map((tr) => ({
-                    label: tr === 'dsm_api' ? t.hosts.connDsmApi : t.hosts.connSsh,
-                    value: tr,
-                  }))}
-                />
+                <div>
+                  <Segmented
+                    block
+                    value={transportVal || currentSpec.defaultTransport}
+                    onChange={(v) => {
+                      setTestResult(null)
+                      form.setFieldsValue({ transport: v as HostInput['transport'] })
+                    }}
+                    options={currentSpec.transports.map((tr) => ({
+                      label: tr === 'dsm_api' ? t.hosts.connDsmApi : t.hosts.connSsh,
+                      value: tr,
+                    }))}
+                  />
+                  <div
+                    style={{
+                      marginTop: 10,
+                      padding: '10px 12px',
+                      borderRadius: 12,
+                      background: token.colorFillAlter,
+                      border: `1px solid ${token.colorBorderSecondary}`,
+                      fontSize: 12,
+                      lineHeight: 1.65,
+                    }}
+                  >
+                    <div style={{ marginBottom: 4 }}>
+                      <span style={{ fontWeight: 600, color: token.colorSuccess }}>{t.hosts.connProsLabel}</span>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        {(transportVal || currentSpec.defaultTransport) === 'dsm_api'
+                          ? t.hosts.connDsmPros
+                          : t.hosts.connSshPros}
+                      </Typography.Text>
+                    </div>
+                    <div>
+                      <span style={{ fontWeight: 600, color: token.colorWarning }}>{t.hosts.connLimitLabel}</span>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        {(transportVal || currentSpec.defaultTransport) === 'dsm_api'
+                          ? t.hosts.connDsmLimit
+                          : t.hosts.connSshLimit}
+                      </Typography.Text>
+                    </div>
+                  </div>
+                </div>
               </Form.Item>
             )}
 

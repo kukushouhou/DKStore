@@ -395,7 +395,9 @@ func FormatUpdateError(lang Lang, code, detail string) string {
 		case "capability_unsupported":
 			return "The target platform does not support safe single-service updates without affecting other services."
 		case "dsm_tag_change_unsupported":
-			return "Pure Synology DSM WebAPI mode only supports in-place updates for the current tag; changing version tags requires SSH or Docker Engine API access."
+			return "The DSM admin connection cannot switch versions for this container directly; please switch to an SSH connection to update it."
+		case "dsm_cli_compose_unsupported":
+			return "This container was installed via terminal commands. The DSM admin connection cannot modify its command-line config file; please switch to an SSH connection to update it."
 		case "interrupted":
 			if detail != "" {
 				return detail
@@ -422,7 +424,9 @@ func FormatUpdateError(lang Lang, code, detail string) string {
 	case "capability_unsupported":
 		return "目标平台当前不支持安全地仅更新单个服务，已阻止整项目重建以避免误升级数据库。"
 	case "dsm_tag_change_unsupported":
-		return "纯群晖 DSM WebAPI 模式仅支持同标签原位更新，跨版本标签升级请配置 SSH 或 Docker API 连接。"
+		return "当前管理后台连接不支持直接为该容器切换版本，请改用 SSH 连接更新。"
+	case "dsm_cli_compose_unsupported":
+		return "该容器是在终端里用命令安装的，管理后台连接无法修改其命令行配置文件，请改用 SSH 连接更新。"
 	case "interrupted":
 		if detail != "" {
 			return detail

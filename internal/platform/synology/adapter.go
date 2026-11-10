@@ -174,8 +174,6 @@ func (a *Adapter) UpdateService(
 	repo, tag := splitDSMRepoTag(req.TargetImageRef)
 	isProject := req.Project != nil && req.Project.DSMProjectID != ""
 
-	// 独立容器：DSM WebAPI 的 upgrade_start 只能把容器升级到同一 repo:tag 的新摘要，
-	// 无法切换标签（版本更新/回退），必须在拉取前拒绝，避免“报成功但实际没切换”。
 	var standalone *dsmContainerListItem
 	if !isProject {
 		containers, err := a.dsmCli.ListContainers(ctx)
@@ -188,20 +186,21 @@ func (a *Adapter) UpdateService(
 			oldRef = containerImageRef(*standalone)
 		}
 		oldRepo, oldTag := splitDSMRepoTag(oldRef)
-		if oldRef == "" || normalizeRepo(oldRepo) != normalizeRepo(repo) || oldTag != tag {
-			return nil, &platform.UpdateError{
-				Code: "dsm_tag_change_unsupported",
-				Message: bi(
-					fmt.Sprintf("该容器需通过 Compose 项目或 SSH 模式更新（群晖网页接口仅支持同标签新摘要升级，无法从 %s 切换到 %s）", oldRef, req.TargetImageRef),
-					fmt.Sprintf("This container must be updated via a Compose project or SSH mode (DSM WebAPI only supports same-tag new-digest upgrades and cannot switch from %s to %s)", oldRef, req.TargetImageRef),
-				),
-			}
+		sameRepoTag := oldRef != "" && normalizeRepo(oldRepo) == normalizeRepo(repo) && oldTag == tag
+
+		isCLICompose := req.Source == platform.SourceCompose ||
+			(standalone != nil && strings.TrimSpace(standalone.Labels["com.docker.compose.project"]) != "")
+		if isCLICompose && !sameRepoTag {
+			return nil, dsmCLIComposeUnsupportedErr()
 		}
 		if standalone == nil {
 			return nil, &platform.UpdateError{
 				Code:    "recreate_failed",
 				Message: bi("未在群晖容器列表中找到目标容器 "+req.AppName, "Target container not found in DSM container list: "+req.AppName),
 			}
+		}
+		if !sameRepoTag {
+			return a.recreateStandalone(ctx, req, repo, tag, standalone, onProgress, emit)
 		}
 	}
 
@@ -409,6 +408,196 @@ func (a *Adapter) upgradeStandalone(ctx context.Context, req platform.UpdateRequ
 	}, nil
 }
 
+func dsmCLIComposeUnsupportedErr() *platform.UpdateError {
+	return &platform.UpdateError{
+		Code: "dsm_cli_compose_unsupported",
+		Message: bi(
+			"该容器是在终端里用命令安装的，管理后台连接无法修改其命令行配置文件，请改用 SSH 连接更新",
+			"This container was installed via terminal commands; the DSM admin connection cannot modify its command-line config file, please switch to an SSH connection to update it",
+		),
+	}
+}
+
+// recreateStandalone 跨版本号升级或回退普通独立单容器：
+// 先读取原 profile 再拉取新镜像（拉取失败不影响运行中的旧容器），随后停止、删除并用新镜像重建，失败时自动用备份 profile 恢复原容器。
+func (a *Adapter) recreateStandalone(
+	ctx context.Context,
+	req platform.UpdateRequest,
+	repo, tag string,
+	before *dsmContainerListItem,
+	onProgress func(platform.PullProgress),
+	emit func(platform.PullProgress),
+) (*platform.UpdateResult, error) {
+	cName := strings.TrimSpace(req.ServiceName)
+	if cName == "" || cName == "main" {
+		if before != nil {
+			cName = strings.TrimPrefix(before.Name, "/")
+		}
+		if cName == "" {
+			cName = strings.TrimSpace(req.AppName)
+		}
+	}
+
+	origProfile, wasRunning, err := a.dsmCli.GetContainerProfile(ctx, cName)
+	if err != nil {
+		return nil, &platform.UpdateError{Code: "recreate_failed", Message: biErr(err)}
+	}
+	if strings.TrimSpace(profileLabelValue(origProfile, "com.docker.compose.project")) != "" {
+		return nil, dsmCLIComposeUnsupportedErr()
+	}
+	backupProfile := cloneProfile(origProfile)
+
+	oldImageID := ""
+	if before != nil {
+		oldImageID = before.ImageID
+	}
+	if oldImageID == "" {
+		oldImageID = req.ExpectedImageID
+	}
+
+	if err := a.dsmCli.PullImage(ctx, repo, tag, onProgress); err != nil {
+		return nil, &platform.UpdateError{
+			Code:    "pull_failed",
+			Message: fmt.Sprintf("%s:%s — %s", repo, tag, biErr(err)),
+		}
+	}
+	expectedID := ""
+	if imgs, err := a.dsmCli.ListImages(ctx); err == nil {
+		expectedID = findImageID(imgs, repo, tag)
+	}
+
+	newProfile := cloneProfile(origProfile)
+	newProfile["image"] = req.TargetImageRef
+
+	emit(platform.PullProgress{Phase: "recreating", StatusText: "Recreating standalone container via DSM WebAPI", Percent: 85})
+	if wasRunning {
+		if err := a.dsmCli.StopContainer(ctx, cName); err != nil {
+			return nil, &platform.UpdateError{Code: "recreate_failed", Message: biErr(err)}
+		}
+	}
+	if err := a.dsmCli.DeleteContainer(ctx, cName); err != nil {
+		return nil, &platform.UpdateError{Code: "recreate_failed", Message: biErr(err)}
+	}
+	if err := a.dsmCli.CreateContainer(ctx, newProfile, wasRunning); err != nil {
+		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dsmDefaultTimeout)
+		defer cancel()
+		restoreNote := ""
+		if rErr := a.dsmCli.CreateContainer(restoreCtx, backupProfile, wasRunning); rErr != nil {
+			restoreNote = " | " + bi(
+				"恢复原容器失败，请在 Container Manager 中手动检查："+i18n.LocalizeErr(i18n.ZhCN, rErr),
+				"failed to restore original container, please check in Container Manager: "+i18n.LocalizeErr(i18n.EnUS, rErr),
+			)
+		} else {
+			restoreNote = " | " + bi("已自动恢复原容器", "original container restored")
+		}
+		return nil, &platform.UpdateError{
+			Code:    "recreate_failed",
+			Message: biErr(err) + restoreNote,
+		}
+	}
+
+	emit(platform.PullProgress{Phase: "verifying", StatusText: "Verifying container image via DSM WebAPI", Percent: 95})
+	var (
+		found      *dsmContainerListItem
+		lastReason string
+	)
+	deadline := time.Now().Add(verifyTimeout)
+	for {
+		containers, err := a.dsmCli.ListContainers(ctx)
+		if err != nil {
+			lastReason = biErr(err)
+		} else if c := findStandaloneContainer(containers, req); c == nil {
+			lastReason = bi("重建后未找到容器 "+cName, "Container not found after recreate: "+cName)
+		} else if !imageSwitched(c.ImageID, expectedID, oldImageID) {
+			lastReason = bi(
+				fmt.Sprintf("容器镜像 ID 未切换为新镜像（当前 %s，原 %s，期望 %s）", shortID(c.ImageID), shortID(oldImageID), shortID(expectedID)),
+				fmt.Sprintf("container image ID did not switch to the new image (current %s, old %s, expected %s)", shortID(c.ImageID), shortID(oldImageID), shortID(expectedID)),
+			)
+		} else if !standaloneStateMatches(*c, wasRunning) {
+			lastReason = bi("重建后容器运行状态未达到预期", "container running state does not match expected state after recreate")
+		} else if strings.EqualFold(c.State.Health.Status, "unhealthy") {
+			found = nil
+			lastReason = bi("容器健康检查未通过（unhealthy）", "container health check failed (unhealthy)")
+			break
+		} else if strings.EqualFold(c.State.Health.Status, "starting") {
+			cc := *c
+			found = &cc
+		} else {
+			cc := *c
+			found = &cc
+			break
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(verifyInterval):
+		}
+	}
+	if found == nil {
+		return nil, &platform.UpdateError{Code: "verify_failed", Message: lastReason}
+	}
+
+	state := found.State.Status
+	if state == "" {
+		state = found.Status
+	}
+	if state == "" {
+		if wasRunning || found.State.Running {
+			state = "running"
+		} else {
+			state = "stopped"
+		}
+	}
+	health := found.State.Health.Status
+	if health == "" {
+		health = "none"
+	}
+	emit(platform.PullProgress{Phase: "done", StatusText: "Update completed", Percent: 100})
+	return &platform.UpdateResult{
+		NewImageID:     found.ImageID,
+		NewContainerID: found.ID,
+		ContainerState: state,
+		HealthStatus:   health,
+		Logs:           []string{"Recreated via Synology DSM WebAPI SYNO.Docker.Container"},
+	}, nil
+}
+
+func standaloneStateMatches(c dsmContainerListItem, wantRunning bool) bool {
+	st := strings.ToLower(strings.TrimSpace(c.State.Status))
+	if st == "" {
+		st = strings.ToLower(strings.TrimSpace(c.Status))
+	}
+	if wantRunning {
+		if c.State.Running || st == "running" || strings.HasPrefix(st, "up") {
+			return true
+		}
+		// 若列表项未填充任何状态字段（仅含 id/name/ImageID），视为不阻塞
+		return st == ""
+	}
+	return !c.State.Running && st != "running"
+}
+
+func profileLabelValue(profile map[string]any, key string) string {
+	if profile == nil {
+		return ""
+	}
+	switch labels := profile["labels"].(type) {
+	case map[string]any:
+		return anyString(labels[key])
+	case map[string]string:
+		return strings.TrimSpace(labels[key])
+	case []any:
+		for _, item := range labels {
+			if m, ok := item.(map[string]any); ok && anyString(m["key"]) == key {
+				return anyString(m["value"])
+			}
+		}
+	}
+	return ""
+}
+
 // findProjectServiceContainer 在 Project 详情中查找目标服务的容器（仅一个容器时直接取用）。
 func findProjectServiceContainer(detail *dsmProjectDetail, service string) *dsmContainerDetailed {
 	if detail == nil {
@@ -425,7 +614,7 @@ func findProjectServiceContainer(detail *dsmProjectDetail, service string) *dsmC
 	return nil
 }
 
-// findStandaloneContainer 按容器名（AppName / ServiceName）查找独立容器。
+// findStandaloneContainer 按容器名（AppName / ServiceName）或命令行 Compose 标签查找非 DSM Project 容器。
 func findStandaloneContainer(list []dsmContainerListItem, req platform.UpdateRequest) *dsmContainerListItem {
 	for _, want := range []string{req.AppName, req.ServiceName} {
 		if want == "" {
@@ -433,6 +622,14 @@ func findStandaloneContainer(list []dsmContainerListItem, req platform.UpdateReq
 		}
 		for i := range list {
 			if strings.TrimPrefix(list[i].Name, "/") == want {
+				return &list[i]
+			}
+		}
+	}
+	if req.AppName != "" && req.ServiceName != "" {
+		for i := range list {
+			if strings.EqualFold(list[i].Labels["com.docker.compose.project"], req.AppName) &&
+				list[i].Labels["com.docker.compose.service"] == req.ServiceName {
 				return &list[i]
 			}
 		}
@@ -737,13 +934,34 @@ func (a *Adapter) listAppsViaDSMAPI(ctx context.Context) ([]platform.App, error)
 		})
 	}
 
-	// 将不属于任何 DSM Project 的独立容器归纳为 standalone（或 vendor_managed）应用
+	// 将不属于任何 DSM Project 的容器归纳为 CLI Compose 项目（SourceCompose）、套件托管（vendor_managed）或普通独立容器（standalone）
+	cliComposeApps := make(map[string]*platform.App)
+	var cliComposeOrder []string
 	for _, c := range containers {
 		if claimedContainers[c.ID] {
 			continue
 		}
-		if projName := c.Labels["com.docker.compose.project"]; projName != "" {
-			// 已在 Project 列表中处理过的同名项目跳过
+		name := strings.TrimPrefix(c.Name, "/")
+		if name == "" {
+			name = c.ID
+		}
+		imgRef := c.Image
+		if imgRef == "" {
+			imgRef = c.ImageAlt
+		}
+		var digests []string
+		if d := digestByRepoTag[imgRef]; d != "" {
+			digests = []string{imgRef + "@" + d}
+		}
+		state := c.State.Status
+		if state == "" {
+			state = c.Status
+		}
+		workDir := strings.TrimSpace(c.Labels["com.docker.compose.project.working_dir"])
+		isPkg := c.IsPackage || strings.HasPrefix(workDir, "/var/packages/")
+
+		if projName := strings.TrimSpace(c.Labels["com.docker.compose.project"]); projName != "" {
+			// 已在 DSM Project 列表中处理过的同名项目跳过
 			already := false
 			for _, a := range apps {
 				if strings.EqualFold(a.Name, projName) {
@@ -754,28 +972,69 @@ func (a *Adapter) listAppsViaDSMAPI(ctx context.Context) ([]platform.App, error)
 			if already {
 				continue
 			}
+			appKey := fmt.Sprintf("%s/compose/%s", a.hostID, projName)
+			app, exists := cliComposeApps[appKey]
+			if !exists {
+				src := platform.SourceCompose
+				if isPkg {
+					src = platform.SourceVendorManaged
+				}
+				var cfgFiles []string
+				for _, p := range strings.Split(c.Labels["com.docker.compose.project.config_files"], ",") {
+					if p = strings.TrimSpace(p); p != "" {
+						cfgFiles = append(cfgFiles, p)
+					}
+				}
+				app = &platform.App{
+					Key:    appKey,
+					Name:   projName,
+					Source: src,
+					Project: &platform.ProjectInfo{
+						Name:           projName,
+						WorkingDir:     workDir,
+						ConfigFiles:    cfgFiles,
+						SourceReadable: false,
+					},
+				}
+				cliComposeApps[appKey] = app
+				cliComposeOrder = append(cliComposeOrder, appKey)
+			}
+			svcName := strings.TrimSpace(c.Labels["com.docker.compose.service"])
+			if svcName == "" {
+				svcName = name
+			}
+			svcKey := fmt.Sprintf("%s/%s", appKey, svcName)
+			merged := false
+			for i := range app.Services {
+				if app.Services[i].Key == svcKey {
+					app.Services[i].ContainerIDs = append(app.Services[i].ContainerIDs, c.ID)
+					if state == "running" {
+						app.Services[i].State = "running"
+					}
+					merged = true
+					break
+				}
+			}
+			if !merged {
+				app.Services = append(app.Services, platform.Service{
+					Key:          svcKey,
+					Name:         svcName,
+					ContainerIDs: []string{c.ID},
+					State:        state,
+					ImageRef:     imgRef,
+					ImageID:      c.ImageID,
+					RepoDigests:  digests,
+					Labels:       c.Labels,
+				})
+			}
+			continue
 		}
-		name := strings.TrimPrefix(c.Name, "/")
-		if name == "" {
-			name = c.ID
-		}
-		imgRef := c.Image
-		if imgRef == "" {
-			imgRef = c.ImageAlt
-		}
+
 		src := platform.SourceStandalone
-		if c.IsPackage || strings.HasPrefix(c.Labels["com.docker.compose.project.working_dir"], "/var/packages/") {
+		if isPkg {
 			src = platform.SourceVendorManaged
 		}
 		appKey := fmt.Sprintf("%s/container/%s", a.hostID, name)
-		var digests []string
-		if d := digestByRepoTag[imgRef]; d != "" {
-			digests = []string{imgRef + "@" + d}
-		}
-		state := c.State.Status
-		if state == "" {
-			state = c.Status
-		}
 		apps = append(apps, platform.App{
 			Key:    appKey,
 			Name:   name,
@@ -793,6 +1052,13 @@ func (a *Adapter) listAppsViaDSMAPI(ctx context.Context) ([]platform.App, error)
 				},
 			},
 		})
+	}
+	for _, k := range cliComposeOrder {
+		app := cliComposeApps[k]
+		sort.Slice(app.Services, func(i, j int) bool {
+			return app.Services[i].Name < app.Services[j].Name
+		})
+		apps = append(apps, *app)
 	}
 
 	return apps, nil

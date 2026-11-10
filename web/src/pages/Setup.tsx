@@ -73,6 +73,9 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
   // 步骤 2（Docker 安装模式：开启步骤指南弹窗状态）
   const [dockerGuideOpen, setDockerGuideOpen] = useState(false)
 
+  // 点击“跳过”二次确认弹窗状态
+  const [skipConfirmOpen, setSkipConfirmOpen] = useState(false)
+
   const tooShort = pw.length > 0 && [...pw].length < MIN_PW
   const mismatch = pw2.length > 0 && pw !== pw2
 
@@ -137,6 +140,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
     setConnecting(true)
     try {
       await api.createHost(payload)
+      localStorage.removeItem('dkstore_skipped_local')
       setOtpModalOpen(false)
       setOtpCode('')
       message.success(t.hosts.saved)
@@ -158,10 +162,34 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
     }
   }
 
-  const finishAndSkip = () => {
+  const confirmAndSkip = () => {
+    localStorage.setItem('dkstore_skipped_local', '1')
+    localStorage.removeItem('dkstore_dismiss_local_remind')
+    setSkipConfirmOpen(false)
     onStepChange?.(false)
     onDone()
   }
+
+  const skipConfirmModal = (
+    <Modal
+      open={skipConfirmOpen}
+      title={t.auth.skipConfirmTitle}
+      width={384}
+      onCancel={() => setSkipConfirmOpen(false)}
+      footer={
+        <Flex justify="flex-end" gap={8}>
+          <Button onClick={() => setSkipConfirmOpen(false)}>{t.auth.skipConfirmBack}</Button>
+          <Button type="primary" onClick={confirmAndSkip}>
+            {t.auth.skipConfirmOk}
+          </Button>
+        </Flex>
+      }
+    >
+      <Typography.Text type="secondary" style={{ fontSize: 13, lineHeight: 1.65 }}>
+        {t.auth.skipConfirmDesc}
+      </Typography.Text>
+    </Modal>
+  )
 
   // 步骤 2
   if (step === 2) {
@@ -346,12 +374,14 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
               <Divider style={{ margin: 0 }} />
 
               <Flex justify="flex-end">
-                <Button type="primary" onClick={finishAndSkip}>
+                <Button type="primary" onClick={() => setSkipConfirmOpen(true)}>
                   {t.auth.dockerSkipBtn}
                 </Button>
               </Flex>
             </Space>
           </Card>
+
+          {skipConfirmModal}
 
           {/* Docker 开启本机容器访问权限弹窗 */}
           <Modal
@@ -493,16 +523,42 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
               />
             </Flex>
 
-            {/* 连接方式切换 */}
-            <Segmented
-              block
-              value={spkMode}
-              onChange={(v) => setSpkMode(v as 'dsm_api' | 'ssh')}
-              options={[
-                { label: t.auth.spkModeWeb, value: 'dsm_api' },
-                { label: t.auth.spkModeSsh, value: 'ssh' },
-              ]}
-            />
+            {/* 连接方式切换 + 对称优缺点提示卡片 */}
+            <div>
+              <Segmented
+                block
+                value={spkMode}
+                onChange={(v) => setSpkMode(v as 'dsm_api' | 'ssh')}
+                options={[
+                  { label: t.auth.spkModeWeb, value: 'dsm_api' },
+                  { label: t.auth.spkModeSsh, value: 'ssh' },
+                ]}
+              />
+              <div
+                style={{
+                  marginTop: 10,
+                  padding: '10px 12px',
+                  borderRadius: 12,
+                  background: token.colorFillAlter,
+                  border: `1px solid ${token.colorBorderSecondary}`,
+                  fontSize: 12,
+                  lineHeight: 1.65,
+                }}
+              >
+                <div style={{ marginBottom: 4 }}>
+                  <span style={{ fontWeight: 600, color: token.colorSuccess }}>{t.hosts.connProsLabel}</span>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {spkMode === 'dsm_api' ? t.hosts.connDsmPros : t.hosts.connSshPros}
+                  </Typography.Text>
+                </div>
+                <div>
+                  <span style={{ fontWeight: 600, color: token.colorWarning }}>{t.hosts.connLimitLabel}</span>
+                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    {spkMode === 'dsm_api' ? t.hosts.connDsmLimit : t.hosts.connSshLimit}
+                  </Typography.Text>
+                </div>
+              </div>
+            </div>
 
             {/* 紧凑表单（不展示任何 2FA 字段） */}
             {spkMode === 'dsm_api' ? (
@@ -621,7 +677,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
                 {t.auth.spkWhyLink}
               </Button>
               <Space size={8}>
-                <Button onClick={finishAndSkip}>{t.auth.spkSkipBtn}</Button>
+                <Button onClick={() => setSkipConfirmOpen(true)}>{t.auth.spkSkipBtn}</Button>
                 <Button
                   type="primary"
                   loading={connecting}
@@ -633,6 +689,8 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
             </Flex>
           </Space>
         </Card>
+
+        {skipConfirmModal}
 
         {/* 为什么需要授权一次本机账号？ */}
         <Modal
