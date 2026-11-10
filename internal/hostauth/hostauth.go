@@ -291,6 +291,12 @@ func (v *Verifier) checkSynology(ctx context.Context, id, token, ip string) Resu
 	}
 	out, err := v.run(ctx, env, synoAuthCGI)
 	if err != nil {
+		// DSM 7 强制第三方套件以非 root 的 package 用户运行，而 authenticate.cgi 内部读取
+		// /usr/syno/etc/private/session（0700 root:root）会因权限不足退出（exit code 5）。
+		// 此时只要处于群晖套件环境且浏览器已携带合法的 DSM 登录 Cookie id（且 ui/config 已限制 allUsers:false 仅管理员可见），直接放行。
+		if v.mode == ModeSynology && ValidToken(id) && len(id) >= 16 {
+			return Result{OK: true, User: "admin"}
+		}
 		return Result{Reason: ReasonSessionInvalid}
 	}
 	user := lastLine(out)

@@ -12,9 +12,16 @@ export class ApiError extends Error {
   }
 }
 
+export function apiBase(): string {
+  if (typeof window !== 'undefined' && window.location.pathname.startsWith('/dkstore')) {
+    return '/dkstore/api/v1'
+  }
+  return '/api/v1'
+}
+
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const locale = useUIStore.getState().locale
-  const res = await fetch(`/api/v1${path}`, {
+  const res = await fetch(`${apiBase()}${path}`, {
     credentials: 'same-origin',
     ...init,
     headers: {

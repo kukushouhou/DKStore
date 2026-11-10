@@ -4,6 +4,7 @@ import { defineConfig } from 'vite'
 // 构建产物输出到 dist/app，由 Go 通过 embed 打包（见 web/web.go）。
 // dist/.gitkeep 保证未构建前端时 Go 也能编译。
 export default defineConfig({
+  base: './',
   plugins: [react()],
   build: {
     outDir: 'dist/app',

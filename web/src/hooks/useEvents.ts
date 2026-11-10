@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import type { CheckProgress, UpdateJobItem } from '../api/client'
+import { apiBase, type CheckProgress, type UpdateJobItem } from '../api/client'
 import { useUIStore } from '../store/ui'
 
 /** 全局订阅 SSE 实时检查与更新进度事件，并统一刷新相关缓存。 */
@@ -9,7 +9,7 @@ export function useEvents(enabled: boolean) {
 
   useEffect(() => {
     if (!enabled) return
-    const es = new EventSource('/api/v1/events')
+    const es = new EventSource(`${apiBase()}/events`)
     es.addEventListener('progress', (ev) => {
       try {
         const p = JSON.parse((ev as MessageEvent).data) as CheckProgress

@@ -1,1 +1,13 @@
-{"systemd-unit":{}}
+{
+  "systemd-unit": {},
+  "web-config": {
+    "nginx-static-config": {
+      "enable": [
+        {
+          "relpath": "etc/www/dsm.dkstore.conf",
+          "type": "dsm"
+        }
+      ]
+    }
+  }
+}

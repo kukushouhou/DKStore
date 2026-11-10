@@ -76,14 +76,22 @@ func buildSPK(rootDir, outPath, goarch, synoArch string) error {
 		return err
 	}
 	uiConfig = lf(uiConfig)
+	nginxConf, err := os.ReadFile(filepath.Join(rootDir, "packaging", "synology", "etc", "www", "dsm.dkstore.conf"))
+	if err != nil {
+		return err
+	}
+	nginxConf = lf(nginxConf)
 
-	// 1. 生成 package.tgz（包含 bin/dkstore、ui/config、ui/images/icon_*.png）
+	// 1. 生成 package.tgz（包含 bin/dkstore、etc/www/dsm.dkstore.conf、ui/config、ui/images/icon_*.png）
 	var pkgTgzBuf bytes.Buffer
 	gw := gzip.NewWriter(&pkgTgzBuf)
 	ptw := tar.NewWriter(gw)
 
 	addTarDir(ptw, "bin/")
 	addTarFile(ptw, "bin/dkstore", binBytes, 0o755)
+	addTarDir(ptw, "etc/")
+	addTarDir(ptw, "etc/www/")
+	addTarFile(ptw, "etc/www/dsm.dkstore.conf", nginxConf, 0o644)
 	addTarDir(ptw, "ui/")
 	addTarFile(ptw, "ui/config", uiConfig, 0o644)
 	addTarDir(ptw, "ui/images/")
@@ -106,7 +114,7 @@ func buildSPK(rootDir, outPath, goarch, synoArch string) error {
 	// 2. 生成 INFO
 	infoLines := []string{
 		`package="dkstore"`,
-		`version="0.2.0-0001"`,
+		`version="0.2.0-0002"`,
 		`os_min_ver="7.0-40000"`,
 		`description="DKStore: Cross-Platform Docker App Update Center with One-Click Upgrade & Rollback."`,
 		`description_chs="DKStore：跨平台 Docker 应用更新中心（支持群晖 Container Manager 项目识别、单服务安全升级与历史回退）。"`,
@@ -119,8 +127,8 @@ func buildSPK(rootDir, outPath, goarch, synoArch string) error {
 		`displayname_chs="DKStore 容器更新中心"`,
 		`dsmuidir="ui"`,
 		`dsmappname="SYNO.SDS.DKStore.Application"`,
-		`adminprotocol="http"`,
-		`adminport="8090"`,
+		`adminurl="/dkstore/"`,
+		`startstop_restart_services="nginx.service"`,
 		`checkport="no"`,
 		`thirdparty="yes"`,
 		`reloadui="yes"`,

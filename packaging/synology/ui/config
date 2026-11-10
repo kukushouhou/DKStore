@@ -5,9 +5,7 @@
       "desc": "DKStore Docker App Update Center",
       "icon": "images/icon_{0}.png",
       "type": "url",
-      "protocol": "http",
-      "port": "8090",
-      "url": "/",
+      "url": "/dkstore/",
       "allUsers": false
     }
   }

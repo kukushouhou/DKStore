@@ -634,6 +634,11 @@ func (r *statusRecorder) Flush() {
 
 func (s *Server) logMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/dkstore/") {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/dkstore")
+		} else if r.URL.Path == "/dkstore" {
+			r.URL.Path = "/"
+		}
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
