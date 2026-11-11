@@ -1,9 +1,9 @@
 import {
   Button,
   Card,
+  Dropdown,
   Flex,
   Progress,
-  Segmented,
   Space,
   Tag,
   Tooltip,
@@ -12,8 +12,9 @@ import {
 } from 'antd'
 import {
   CheckCircleFilled,
+  CheckOutlined,
   CloseCircleFilled,
-  CloseOutlined,
+  SettingOutlined,
   SyncOutlined,
   UpOutlined,
 } from '@ant-design/icons'
@@ -62,13 +63,11 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
   const setProgressStyle = useUIStore((s) => s.setProgressStyle)
   const setQueueCollapsed = useUIStore((s) => s.setQueueCollapsed)
   const setActiveLogJobId = useUIStore((s) => s.setActiveLogJobId)
-  const dismissQueueJob = useUIStore((s) => s.dismissQueueJob)
   const clearFinishedQueueJobs = useUIStore((s) => s.clearFinishedQueueJobs)
 
   if (jobs.length === 0) return null
 
   const anyRunning = jobs.some((j) => j.status === 'queued' || j.status === 'running')
-  const hasFinished = jobs.some((j) => j.status === 'succeeded' || j.status === 'failed')
 
   const handleSwitchStyle = (next: ProgressStyle) => {
     if (next === progressStyle) return
@@ -119,6 +118,7 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
   }
 
   const handleCollapse = () => {
+    clearFinishedQueueJobs()
     if (onCollapse) {
       onCollapse()
     } else {
@@ -167,36 +167,66 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
         </Space>
 
         <Space size={6} align="center" style={{ flexShrink: 0 }}>
-          {/* 整体 | 分层 切换（悬停满 2 秒弹出解释气泡） */}
-          <Segmented
-            size="small"
-            value={progressStyle}
-            onChange={(val) => handleSwitchStyle(val as ProgressStyle)}
-            options={[
-              {
-                value: 'unified',
-                label: (
-                  <Tooltip mouseEnterDelay={2} title={t.queue.unifiedTip}>
-                    <span>{t.queue.modeUnified}</span>
-                  </Tooltip>
-                ),
-              },
-              {
-                value: 'layered',
-                label: (
-                  <Tooltip mouseEnterDelay={2} title={t.queue.layeredTip}>
-                    <span>{t.queue.modeLayered}</span>
-                  </Tooltip>
-                ),
-              },
-            ]}
-          />
-
-          {hasFinished && (
-            <Button size="small" type="text" onClick={clearFinishedQueueJobs}>
-              {t.queue.clearFinished}
-            </Button>
-          )}
+          {/* 官方圆形设置按钮 + 分组直选下拉框 */}
+          <Dropdown
+            trigger={['click']}
+            placement="bottomRight"
+            menu={{
+              selectedKeys: [progressStyle],
+              items: [
+                {
+                  key: 'progress-style-group',
+                  type: 'group',
+                  label: t.queue.progressStyleLabel,
+                  children: [
+                    {
+                      key: 'layered',
+                      label: (
+                        <Tooltip mouseEnterDelay={2} placement="left" title={t.queue.layeredTip}>
+                          <Flex align="center" justify="space-between" gap={20}>
+                            <span>{t.queue.modeLayered}</span>
+                            <CheckOutlined
+                              style={{
+                                fontSize: 12,
+                                color: token.colorPrimary,
+                                visibility: progressStyle === 'layered' ? 'visible' : 'hidden',
+                              }}
+                            />
+                          </Flex>
+                        </Tooltip>
+                      ),
+                      onClick: () => handleSwitchStyle('layered'),
+                    },
+                    {
+                      key: 'unified',
+                      label: (
+                        <Tooltip mouseEnterDelay={2} placement="left" title={t.queue.unifiedTip}>
+                          <Flex align="center" justify="space-between" gap={20}>
+                            <span>{t.queue.modeUnified}</span>
+                            <CheckOutlined
+                              style={{
+                                fontSize: 12,
+                                color: token.colorPrimary,
+                                visibility: progressStyle === 'unified' ? 'visible' : 'hidden',
+                              }}
+                            />
+                          </Flex>
+                        </Tooltip>
+                      ),
+                      onClick: () => handleSwitchStyle('unified'),
+                    },
+                  ],
+                },
+              ],
+            }}
+          >
+            <Button
+              size="small"
+              shape="circle"
+              icon={<SettingOutlined />}
+              aria-label={t.queue.progressStyleLabel}
+            />
+          </Dropdown>
 
           <Button
             size="small"
@@ -259,7 +289,6 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
                   0,
                   Math.min(100, job.progress?.percent ?? (job.status === 'running' ? 5 : 0)),
                 )
-          const isFinished = job.status === 'succeeded' || job.status === 'failed'
           const phaseText = formatPhaseText(job)
           const hasBytes =
             job.status === 'running' && (job.progress?.totalBytes ?? 0) > 0
@@ -317,22 +346,13 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
                   )}
                 </Flex>
 
-                <Space size={4} style={{ flexShrink: 0 }}>
-                  <Button size="small" onClick={() => setActiveLogJobId(job.id)}>
-                    {t.queue.detailBtn}
-                  </Button>
-                  {isFinished && (
-                    <Tooltip title={t.queue.dismissTip}>
-                      <Button
-                        size="small"
-                        type="text"
-                        icon={<CloseOutlined />}
-                        aria-label={t.queue.dismissTip}
-                        onClick={() => dismissQueueJob(job.id)}
-                      />
-                    </Tooltip>
-                  )}
-                </Space>
+                <Button
+                  size="small"
+                  style={{ flexShrink: 0 }}
+                  onClick={() => setActiveLogJobId(job.id)}
+                >
+                  {t.queue.detailBtn}
+                </Button>
               </Flex>
 
               {/* 第二行：阶段文案 / 字节进度 / 失败摘要 */}

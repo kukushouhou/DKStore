@@ -108,6 +108,7 @@ const zhCN = {
   queue: {
     headerPill: '更新队列 ({count})',
     panelTitle: '更新队列 ({count})',
+    progressStyleLabel: '进度条样式',
     modeUnified: '整体',
     modeLayered: '分层',
     unifiedTip: '整体模式：以单根总进度条展示每个应用的整体更新进度，画面更简洁。',
@@ -617,6 +618,7 @@ const enUS: Dict = {
   queue: {
     headerPill: 'Queue ({count})',
     panelTitle: 'Update Queue ({count})',
+    progressStyleLabel: 'Progress Style',
     modeUnified: 'Unified',
     modeLayered: 'Layered',
     unifiedTip: 'Unified mode: displays a single overall progress bar for each app update.',

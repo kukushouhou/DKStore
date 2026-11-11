@@ -295,8 +295,14 @@ export default function AppLayout() {
         }
         onClick={() => {
           if (useHeaderPopover) {
+            if (popoverOpen) {
+              useUIStore.getState().clearFinishedQueueJobs()
+            }
             setPopoverOpen((v) => !v)
           } else {
+            if (!queueCollapsed) {
+              useUIStore.getState().clearFinishedQueueJobs()
+            }
             toggleQueueCollapsed()
           }
         }}
@@ -350,7 +356,12 @@ export default function AppLayout() {
               (useHeaderPopover ? (
                 <Popover
                   open={popoverOpen && queueJobs.length > 0}
-                  onOpenChange={setPopoverOpen}
+                  onOpenChange={(nextOpen) => {
+                    if (!nextOpen) {
+                      useUIStore.getState().clearFinishedQueueJobs()
+                    }
+                    setPopoverOpen(nextOpen)
+                  }}
                   trigger="click"
                   placement="bottomRight"
                   content={

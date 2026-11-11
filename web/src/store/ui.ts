@@ -164,7 +164,10 @@ export const useUIStore = create<UIState>((set) => ({
           nextQueue[id] = job
         }
       }
-      return { updateQueueJobs: nextQueue }
+      return {
+        updateQueueJobs: nextQueue,
+        ...(Object.keys(nextQueue).length === 0 ? { queueCollapsed: false } : {}),
+      }
     }),
   upsertUpdateJob: (rawJob) =>
     set((s) => {
