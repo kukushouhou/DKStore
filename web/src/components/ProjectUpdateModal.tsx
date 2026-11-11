@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
+  Badge,
   Button,
   Checkbox,
   ConfigProvider,
@@ -352,6 +353,20 @@ function ProjectUpdateModalBody({
                       <Space size={10} align="center">
                         <Checkbox disabled />
                         <Typography.Text strong>{svc.name}</Typography.Text>
+                        {svc.state && svc.state !== 'running' && (
+                          <Tag
+                            variant="filled"
+                            style={{
+                              margin: 0,
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: 5,
+                            }}
+                          >
+                            <Badge status="default" />
+                            <span>{t.home.tagNotRunning}</span>
+                          </Tag>
+                        )}
                         {svc.currentVersion && (
                           <Tag style={{ margin: 0, fontFamily: token.fontFamilyCode }}>
                             {svc.currentVersion}
@@ -405,6 +420,20 @@ function ProjectUpdateModalBody({
                       <div>
                         <Space size={6} align="center" wrap>
                           <Typography.Text strong>{svc.name}</Typography.Text>
+                          {svc.state && svc.state !== 'running' && (
+                            <Tag
+                              variant="filled"
+                              style={{
+                                margin: 0,
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: 5,
+                              }}
+                            >
+                              <Badge status="default" />
+                              <span>{t.home.tagNotRunning}</span>
+                            </Tag>
+                          )}
                           {roleBadgeForService(svc)}
                         </Space>
                         <div style={{ marginTop: 4 }}>

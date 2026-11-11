@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import {
   Alert,
   Avatar,
+  Badge,
   Button,
   Card,
   ConfigProvider,
@@ -30,6 +31,7 @@ import DetailDrawer from './DetailDrawer'
 import IgnorePolicyModal from './IgnorePolicyModal'
 import ProjectUpdateModal from './ProjectUpdateModal'
 import VersionPickerModal from './VersionPickerModal'
+import { unwrapConcreteVersion } from './versionUtils'
 
 function formatBytes(bytes: number): string {
   if (!bytes || bytes <= 0) return '0 B'
@@ -285,9 +287,10 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
       )
     }
     if (effIgnoreMode === 'this_version') {
+      const cleanIgnoredTag = unwrapConcreteVersion(effIgnoreTargetTag)
       const label =
-        effIgnoreTargetTag && !effIgnoreTargetTag.includes(' ')
-          ? t.home.badgeSkippedTag.replace('{tag}', effIgnoreTargetTag)
+        cleanIgnoredTag && !cleanIgnoredTag.includes(' ')
+          ? t.home.badgeSkippedTag.replace('{tag}', cleanIgnoredTag)
           : t.home.badgeSkippedGeneric
       return (
         <Tag variant="filled" color="warning" style={{ margin: 0, flexShrink: 0 }}>
@@ -300,6 +303,46 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
         {t.home.badgeMuted}
       </Tag>
     )
+  }
+
+  // 容器未运行状态标识（图标保持原色，消除“停止更新”歧义）
+  const renderNotRunningBadge = () => {
+    const cardSvcs = app.services?.length ? app.services : []
+    const withState = cardSvcs.filter((s) => Boolean(s.state && s.state.trim()))
+    if (withState.length === 0) return null
+    const stoppedSvcs = withState.filter((s) => s.state !== 'running')
+    if (stoppedSvcs.length === 0) return null
+
+    const allStopped = stoppedSvcs.length === withState.length
+    const tagNode = (
+      <Tag
+        variant="filled"
+        style={{
+          margin: 0,
+          flexShrink: 0,
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 5,
+        }}
+      >
+        <Badge status="default" />
+        <span>{allStopped ? t.home.tagNotRunning : t.home.tagPartNotRunning}</span>
+      </Tag>
+    )
+
+    if (!allStopped) {
+      return (
+        <Tooltip
+          title={t.home.notRunningServicesTip.replace(
+            '{names}',
+            stoppedSvcs.map((s) => s.name).join(', '),
+          )}
+        >
+          {tagNode}
+        </Tooltip>
+      )
+    }
+    return tagNode
   }
 
   const curVer =
@@ -370,6 +413,7 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
                 <Typography.Text strong ellipsis={{ tooltip: app.name }} style={{ fontSize: 15 }}>
                   {app.name}
                 </Typography.Text>
+                {!isChecking && renderNotRunningBadge()}
                 {!isChecking && renderRoleBadge()}
                 {!isChecking && renderIgnoredBadge()}
                 {app.hostStatus === 'offline' && (

@@ -384,20 +384,57 @@ func (s *Service) lookupTagTimestamps(ctx context.Context, cache map[string]map[
 		}
 		cache[repoKey] = tsByTag
 	}
-	cleanTag := func(v string) string {
-		if base, _, has := strings.Cut(strings.TrimSpace(v), " ("); has {
-			return strings.TrimSpace(base)
+	lookupTS := func(v string) int64 {
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return 0
 		}
-		return strings.TrimSpace(v)
+		if unwrapped := version.UnwrapDisplayVersion(trimmed); unwrapped != "" {
+			if ts := tsByTag[unwrapped]; ts > 0 {
+				return ts
+			}
+		}
+		if base, _, has := strings.Cut(trimmed, " ("); has {
+			if ts := tsByTag[strings.TrimSpace(base)]; ts > 0 {
+				return ts
+			}
+		}
+		return tsByTag[trimmed]
 	}
-	curTS = tsByTag[cleanTag(curVer)]
+	curTS = lookupTS(curVer)
 	if curTS == 0 && pr.Tag != "" {
 		curTS = tsByTag[pr.Tag]
 	}
-	if tv := cleanTag(tgtVer); tv != "" {
-		tgtTS = tsByTag[tv]
-	}
+	tgtTS = lookupTS(tgtVer)
 	return
+}
+
+func normalizeStoredVersions(imageRef, fKind, curVer, tgtVer, repoDigest, tgtDigest string, curTags, tgtTags []string) (string, string) {
+	pr, err := version.ParseImageRef(imageRef)
+	if err != nil || pr.IsPinnedDigest() {
+		return curVer, tgtVer
+	}
+	fbCur := ""
+	if fKind == string(classify.KindDigestUpdate) {
+		fbCur = repoDigest
+	}
+	if curVer != "" {
+		bestCur := version.SelectBestDisplayTag(pr.Tag, curTags)
+		if bestCur != "" && (strings.EqualFold(curVer, pr.Tag) || strings.HasPrefix(curVer, pr.Tag+" (")) {
+			curVer = version.FormatTagVersionDisplay(pr.Tag, bestCur, fbCur)
+		} else {
+			curVer = version.FormatTagVersionDisplay(pr.Tag, curVer, fbCur)
+		}
+	}
+	if fKind == string(classify.KindDigestUpdate) && tgtVer != "" && !strings.HasSuffix(tgtVer, "@republished") {
+		bestTgt := version.SelectBestDisplayTag(pr.Tag, tgtTags)
+		if bestTgt != "" && (strings.EqualFold(tgtVer, pr.Tag) || strings.HasPrefix(tgtVer, pr.Tag+" (")) {
+			tgtVer = version.FormatTagVersionDisplay(pr.Tag, bestTgt, tgtDigest)
+		} else {
+			tgtVer = version.FormatTagVersionDisplay(pr.Tag, tgtVer, tgtDigest)
+		}
+	}
+	return curVer, tgtVer
 }
 
 // Overview 按请求语言生成首页三组卡片数据（Normal / Caution / NoUpdate）。
@@ -486,6 +523,7 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 		if curVer == "" {
 			curVer = fallbackCurrentVersion(imageRef, curTags, labelsJSON)
 		}
+		curVer, tgtVer = normalizeStoredVersions(imageRef, fKind, curVer, tgtVer, repoDigest, tgtDigest, curTags, tgtTags)
 		reasonCode, dbName, roleKind, links := resolveServiceRoleAndLinks(svcName, imageRef, fReason, storedLinks)
 		isUpd := fKind == string(classify.KindDigestUpdate) || fKind == string(classify.KindVersionUpdate)
 		displayTarget := ""
@@ -658,6 +696,7 @@ func (s *Service) GetApp(ctx context.Context, appKey string, lang i18n.Lang) (*A
 		if curVer == "" {
 			curVer = fallbackCurrentVersion(imageRef, curTags, labelsJSON)
 		}
+		curVer, tgtVer = normalizeStoredVersions(imageRef, fKind, curVer, tgtVer, repoDigest, tgtDigest, curTags, tgtTags)
 		reasonCode, dbName, roleKind, links := resolveServiceRoleAndLinks(svcName, imageRef, fReason, storedLinks)
 		isUpd := fKind == string(classify.KindDigestUpdate) || fKind == string(classify.KindVersionUpdate)
 		displayTarget := ""

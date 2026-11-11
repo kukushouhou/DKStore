@@ -219,12 +219,9 @@ func Evaluate(in Input) Output {
 	if curDisplay == "" {
 		curDisplay = plausibleVersionLabel(in.LocalVersionLabel, in.CandidateTags)
 	}
+	out.CurrentVersion = version.FormatTagVersionDisplay(in.Ref.Tag, curDisplay, "")
 	if curDisplay == "" && curTag.Scheme != version.SchemeUnknown {
 		curDisplay = in.Ref.Tag
-	}
-	out.CurrentVersion = curDisplay
-	if out.CurrentVersion == "" {
-		out.CurrentVersion = in.Ref.Tag
 	}
 
 	// 2. 本地无 RepoDigest 时，只有来源为群晖 dsm_api（AllowImageIDCompare）且远端取到了对应平台的 ConfigDigest，
@@ -328,25 +325,17 @@ func Evaluate(in Input) Output {
 	}
 
 	applyDigestVersions := func(remoteBest string) {
-		if remoteBest != "" {
-			if curDisplay != "" {
-				out.CurrentVersion = curDisplay
-			} else {
-				out.CurrentVersion = formatTagWithHash(in.Ref.Tag, localHash)
-			}
-			out.TargetVersion = remoteBest
-			return
-		}
-		if curDisplay == "" {
+		if remoteBest == "" && curTag.Scheme != version.SchemeUnknown && curTag.Precision >= 3 {
 			out.CurrentVersion = formatTagWithHash(in.Ref.Tag, localHash)
 			out.TargetVersion = formatTagWithHash(in.Ref.Tag, remoteHash)
-		} else if curDisplay == in.Ref.Tag {
-			out.CurrentVersion = formatTagWithHash(curDisplay, localHash)
-			out.TargetVersion = formatTagWithHash(curDisplay, remoteHash)
-		} else {
-			out.CurrentVersion = curDisplay
-			out.TargetVersion = formatTagWithHash(in.Ref.Tag, remoteHash)
+			return
 		}
+		curResolved := curDisplay
+		if strings.EqualFold(curResolved, in.Ref.Tag) {
+			curResolved = ""
+		}
+		out.CurrentVersion = version.FormatTagVersionDisplay(in.Ref.Tag, curResolved, localHash)
+		out.TargetVersion = version.FormatTagVersionDisplay(in.Ref.Tag, remoteBest, remoteHash)
 	}
 
 	// 5. 有状态组件（数据库 / 消息队列 / 存储与检索中间件）保守规则（实施文档 §5 / §6.2 / 附录 D.2）

@@ -83,7 +83,7 @@ func TestAppendixD_PrecisionScopingAndDigestFormattingAndStatefulRules(t *testin
 			{Name: "9", RepoDigest: "sha256:cccc777788889999"},
 		},
 	})
-	if out1.Kind != KindNone || out1.RoleKind != "mq" || out1.CurrentVersion != "2.0.20" {
+	if out1.Kind != KindNone || out1.RoleKind != "mq" || out1.CurrentVersion != "2 (2.0.20)" {
 		t.Fatalf("1-part precision scoping failed: %+v", out1)
 	}
 
@@ -156,5 +156,30 @@ func TestAppendixD_PrecisionScopingAndDigestFormattingAndStatefulRules(t *testin
 	})
 	if out6.Kind != KindVersionUpdate || out6.Category != CategoryCaution || out6.Reason != "database_suspected" || out6.RoleKind != "mq" {
 		t.Fatalf("expected heuristic mq caution, got %+v", out6)
+	}
+
+	// 7. 专门的浮动更新标签（如 2.6 / latest）提取到具体版本号时必须展示 "2.6 (2.6.8)" / "latest (v3.16.0)"
+	refSeries, _ := version.ParseImageRef("redis:2.6")
+	out7 := Evaluate(Input{
+		Ref:                refSeries,
+		LocalRepoDigest:    "sha256:old264aaaaaaaaaa",
+		RemoteManifest:     &registry.ManifestResult{RepoDigest: "sha256:new268bbbbbbbbbb"},
+		CurrentMatchedTags: []string{"2.6.4"},
+		RemoteMatchedTags:  []string{"2.6", "2.6.8"},
+	})
+	if out7.Kind != KindDigestUpdate || out7.CurrentVersion != "2.6 (2.6.4)" || out7.TargetVersion != "2.6 (2.6.8)" {
+		t.Fatalf("expected 2.6 (2.6.4) -> 2.6 (2.6.8), got %+v", out7)
+	}
+
+	refProm, _ := version.ParseImageRef("prom/prometheus:latest")
+	out8 := Evaluate(Input{
+		Ref:                refProm,
+		LocalRepoDigest:    "sha256:old391aaaaaaaaaa",
+		RemoteManifest:     &registry.ManifestResult{RepoDigest: "sha256:new3160bbbbbbbbb"},
+		CurrentMatchedTags: []string{"v3.9.1"},
+		RemoteMatchedTags:  []string{"latest", "v3.16.0"},
+	})
+	if out8.Kind != KindDigestUpdate || out8.CurrentVersion != "latest (v3.9.1)" || out8.TargetVersion != "latest (v3.16.0)" {
+		t.Fatalf("expected latest (v3.9.1) -> latest (v3.16.0), got %+v", out8)
 	}
 }

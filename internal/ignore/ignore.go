@@ -193,14 +193,44 @@ func Matches(r Rule, findingKind, targetDigest, targetVersion string) bool {
 	return false
 }
 
+func unwrapVersionToken(raw string) string {
+	s := strings.TrimSpace(raw)
+	if base, rest, ok := strings.Cut(s, " ("); ok && strings.HasSuffix(rest, ")") {
+		inner := strings.TrimSpace(strings.TrimSuffix(rest, ")"))
+		if inner != "" && !isShortHexHash(inner) {
+			return inner
+		}
+		return strings.TrimSpace(base)
+	}
+	return s
+}
+
+func isShortHexHash(s string) bool {
+	if len(s) != 6 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
 func sameVersionTag(a, b string) bool {
 	a = strings.TrimSpace(a)
 	b = strings.TrimSpace(b)
 	if a == b {
 		return true
 	}
-	av := strings.TrimPrefix(strings.TrimPrefix(a, "v"), "V")
-	bv := strings.TrimPrefix(strings.TrimPrefix(b, "v"), "V")
+	ua := unwrapVersionToken(a)
+	ub := unwrapVersionToken(b)
+	if ua != "" && ua == ub {
+		return true
+	}
+	av := strings.TrimPrefix(strings.TrimPrefix(ua, "v"), "V")
+	bv := strings.TrimPrefix(strings.TrimPrefix(ub, "v"), "V")
 	return av != "" && av == bv
 }
 
@@ -230,10 +260,20 @@ func normalizeNumericPrefix(raw string) (string, bool) {
 
 func extractNumericCore(targetVersion string) (string, bool) {
 	s := strings.TrimSpace(targetVersion)
-	if base, _, ok := strings.Cut(s, " ("); ok {
+	if base, rest, ok := strings.Cut(s, " ("); ok && strings.HasSuffix(rest, ")") {
+		inner := strings.TrimSpace(strings.TrimSuffix(rest, ")"))
+		if inner != "" && !isShortHexHash(inner) {
+			if normInner, okInner := cleanAndNormalizeCore(inner); okInner {
+				return normInner, true
+			}
+		}
 		s = strings.TrimSpace(base)
 	}
-	s = strings.TrimSuffix(s, "@republished")
+	return cleanAndNormalizeCore(s)
+}
+
+func cleanAndNormalizeCore(s string) (string, bool) {
+	s = strings.TrimSuffix(strings.TrimSpace(s), "@republished")
 	if strings.HasPrefix(s, "v") || strings.HasPrefix(s, "V") {
 		s = s[1:]
 	}

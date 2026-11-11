@@ -3,7 +3,7 @@ import { Button, Flex, Modal, Radio, Space, Typography, message, theme } from 'a
 import { api, type IgnoreMode } from '../api/client'
 import { useI18n } from '../i18n'
 import LockableVersionBar from './LockableVersionBar'
-import { parseNumericSegs } from './versionUtils'
+import { parseNumericSegs, unwrapConcreteVersion } from './versionUtils'
 
 interface IgnorePolicyModalProps {
   open: boolean
@@ -55,8 +55,10 @@ function IgnorePolicyModalBody({
   const safeDepth = Math.min(Math.max(1, lockDepth), Math.max(1, numericSegs.length - 1))
   const lockedPrefix = numericSegs.length >= 2 ? numericSegs.slice(0, safeDepth).join('.') : ''
 
-  const cleanTargetTag =
-    targetVersion && !targetVersion.includes(' ') ? targetVersion : undefined
+  const cleanTargetTag = useMemo(() => {
+    const unwrapped = unwrapConcreteVersion(targetVersion)
+    return unwrapped && !unwrapped.includes(' ') ? unwrapped : undefined
+  }, [targetVersion])
 
   const handleSubmit = async () => {
     if (serviceKeys.length === 0) return

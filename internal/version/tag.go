@@ -289,6 +289,9 @@ func SelectBestDisplayTag(currentTag string, matchedTags []string) string {
 	var best ParsedTag
 	hasBest := false
 	for _, raw := range matchedTags {
+		if cur.Precision <= 2 && strings.EqualFold(strings.TrimSpace(raw), curTrim) {
+			continue
+		}
 		pt := ParseTag(raw)
 		if pt.Scheme == SchemeUnknown || pt.Prerelease {
 			continue
@@ -305,11 +308,18 @@ func SelectBestDisplayTag(currentTag string, matchedTags []string) string {
 		return best.Raw
 	}
 
-	// 若未命中同变体的标准数字版本，且当前是滚动标签，放宽变体限制再尝试一次非预发布数字版本
-	if rules.Default().IsRollingTag(curTrim) {
+	// 若未命中同变体的标准数字版本，且当前是滚动标签或短系列浮动标签（如 :2 实际指向 2.1.2-alpine），放宽变体限制再尝试一次非预发布数字版本
+	if rules.Default().IsRollingTag(curTrim) || (cur.Scheme != SchemeUnknown && cur.Precision <= 2 && cur.Variant == "") {
+		needPrefix := ""
+		if cur.Scheme != SchemeUnknown {
+			needPrefix = cur.CoreVersion()
+		}
 		for _, raw := range matchedTags {
 			pt := ParseTag(raw)
-			if pt.Scheme == SchemeUnknown || pt.Prerelease {
+			if pt.Scheme == SchemeUnknown || pt.Prerelease || isArchOnlyAlias(pt.Variant) {
+				continue
+			}
+			if needPrefix != "" && (!MatchesPrefix(pt, needPrefix) || pt.Precision <= cur.Precision) {
 				continue
 			}
 			if !hasBest || betterDisplayTag(pt, best) {
@@ -374,4 +384,91 @@ func isArchOnlyAlias(s string) bool {
 	default:
 		return false
 	}
+}
+
+func isShortHex6(s string) bool {
+	if len(s) != 6 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func shortDigestHex6(d string) string {
+	s := strings.TrimSpace(d)
+	if _, hexPart, ok := strings.Cut(s, ":"); ok {
+		s = hexPart
+	}
+	if len(s) > 6 {
+		return s[:6]
+	}
+	return s
+}
+
+// UnwrapDisplayVersion 从形如 "latest (v3.16.0)" 或 "2.6 (2.6.8)" 的展示文本中提取真实版本号（若括号内仅为 6 位短哈希则返回外层标签）。
+func UnwrapDisplayVersion(display string) string {
+	s := strings.TrimSpace(display)
+	if base, rest, ok := strings.Cut(s, " ("); ok && strings.HasSuffix(rest, ")") {
+		inner := strings.TrimSpace(strings.TrimSuffix(rest, ")"))
+		if inner != "" && !isShortHex6(inner) {
+			return inner
+		}
+		return strings.TrimSpace(base)
+	}
+	return s
+}
+
+// FormatTagVersionDisplay 将配置的更新标签（如 latest、main、2.6、8.4、17、2）与提取到的具体版本格式化为统一展示文案：
+//   - 固定具体版本标签（如 0.5.112 -> 0.5.112）：直接输出 "0.5.112"，不重复套括号；
+//   - 滚动/通道标签（如 latest 提取到 v3.16.0）：输出 "latest (v3.16.0)"，无具体版本时若有摘要则输出 "latest (d57da5)"；
+//   - 系列浮动标签（如 2.6 提取到 2.6.8，8.4 提取到 8.4.13，2 提取到 2.1.2-alpine）：输出 "2.6 (2.6.8)" / "8.4 (8.4.13)" / "2 (2.1.2-alpine)"。
+func FormatTagVersionDisplay(configuredTag, resolvedVer, fallbackDigest string) string {
+	cfg := strings.TrimSpace(configuredTag)
+	if cfg == "" {
+		cfg = "latest"
+	}
+	res := strings.TrimSpace(resolvedVer)
+	hash6 := shortDigestHex6(fallbackDigest)
+
+	// 若传入的 resolvedVer 已经是 "cfg (inner)" 形态，拆出 inner 供升级替换或原样保留
+	if base, rest, ok := strings.Cut(res, " ("); ok && strings.EqualFold(strings.TrimSpace(base), cfg) && strings.HasSuffix(rest, ")") {
+		inner := strings.TrimSpace(strings.TrimSuffix(rest, ")"))
+		if isShortHex6(inner) {
+			if hash6 == "" {
+				hash6 = inner
+			}
+			res = ""
+		} else {
+			res = inner
+		}
+	}
+
+	pCfg := ParseTag(cfg)
+	if pCfg.Scheme == SchemeUnknown {
+		if res != "" && !strings.EqualFold(res, cfg) {
+			return cfg + " (" + res + ")"
+		}
+		if hash6 != "" {
+			return cfg + " (" + hash6 + ")"
+		}
+		return cfg
+	}
+
+	if res != "" && !strings.EqualFold(res, cfg) {
+		pRes := ParseTag(res)
+		if pRes.Scheme != SchemeUnknown && pRes.Precision > pCfg.Precision && MatchesPrefix(pRes, pCfg.CoreVersion()) {
+			return cfg + " (" + res + ")"
+		}
+		return res
+	}
+
+	if hash6 != "" {
+		return cfg + " (" + hash6 + ")"
+	}
+	return cfg
 }
