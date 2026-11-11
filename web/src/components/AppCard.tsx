@@ -4,6 +4,7 @@ import {
   Avatar,
   Button,
   Card,
+  ConfigProvider,
   Dropdown,
   Flex,
   Modal,
@@ -90,6 +91,10 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
   const isNoUpdate =
     app.group === 'no_update' || app.group === 'up_to_date' || app.group === 'ignored'
   const isCaution = app.group === 'caution'
+  const cautionBtnTheme = useMemo(
+    () => (isCaution ? { token: { colorPrimary: token.colorWarning } } : undefined),
+    [isCaution, token.colorWarning],
+  )
 
   const totalServiceCount =
     app.totalServiceCount ?? app.allServices?.length ?? app.services.length
@@ -468,32 +473,27 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
 
                 <ArrowRightOutlined style={{ fontSize: 11, color: token.colorTextTertiary }} />
 
-                <Tooltip title={t.home.pickOtherVersionTip}>
-                  <Button
-                    size="small"
-                    type={isCaution ? 'default' : 'primary'}
-                    ghost={!isCaution}
-                    onClick={() => {
-                      if (primaryService) {
-                        setPickerInitialTab('version')
-                        setPickerSvc(primaryService)
-                      }
-                    }}
-                    style={{
-                      fontFamily: token.fontFamilyCode,
-                      fontWeight: 600,
-                      ...(isCaution
-                        ? {
-                            color: token.colorWarningText,
-                            borderColor: token.colorWarningBorder,
-                            background: token.colorWarningBg,
-                          }
-                        : {}),
-                    }}
-                  >
-                    {tgtVer} <DownOutlined style={{ fontSize: 10 }} />
-                  </Button>
-                </Tooltip>
+                <ConfigProvider theme={cautionBtnTheme}>
+                  <Tooltip title={t.home.pickOtherVersionTip}>
+                    <Button
+                      size="small"
+                      type="primary"
+                      ghost
+                      onClick={() => {
+                        if (primaryService) {
+                          setPickerInitialTab('version')
+                          setPickerSvc(primaryService)
+                        }
+                      }}
+                      style={{
+                        fontFamily: token.fontFamilyCode,
+                        fontWeight: 600,
+                      }}
+                    >
+                      {tgtVer} <DownOutlined style={{ fontSize: 10 }} />
+                    </Button>
+                  </Tooltip>
+                </ConfigProvider>
               </Space>
             )}
           </div>
@@ -636,46 +636,38 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
                 </Tooltip>
               ) : (
                 /* 统一组合主按钮 [ 更新 | ▾ ] */
-                <Space.Compact size="small">
-                  <Button
-                    type="primary"
-                    loading={updatingNow}
-                    onClick={handleUpdateClick}
-                    style={
-                      isCaution
-                        ? { background: token.colorWarning, borderColor: token.colorWarning }
-                        : undefined
-                    }
-                  >
-                    {updatingNow ? t.home.updating : t.home.updateBtn}
-                  </Button>
-                  <Dropdown
-                    trigger={['click']}
-                    placement="bottomRight"
-                    disabled={updatingNow}
-                    menu={{
-                      items: [
-                        {
-                          key: 'by-config',
-                          label: t.home.updateByNewConfigMenu,
-                          onClick: handleUpdateByConfigClick,
-                        },
-                      ],
-                    }}
-                  >
+                <ConfigProvider theme={cautionBtnTheme}>
+                  <Space.Compact size="small">
                     <Button
                       type="primary"
+                      loading={updatingNow}
+                      onClick={handleUpdateClick}
+                    >
+                      {updatingNow ? t.home.updating : t.home.updateBtn}
+                    </Button>
+                    <Dropdown
+                      trigger={['click']}
+                      placement="bottomRight"
                       disabled={updatingNow}
-                      aria-label={t.home.updateByNewConfigMenu}
-                      icon={<DownOutlined />}
-                      style={
-                        isCaution
-                          ? { background: token.colorWarning, borderColor: token.colorWarning }
-                          : undefined
-                      }
-                    />
-                  </Dropdown>
-                </Space.Compact>
+                      menu={{
+                        items: [
+                          {
+                            key: 'by-config',
+                            label: t.home.updateByNewConfigMenu,
+                            onClick: handleUpdateByConfigClick,
+                          },
+                        ],
+                      }}
+                    >
+                      <Button
+                        type="primary"
+                        disabled={updatingNow}
+                        aria-label={t.home.updateByNewConfigMenu}
+                        icon={<DownOutlined />}
+                      />
+                    </Dropdown>
+                  </Space.Compact>
+                </ConfigProvider>
               )}
             </Space>
           )}

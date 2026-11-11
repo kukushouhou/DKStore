@@ -333,7 +333,7 @@ export default function HomePage() {
   ]
 
   return (
-    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+    <Flex vertical gap={16} style={{ width: '100%' }}>
       {/* 顶栏标题与检查按钮 */}
       <Flex justify="space-between" align="center" wrap gap={12}>
         <div>
@@ -453,6 +453,11 @@ export default function HomePage() {
           ghost
           activeKey={activeGroupKeys}
           onChange={handleCollapseChange}
+          style={{ width: '100%' }}
+          styles={{
+            header: { paddingInline: 0, alignItems: 'center' },
+            body: { paddingInline: 0, paddingTop: 4, paddingBottom: 16 },
+          }}
           items={collapseItems}
         />
       )}
@@ -486,6 +491,6 @@ export default function HomePage() {
           </Form.Item>
         </Form>
       </Modal>
-    </Space>
+    </Flex>
   )
 }

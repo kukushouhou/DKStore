@@ -633,40 +633,50 @@ function VersionPickerModalBody({
   return (
     <Flex vertical gap={16}>
       {/* 顶栏 */}
-      <Flex
-        wrap="wrap"
-        align="center"
-        justify="space-between"
-        gap={12}
+      <div
         style={{
           paddingBottom: 14,
           borderBottom: `1px solid ${token.colorSplit}`,
         }}
       >
-        <div style={{ minWidth: 0 }}>
-          <Typography.Title level={5} style={{ margin: 0 }}>
-            {(tab === 'config' ? t.versionPicker.configTitle : t.versionPicker.title).replace(
-              '{name}',
-              appName,
-            )}
-          </Typography.Title>
-          <Typography.Text
-            type="secondary"
-            style={{ fontSize: token.fontSizeSM, display: 'block', marginTop: 2 }}
-          >
-            {subtitle} · {t.versionPicker.runningNow}
-            <Typography.Text code>{curVer}</Typography.Text>
-          </Typography.Text>
-        </div>
+        <Flex wrap="wrap" align="flex-start" justify="space-between" gap={12}>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <Typography.Title level={5} style={{ margin: 0 }}>
+              {(tab === 'config' ? t.versionPicker.configTitle : t.versionPicker.title).replace(
+                '{name}',
+                appName,
+              )}
+            </Typography.Title>
+            <Typography.Text
+              type="secondary"
+              style={{ fontSize: token.fontSizeSM, display: 'block', marginTop: 2 }}
+            >
+              {subtitle} · {t.versionPicker.runningNow}
+              <Typography.Text code>{curVer}</Typography.Text>
+            </Typography.Text>
+          </div>
 
-        <Flex wrap="wrap" align="center" gap={8} style={{ maxWidth: '100%' }}>
-          {/* 目标镜像胶囊（在配置页签上支持一键点回选版页签重选版本） */}
+          {/* 右上角双页签切换：选择版本更新 | 按新版配置更新 */}
+          {canShowConfigTab && (
+            <Segmented
+              value={tab}
+              onChange={(val) => setTab(val as 'version' | 'config')}
+              options={[
+                { label: t.versionPicker.tabVersion, value: 'version' },
+                { label: t.versionPicker.tabConfig, value: 'config' },
+              ]}
+            />
+          )}
+        </Flex>
+
+        {/* 目标镜像胶囊（在配置页签上支持一键点回选版页签重选版本） */}
+        <div style={{ marginTop: 10 }}>
           <Tag
             variant="filled"
             color="processing"
             style={{
               margin: 0,
-              padding: '4px 10px',
+              padding: '3px 10px',
               display: 'inline-flex',
               alignItems: 'center',
               gap: 6,
@@ -696,20 +706,8 @@ function VersionPickerModalBody({
               </Typography.Link>
             )}
           </Tag>
-
-          {/* 右上角双页签切换：选择版本更新 | 按新版配置更新 */}
-          {canShowConfigTab && (
-            <Segmented
-              value={tab}
-              onChange={(val) => setTab(val as 'version' | 'config')}
-              options={[
-                { label: t.versionPicker.tabVersion, value: 'version' },
-                { label: t.versionPicker.tabConfig, value: 'config' },
-              ]}
-            />
-          )}
-        </Flex>
-      </Flex>
+        </div>
+      </div>
 
       {tab === 'version' ? (
         <>

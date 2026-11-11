@@ -200,6 +200,10 @@ export default function HistoryPage() {
                   <Collapse
                     ghost
                     size="small"
+                    styles={{
+                      header: { paddingInline: 0 },
+                      body: { paddingInline: 0, paddingBottom: 0 },
+                    }}
                     items={[
                       {
                         key: 'details',

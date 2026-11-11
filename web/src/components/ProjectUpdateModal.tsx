@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Checkbox,
+  ConfigProvider,
   Flex,
   Input,
   Modal,
@@ -414,30 +415,27 @@ function ProjectUpdateModalBody({
                             <ArrowRightOutlined
                               style={{ fontSize: 11, color: token.colorTextTertiary }}
                             />
-                            <Tooltip title={t.home.pickOtherVersionTip}>
-                              <Button
-                                size="small"
-                                type={caution ? 'default' : 'primary'}
-                                ghost={!caution}
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  setPickerSvc(svc)
-                                }}
-                                style={{
-                                  fontFamily: token.fontFamilyCode,
-                                  fontWeight: 600,
-                                  ...(caution
-                                    ? {
-                                        color: token.colorWarningText,
-                                        borderColor: token.colorWarningBorder,
-                                        background: token.colorWarningBg,
-                                      }
-                                    : {}),
-                                }}
-                              >
-                                {displayTgt} <DownOutlined style={{ fontSize: 10 }} />
-                              </Button>
-                            </Tooltip>
+                            <ConfigProvider
+                              theme={caution ? { token: { colorPrimary: token.colorWarning } } : undefined}
+                            >
+                              <Tooltip title={t.home.pickOtherVersionTip}>
+                                <Button
+                                  size="small"
+                                  type="primary"
+                                  ghost
+                                  onClick={(e) => {
+                                    e.stopPropagation()
+                                    setPickerSvc(svc)
+                                  }}
+                                  style={{
+                                    fontFamily: token.fontFamilyCode,
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  {displayTgt} <DownOutlined style={{ fontSize: 10 }} />
+                                </Button>
+                              </Tooltip>
+                            </ConfigProvider>
                           </Space>
                         </div>
                       </div>
