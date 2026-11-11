@@ -92,7 +92,13 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
     app.group === 'no_update' || app.group === 'up_to_date' || app.group === 'ignored'
   const isCaution = app.group === 'caution'
   const cautionBtnTheme = useMemo(
-    () => (isCaution ? { token: { colorPrimary: token.colorWarning } } : undefined),
+    () =>
+      isCaution
+        ? {
+            token: { colorPrimary: token.colorWarning },
+            components: { Button: { primaryShadow: 'none' } },
+          }
+        : undefined,
     [isCaution, token.colorWarning],
   )
 
