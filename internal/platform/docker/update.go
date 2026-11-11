@@ -62,7 +62,12 @@ func (a *Adapter) UpdateService(
 	}
 
 	// 1. Pre-check & 冲突检测（立项文档 §7.1 / §7.2 / A15）
-	emit(platform.PullProgress{Phase: "precheck", StatusText: "Checking target container & configuration for conflicts"})
+	emit(platform.PullProgress{
+		Phase:      "precheck",
+		StatusText: "Checking target container & configuration for conflicts",
+		Percent:    5,
+		LogChunk:   "Checking target container & configuration for conflicts...\r\n",
+	})
 	targetContainerID, rawInspect, wasRunning, err := a.findTargetContainer(ctx, req)
 	if err != nil {
 		return nil, &platform.UpdateError{Code: "precheck_failed", Message: i18n.DetailOf(err)}
@@ -115,8 +120,13 @@ func (a *Adapter) UpdateService(
 		return i18n.EngineDetail(i18n.MsgDockerComposeRestored, detail)
 	}
 
-	// 2. 拉取目标镜像并流式解析分层进度（立项文档 §7.1 / §7.3 / A04）
-	emit(platform.PullProgress{Phase: "pulling", StatusText: "Pulling image " + req.TargetImageRef})
+	// 2. 拉取目标镜像并流式解析分层进度（立项文档 §7.1 / §7.3 / A04 / 附录 E.1）
+	emit(platform.PullProgress{
+		Phase:      "pulling",
+		StatusText: "Pulling image " + req.TargetImageRef,
+		Percent:    10,
+		LogChunk:   fmt.Sprintf("Pulling image %s ...\r\n", req.TargetImageRef),
+	})
 	addLog("pulling image: %s", req.TargetImageRef)
 	newImageID, newRepoDigest, err := a.pullImageStream(ctx, execTr, req.TargetImageRef, req.RegistryAuthB64, emit)
 	if err != nil {
@@ -128,7 +138,8 @@ func (a *Adapter) UpdateService(
 	emit(platform.PullProgress{
 		Phase:      "recreating",
 		StatusText: "Recreating service " + req.ServiceName,
-		Percent:    100,
+		Percent:    85,
+		LogChunk:   fmt.Sprintf("Recreating service %s ...\r\n", req.ServiceName),
 	})
 
 	usedComposeCLI := false
@@ -157,22 +168,52 @@ func (a *Adapter) UpdateService(
 			}
 		}
 
-		out, err := execTr.ExecComposeService(
-			ctx,
-			req.Project.WorkingDir,
-			req.Project.ConfigFiles,
-			req.Project.EnvFiles,
-			req.Project.Name,
-			req.ServiceName,
-			wasRunning,
-		)
-		if err == nil {
+		var out string
+		var cErr error
+		if streamTr, ok := execTr.(transport.StreamingComposeTransport); ok {
+			out, cErr = streamTr.ExecComposeServiceStream(
+				ctx,
+				req.Project.WorkingDir,
+				req.Project.ConfigFiles,
+				req.Project.EnvFiles,
+				req.Project.Name,
+				req.ServiceName,
+				wasRunning,
+				func(chunk string) {
+					emit(platform.PullProgress{
+						Phase:      "recreating",
+						StatusText: "Recreating service " + req.ServiceName,
+						Percent:    88,
+						LogChunk:   chunk,
+					})
+				},
+			)
+		} else {
+			out, cErr = execTr.ExecComposeService(
+				ctx,
+				req.Project.WorkingDir,
+				req.Project.ConfigFiles,
+				req.Project.EnvFiles,
+				req.Project.Name,
+				req.ServiceName,
+				wasRunning,
+			)
+			if out != "" {
+				emit(platform.PullProgress{
+					Phase:      "recreating",
+					StatusText: "Recreating service " + req.ServiceName,
+					Percent:    88,
+					LogChunk:   out + "\r\n",
+				})
+			}
+		}
+		if cErr == nil {
 			usedComposeCLI = true
 			if out != "" {
 				addLog("docker compose output: %s", out)
 			}
 		} else {
-			addLog("docker compose cli fallback to engine api (%v)", err)
+			addLog("docker compose cli fallback to engine api (%v)", cErr)
 		}
 	}
 
@@ -182,13 +223,20 @@ func (a *Adapter) UpdateService(
 			return nil, &platform.UpdateError{Code: "recreate_failed", Message: restoreCompose(i18n.DetailOf(err))}
 		}
 		addLog("recreated container via Engine API: %s", shortID(newCID))
+		emit(platform.PullProgress{
+			Phase:      "recreating",
+			StatusText: "Container recreated: " + shortID(newCID),
+			Percent:    90,
+			LogChunk:   fmt.Sprintf("Container recreated via Docker Engine API (%s)\r\n", shortID(newCID)),
+		})
 	}
 
 	// 4. 校验运行状态与实际运行镜像切换（立项文档 §4.1 / §7.1 / §7.2 / A03）
 	emit(platform.PullProgress{
 		Phase:      "verifying",
 		StatusText: "Verifying container state & switched image",
-		Percent:    100,
+		Percent:    95,
+		LogChunk:   "Verifying container state & switched image...\r\n",
 	})
 	res, err := a.verifyUpdatedService(ctx, req, newImageID, newRepoDigest, wasRunning)
 	if err != nil {
@@ -209,9 +257,26 @@ func (a *Adapter) UpdateService(
 }
 
 type layerStat struct {
-	current int64
-	total   int64
-	done    bool
+	id         string
+	status     string // waiting | downloading | extracting | done
+	lastRawSt  string
+	current    int64
+	total      int64
+	pct        int
+	done       bool
+}
+
+func formatBytesShort(b int64) string {
+	switch {
+	case b >= 1024*1024*1024:
+		return fmt.Sprintf("%.2f GB", float64(b)/(1024*1024*1024))
+	case b >= 1024*1024:
+		return fmt.Sprintf("%.2f MB", float64(b)/(1024*1024))
+	case b >= 1024:
+		return fmt.Sprintf("%.1f kB", float64(b)/1024)
+	default:
+		return fmt.Sprintf("%d B", b)
+	}
 }
 
 func (a *Adapter) pullImageStream(
@@ -241,7 +306,9 @@ func (a *Adapter) pullImageStream(
 		return "", "", i18n.NewEngineError(i18n.MsgDockerPullFailed, dockerHTTPErr(resp.StatusCode, strings.TrimSpace(string(body))))
 	}
 
+	var layerOrder []string
 	layers := make(map[string]*layerStat)
+	prevWasOverwrite := false
 	dec := json.NewDecoder(resp.Body)
 	for {
 		var ev struct {
@@ -262,19 +329,25 @@ func (a *Adapter) pullImageStream(
 		if ev.Error != "" {
 			return "", "", errors.New(ev.Error)
 		}
+
 		stLower := strings.ToLower(ev.Status)
-		if ev.ID != "" && len(ev.ID) <= 16 && !strings.Contains(ev.ID, ":") &&
-			(strings.Contains(stLower, "pulling fs layer") ||
+		isLayerEv := ev.ID != "" && len(ev.ID) <= 16 && !strings.Contains(ev.ID, ":") &&
+			(strings.Contains(stLower, "waiting") ||
+				strings.Contains(stLower, "pulling fs layer") ||
 				strings.Contains(stLower, "downloading") ||
 				strings.Contains(stLower, "extracting") ||
 				strings.Contains(stLower, "verifying") ||
 				strings.Contains(stLower, "download complete") ||
 				strings.Contains(stLower, "pull complete") ||
-				strings.Contains(stLower, "already exists")) {
+				strings.Contains(stLower, "already exists"))
+
+		var logChunk string
+		if isLayerEv {
 			ls, ok := layers[ev.ID]
 			if !ok {
-				ls = &layerStat{}
+				ls = &layerStat{id: ev.ID, status: "waiting"}
 				layers[ev.ID] = ls
+				layerOrder = append(layerOrder, ev.ID)
 			}
 			if ev.ProgressDetail.Total > ls.total {
 				ls.total = ev.ProgressDetail.Total
@@ -282,32 +355,122 @@ func (a *Adapter) pullImageStream(
 			if ev.ProgressDetail.Current > ls.current {
 				ls.current = ev.ProgressDetail.Current
 			}
-			if strings.Contains(stLower, "pull complete") || strings.Contains(stLower, "already exists") {
+
+			switch {
+			case strings.Contains(stLower, "pull complete") || strings.Contains(stLower, "already exists"):
+				ls.status = "done"
 				ls.done = true
 				if ls.total > 0 {
 					ls.current = ls.total
 				}
+				ls.pct = 100
+				prefix := ""
+				if prevWasOverwrite {
+					prefix = "\r\x1b[2K"
+					prevWasOverwrite = false
+				}
+				if ls.lastRawSt != ev.Status {
+					logChunk = fmt.Sprintf("%s\x1b[32m✔\x1b[0m \x1b[36m%s\x1b[0m: %s\r\n", prefix, ev.ID, ev.Status)
+				}
+			case strings.Contains(stLower, "extracting"):
+				if !ls.done {
+					ls.status = "extracting"
+					if ev.ProgressDetail.Total > 0 {
+						p := int(ev.ProgressDetail.Current * 100 / ev.ProgressDetail.Total)
+						if p > 99 {
+							p = 99
+						}
+						ls.pct = p
+						logChunk = fmt.Sprintf("\r\x1b[2K\x1b[36m%s\x1b[0m: Extracting %s / %s (%d%%)", ev.ID, formatBytesShort(ev.ProgressDetail.Current), formatBytesShort(ev.ProgressDetail.Total), p)
+						prevWasOverwrite = true
+					} else if ls.pct < 50 {
+						ls.pct = 50
+					}
+				}
+			case strings.Contains(stLower, "downloading") || strings.Contains(stLower, "verifying") || strings.Contains(stLower, "download complete"):
+				if !ls.done && ls.status != "extracting" {
+					ls.status = "downloading"
+					if strings.Contains(stLower, "download complete") || strings.Contains(stLower, "verifying") {
+						if ls.total > 0 {
+							ls.current = ls.total
+						}
+						ls.pct = 100
+						if ls.lastRawSt != ev.Status {
+							prefix := ""
+							if prevWasOverwrite {
+								prefix = "\r\x1b[2K"
+								prevWasOverwrite = false
+							}
+							logChunk = fmt.Sprintf("%s\x1b[36m%s\x1b[0m: %s\r\n", prefix, ev.ID, ev.Status)
+						}
+					} else if ls.total > 0 {
+						p := int(ls.current * 100 / ls.total)
+						if p > 99 {
+							p = 99
+						}
+						if p > ls.pct {
+							ls.pct = p
+						}
+						logChunk = fmt.Sprintf("\r\x1b[2K\x1b[36m%s\x1b[0m: Downloading %s / %s (%d%%)", ev.ID, formatBytesShort(ls.current), formatBytesShort(ls.total), ls.pct)
+						prevWasOverwrite = true
+					}
+				}
+			default:
+				if ls.lastRawSt != ev.Status {
+					prefix := ""
+					if prevWasOverwrite {
+						prefix = "\r\x1b[2K"
+						prevWasOverwrite = false
+					}
+					logChunk = fmt.Sprintf("%s\x1b[36m%s\x1b[0m: %s\r\n", prefix, ev.ID, ev.Status)
+				}
+			}
+			ls.lastRawSt = ev.Status
+		} else if ev.Status != "" {
+			prefix := ""
+			if prevWasOverwrite {
+				prefix = "\r\x1b[2K"
+				prevWasOverwrite = false
+			}
+			if ev.ID != "" {
+				logChunk = fmt.Sprintf("%s%s: %s\r\n", prefix, ev.ID, ev.Status)
+			} else {
+				logChunk = fmt.Sprintf("%s%s\r\n", prefix, ev.Status)
 			}
 		}
 
-		var totalLayers, completedLayers int
+		totalLayers := len(layerOrder)
+		completedLayers := 0
 		var downloadedBytes, totalBytes int64
-		for _, l := range layers {
-			totalLayers++
+		layersOut := make([]platform.LayerProgress, 0, totalLayers)
+		for _, id := range layerOrder {
+			l := layers[id]
 			if l.done {
 				completedLayers++
 			}
 			downloadedBytes += l.current
 			totalBytes += l.total
+			layersOut = append(layersOut, platform.LayerProgress{
+				ID:      l.id,
+				Status:  l.status,
+				Current: l.current,
+				Total:   l.total,
+				Percent: l.pct,
+			})
 		}
-		pct := 0
+
+		rawPct := 0
 		if totalBytes > 0 {
-			pct = int(downloadedBytes * 100 / totalBytes)
+			rawPct = int(downloadedBytes * 100 / totalBytes)
 		} else if totalLayers > 0 {
-			pct = completedLayers * 100 / totalLayers
+			rawPct = completedLayers * 100 / totalLayers
 		}
-		if pct > 99 {
-			pct = 99
+		if rawPct > 100 {
+			rawPct = 100
+		}
+		pct := 10 + rawPct*70/100
+		if pct > 80 {
+			pct = 80
 		}
 		emit(platform.PullProgress{
 			Phase:           "pulling",
@@ -317,6 +480,8 @@ func (a *Adapter) pullImageStream(
 			DownloadedBytes: downloadedBytes,
 			TotalBytes:      totalBytes,
 			Percent:         pct,
+			Layers:          layersOut,
+			LogChunk:        logChunk,
 		})
 	}
 
@@ -558,7 +723,12 @@ func (a *Adapter) UpdateProjectCompose(
 			onProgress(p)
 		}
 	}
-	emit(platform.PullProgress{Phase: "precheck", StatusText: "Writing updated compose configuration", Percent: 10})
+	emit(platform.PullProgress{
+		Phase:      "precheck",
+		StatusText: "Writing updated compose configuration",
+		Percent:    5,
+		LogChunk:   fmt.Sprintf("Writing updated Compose configuration to %s ...\r\n", composePath),
+	})
 
 	newBytes := []byte(newYAML)
 	if err := execTr.WriteFileAtomic(ctx, composePath, newBytes, origSHA); err != nil {
@@ -585,23 +755,49 @@ func (a *Adapter) UpdateProjectCompose(
 		cfgFiles = []string{composePath}
 	}
 
-	emit(platform.PullProgress{Phase: "recreating", StatusText: "Pulling images and recreating Compose project", Percent: 55})
-	if _, err := execTr.ExecComposeProject(ctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, true); err != nil {
+	parser := platform.NewComposeStreamParser()
+	emit(platform.PullProgress{
+		Phase:      "pulling",
+		StatusText: "Pulling images and recreating Compose project",
+		Percent:    10,
+		LogChunk:   "Running docker compose pull & up -d --remove-orphans ...\r\n",
+	})
+
+	var runErr error
+	if streamTr, ok := execTr.(transport.StreamingComposeTransport); ok {
+		_, runErr = streamTr.ExecComposeProjectStream(ctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, true, func(chunk string) {
+			emit(parser.Feed(chunk))
+		})
+		parser.Flush()
+	} else {
+		var out string
+		out, runErr = execTr.ExecComposeProject(ctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, true)
+		if out != "" {
+			emit(parser.Feed(out + "\r\n"))
+			parser.Flush()
+		}
+	}
+	if runErr != nil {
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
 		defer cancel()
 		if rErr := execTr.WriteFileAtomic(rctx, composePath, origBytes, writtenSHA); rErr != nil {
 			return &platform.UpdateError{
 				Code:    "recreate_failed",
-				Message: i18n.EngineDetail(i18n.MsgDockerComposeRestoreErr, err.Error(), rErr.Error()),
+				Message: i18n.EngineDetail(i18n.MsgDockerComposeRestoreErr, runErr.Error(), rErr.Error()),
 			}
 		}
 		_, _ = execTr.ExecComposeProject(rctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, false)
 		return &platform.UpdateError{
 			Code:    "recreate_failed",
-			Message: i18n.EngineDetail(i18n.MsgDockerComposeRestored, err.Error()),
+			Message: i18n.EngineDetail(i18n.MsgDockerComposeRestored, runErr.Error()),
 		}
 	}
 
-	emit(platform.PullProgress{Phase: "done", StatusText: "Compose project updated", Percent: 100})
+	emit(platform.PullProgress{
+		Phase:      "done",
+		StatusText: "Compose project updated",
+		Percent:    100,
+		LogChunk:   "Compose project update completed.\r\n",
+	})
 	return nil
 }

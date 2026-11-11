@@ -136,10 +136,10 @@ func TestListAppsViaDSMAPI_NormalizesRepoTagAndImageIDDigest(t *testing.T) {
 }
 
 func TestDSMProjectComposeReadAndUpdateRollback(t *testing.T) {
-	origYAML := "services:\n  web:\n    image: nginx:1.26.0\n"
+	origYAML := "services:\n  web:\n    image: ghcr.io/org/web:1.26.0\n"
 	curContent := origYAML
 	failBuild := true
-	var pulledRepos []string
+	pullStartCalled := false
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
@@ -152,10 +152,8 @@ func TestDSMProjectComposeReadAndUpdateRollback(t *testing.T) {
 		case "SYNO.Docker.Project.get":
 			write(map[string]any{"success": true, "data": map[string]any{"id": "p1", "name": "webstack", "path": "/volume1/docker/webstack", "content": curContent}})
 		case "SYNO.Docker.Image.pull_start":
-			var repo string
-			_ = json.Unmarshal([]byte(r.FormValue("repository")), &repo)
-			pulledRepos = append(pulledRepos, repo)
-			write(map[string]any{"success": true, "data": map[string]any{"task_id": ""}})
+			pullStartCalled = true
+			write(map[string]any{"success": false, "error": map[string]any{"code": 1202}})
 		case "SYNO.Docker.Project.update":
 			_ = json.Unmarshal([]byte(r.FormValue("content")), &curContent)
 			write(map[string]any{"success": true, "data": map[string]any{}})
@@ -180,14 +178,123 @@ func TestDSMProjectComposeReadAndUpdateRollback(t *testing.T) {
 		t.Fatalf("GetProjectCompose got=%q err=%v", gotYAML, err)
 	}
 
-	newYAML := "services:\n  web:\n    image: nginx:1.27.3\n"
+	newYAML := "services:\n  web:\n    image: ghcr.io/org/web:1.27.3\n"
 	if err := ad.UpdateProjectCompose(t.Context(), "webstack", proj, newYAML, nil); err == nil {
 		t.Fatal("expected build failure")
 	}
 	if curContent != origYAML {
 		t.Fatalf("expected restoreProjectYAML to restore origYAML, got:\n%s", curContent)
 	}
-	if len(pulledRepos) == 0 || pulledRepos[0] != "nginx" {
-		t.Fatalf("expected PullImage before build, got %v", pulledRepos)
+	if pullStartCalled {
+		t.Fatal("UpdateProjectCompose on DSM Project must stream build_stream directly without failing on pull_start 1202")
+	}
+}
+
+func TestDSMStandaloneConfigReadAndUpdateWithBackupRestore(t *testing.T) {
+	curProfile := map[string]any{
+		"name":  "myapp",
+		"image": "ghcr.io/org/myapp:1.0.0",
+		"env_variables": []any{
+			map[string]any{"key": "TZ", "value": "Asia/Shanghai"},
+		},
+		"port_bindings": []any{
+			map[string]any{"container_port": 8080, "host_port": 18080, "type": "tcp"},
+		},
+		"volume_bindings": []any{
+			map[string]any{"host_volume_file": "/docker/myapp", "mount_point": "/data", "type": "rw"},
+		},
+	}
+	curImgID := "sha256:old1"
+	failCreateNew := false
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		apiName := r.FormValue("api")
+		method := r.FormValue("method")
+		write := func(v any) { _ = json.NewEncoder(w).Encode(v) }
+		switch apiName + "." + method {
+		case "SYNO.API.Auth.login":
+			write(map[string]any{"success": true, "data": map[string]any{"sid": "sid-1"}})
+		case "SYNO.Docker.Container.list":
+			write(map[string]any{"success": true, "data": map[string]any{
+				"containers": []any{map[string]any{
+					"id": "c-standalone", "name": "myapp", "Image": curProfile["image"], "ImageID": curImgID,
+					"status": "running", "State": map[string]any{"Running": true, "Status": "running"},
+				}},
+			}})
+		case "SYNO.Docker.Container.get":
+			write(map[string]any{"success": true, "data": map[string]any{
+				"profile": curProfile,
+				"details": map[string]any{"State": map[string]any{"Running": true}},
+			}})
+		case "SYNO.Docker.Image.pull_start":
+			write(map[string]any{"success": true, "data": map[string]any{"task_id": ""}})
+		case "SYNO.Docker.Image.list":
+			write(map[string]any{"success": true, "data": map[string]any{
+				"images": []any{map[string]any{"id": "sha256:new2", "repository": "org/myapp", "tags": []string{"1.1.0"}}},
+			}})
+		case "SYNO.Docker.Container.stop", "SYNO.Docker.Container.delete":
+			write(map[string]any{"success": true, "data": map[string]any{}})
+		case "SYNO.Docker.Container.create":
+			var p map[string]any
+			_ = json.Unmarshal([]byte(r.FormValue("profile")), &p)
+			if failCreateNew && p["image"] == "ghcr.io/org/myapp:1.1.0" {
+				write(map[string]any{"success": false, "error": map[string]any{"code": 1300}})
+				return
+			}
+			curProfile = p
+			if p["image"] == "ghcr.io/org/myapp:1.1.0" {
+				curImgID = "sha256:new2"
+			} else {
+				curImgID = "sha256:old1"
+			}
+			write(map[string]any{"success": true, "data": map[string]any{}})
+		default:
+			write(map[string]any{"success": true, "data": map[string]any{}})
+		}
+	}))
+	defer srv.Close()
+
+	ad := New("h-nas", nil, DSMConfig{URL: srv.URL, Username: "admin", Secret: "pass"})
+	defer ad.Close()
+
+	cfg, err := ad.GetStandaloneConfig(t.Context(), "myapp", "main")
+	if err != nil {
+		t.Fatalf("GetStandaloneConfig failed: %v", err)
+	}
+	if !cfg.Editable || len(cfg.Env) != 1 || cfg.Env[0].Key != "TZ" || len(cfg.Ports) != 1 || cfg.Ports[0].HostPort != "18080" || len(cfg.Volumes) != 1 {
+		t.Fatalf("unexpected standalone config: %+v", cfg)
+	}
+
+	// 1. Test failure restores original profile
+	failCreateNew = true
+	_, err = ad.UpdateStandaloneConfig(t.Context(), platform.StandaloneUpdateRequest{
+		AppName:        "myapp",
+		ServiceName:    "main",
+		OldImageRef:    "ghcr.io/org/myapp:1.0.0",
+		TargetImageRef: "ghcr.io/org/myapp:1.1.0",
+		Env:            []platform.EnvVar{{Key: "TZ", Value: "UTC"}},
+		Ports:          []platform.PortBinding{{HostPort: "28080", ContainerPort: "8080", Protocol: "tcp"}},
+	}, nil)
+	if err == nil || curProfile["image"] != "ghcr.io/org/myapp:1.0.0" {
+		t.Fatalf("expected failure and backup restore, got err=%v profile=%v", err, curProfile)
+	}
+
+	// 2. Test success updates image, env, and ports
+	failCreateNew = false
+	res, err := ad.UpdateStandaloneConfig(t.Context(), platform.StandaloneUpdateRequest{
+		AppName:        "myapp",
+		ServiceName:    "main",
+		OldImageRef:    "ghcr.io/org/myapp:1.0.0",
+		TargetImageRef: "ghcr.io/org/myapp:1.1.0",
+		Env:            []platform.EnvVar{{Key: "TZ", Value: "UTC"}, {Key: "NEW_FLAG", Value: "1"}},
+		Ports:          []platform.PortBinding{{HostPort: "28080", ContainerPort: "8080", Protocol: "tcp"}},
+	}, nil)
+	if err != nil || res.NewImageID != "sha256:new2" {
+		t.Fatalf("UpdateStandaloneConfig failed: res=%+v err=%v", res, err)
+	}
+	cfgAfter, _ := ad.GetStandaloneConfig(t.Context(), "myapp", "main")
+	if len(cfgAfter.Env) != 2 || cfgAfter.Ports[0].HostPort != "28080" {
+		t.Fatalf("expected updated env and ports, got %+v", cfgAfter)
 	}
 }

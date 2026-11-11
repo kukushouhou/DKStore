@@ -3,6 +3,7 @@ import { Button, Modal, Spin, message, theme } from 'antd'
 import { api, type AppCardItem, type ServiceItem } from '../api/client'
 import { useI18n } from '../i18n'
 import { useUIStore } from '../store/ui'
+import { detectComposeOverwriteRisks } from './composeGuard'
 import VersionPickerModal, { type VersionPickSelection } from './VersionPickerModal'
 
 interface ProjectUpdateModalProps {
@@ -11,71 +12,6 @@ interface ProjectUpdateModalProps {
   initialTab?: 'direct' | 'yaml'
   onClose: () => void
   onUpdated: () => void
-}
-
-const SAMPLE_PLACEHOLDERS = new Set([
-  'password',
-  'secret',
-  'secretkey',
-  'changeme',
-  'your_password',
-  'your_secret',
-  'example',
-  '123456',
-  'admin',
-  'postgres',
-  'root',
-])
-
-/** 提取原配置中的宿主机绝对挂载路径与敏感环境变量，检测粘贴后是否被示例模板覆盖 */
-function detectComposeOverwriteRisks(
-  origYaml: string,
-  nextYaml: string,
-): { missingPaths: string[]; overwrittenSecrets: string[] } {
-  if (!origYaml.trim() || !nextYaml.trim()) {
-    return { missingPaths: [], overwrittenSecrets: [] }
-  }
-
-  const hostPaths = new Set<string>()
-  const lines = origYaml.split(/\r?\n/)
-  const volRegex = /^\s*-\s*["']?(\/[A-Za-z0-9._\-/]+):/
-  const sourceRegex = /^\s*source:\s*["']?(\/[A-Za-z0-9._\-/]+)["']?\s*$/
-
-  for (const line of lines) {
-    const m = volRegex.exec(line) || sourceRegex.exec(line)
-    if (m && m[1]) {
-      const p = m[1]
-      if (p !== '/etc/localtime' && p !== '/etc/timezone') {
-        hostPaths.add(p)
-      }
-    }
-  }
-
-  const missingPaths = [...hostPaths].filter((p) => !nextYaml.includes(p))
-
-  const secretEntries = new Map<string, string>()
-  const envListRegex = /^\s*-\s*([A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|KEY|TOKEN)[A-Z0-9_]*)\s*=\s*(.+?)\s*$/i
-  const envMapRegex = /^\s*([A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|KEY|TOKEN)[A-Z0-9_]*)\s*:\s*(.+?)\s*$/i
-
-  for (const line of lines) {
-    const m = envListRegex.exec(line) || envMapRegex.exec(line)
-    if (m && m[1] && m[2]) {
-      const key = m[1]
-      const val = m[2].replace(/^["']|["']$/g, '').trim()
-      if (val && !val.startsWith('${') && !SAMPLE_PLACEHOLDERS.has(val.toLowerCase())) {
-        secretEntries.set(key, val)
-      }
-    }
-  }
-
-  const overwrittenSecrets: string[] = []
-  for (const [key, origVal] of secretEntries) {
-    if (!nextYaml.includes(origVal)) {
-      overwrittenSecrets.push(key)
-    }
-  }
-
-  return { missingPaths, overwrittenSecrets }
 }
 
 function isServiceUpdatable(svc: ServiceItem): boolean {
@@ -257,7 +193,10 @@ function ProjectUpdateModalBody({
     }
     setSubmittingYaml(true)
     try {
-      const res = await api.updateAppCompose(app.key, yamlText)
+      const res = await api.updateAppCompose({ appKey: app.key, content: yamlText })
+      if (res.job) {
+        upsertUpdateJob(res.job)
+      }
       if (res.items) {
         for (const job of res.items) {
           upsertUpdateJob(job)
@@ -332,7 +271,7 @@ function ProjectUpdateModalBody({
               </div>
             </div>
 
-            {app.composeEditable && totalCount >= 2 && (
+            {(app.composeEditable || tab === 'yaml') && totalCount >= 2 && (
               <div
                 style={{
                   display: 'inline-flex',

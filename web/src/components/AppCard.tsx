@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Alert, Modal, Progress, Space, Typography, message, theme } from 'antd'
+import { Alert, Dropdown, Modal, Progress, Space, Typography, message, theme } from 'antd'
 import {
   api,
   resolveIconUrl,
@@ -53,13 +53,16 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
 
   const activeUpdateJobs = useUIStore((s) => s.activeUpdateJobs)
   const lastFinishedJobs = useUIStore((s) => s.lastFinishedJobs)
+  const updateQueueJobs = useUIStore((s) => s.updateQueueJobs)
   const upsertUpdateJob = useUIStore((s) => s.upsertUpdateJob)
+  const setActiveLogJobId = useUIStore((s) => s.setActiveLogJobId)
 
   const iconSrc = resolveIconUrl(app.iconUrl)
   const [failedIconSrc, setFailedIconSrc] = useState<string | null>(null)
   const imgErr = Boolean(iconSrc && failedIconSrc === iconSrc)
 
   const [pickerSvc, setPickerSvc] = useState<ServiceItem | null>(null)
+  const [pickerInitialTab, setPickerInitialTab] = useState<'version' | 'config'>('version')
   const [ignoreOpen, setIgnoreOpen] = useState(false)
   const [projectModalOpen, setProjectModalOpen] = useState(false)
   const [projectInitialTab, setProjectInitialTab] = useState<'direct' | 'yaml'>('direct')
@@ -100,13 +103,47 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
     primaryService?.targetVersion ??
     ''
 
-  const activeJobsForApp: UpdateJobItem[] = app.services
-    .map((s) => activeUpdateJobs[s.key])
-    .filter((j): j is UpdateJobItem => Boolean(j))
+  const activeJobsForApp: UpdateJobItem[] = useMemo(() => {
+    const seen = new Set<string>()
+    const list: UpdateJobItem[] = []
+    for (const s of app.services) {
+      const j = activeUpdateJobs[s.key]
+      if (j && !seen.has(j.id)) {
+        seen.add(j.id)
+        list.push(j)
+      }
+    }
+    for (const j of Object.values(updateQueueJobs)) {
+      if (
+        j.appKey === app.key &&
+        (j.status === 'queued' || j.status === 'running') &&
+        !seen.has(j.id)
+      ) {
+        seen.add(j.id)
+        list.push(j)
+      }
+    }
+    return list
+  }, [activeUpdateJobs, app.key, app.services, updateQueueJobs])
 
-  const failedJobsForApp: UpdateJobItem[] = app.services
-    .map((s) => lastFinishedJobs[s.key])
-    .filter((j): j is UpdateJobItem => Boolean(j && j.status === 'failed'))
+  const failedJobsForApp: UpdateJobItem[] = useMemo(() => {
+    const seen = new Set<string>()
+    const list: UpdateJobItem[] = []
+    for (const s of app.services) {
+      const j = lastFinishedJobs[s.key]
+      if (j && j.status === 'failed' && !seen.has(j.id)) {
+        seen.add(j.id)
+        list.push(j)
+      }
+    }
+    for (const j of Object.values(updateQueueJobs)) {
+      if (j.appKey === app.key && j.status === 'failed' && !seen.has(j.id)) {
+        seen.add(j.id)
+        list.push(j)
+      }
+    }
+    return list
+  }, [app.key, app.services, lastFinishedJobs, updateQueueJobs])
 
   const formatPhaseText = (job: UpdateJobItem): string => {
     switch (job.phase || job.progress?.phase) {
@@ -156,6 +193,18 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
       return
     }
     triggerSingleServiceUpdate(primaryService)
+  }
+
+  const handleUpdateByConfigClick = () => {
+    if (isMultiContainer) {
+      setProjectInitialTab('yaml')
+      setProjectModalOpen(true)
+      return
+    }
+    if (primaryService) {
+      setPickerInitialTab('config')
+      setPickerSvc(primaryService)
+    }
   }
 
   const handleRestoreReminder = async () => {
@@ -517,7 +566,10 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
                   title={t.home.pickOtherVersionTip}
                   className="dkstore-ver-pill"
                   onClick={() => {
-                    if (primaryService) setPickerSvc(primaryService)
+                    if (primaryService) {
+                      setPickerInitialTab('version')
+                      setPickerSvc(primaryService)
+                    }
                   }}
                   style={{
                     display: 'inline-flex',
@@ -560,7 +612,7 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
             )}
           </div>
 
-          {/* 活跃升级进度条 */}
+          {/* 活跃升级进度条 + 实时查看日志入口 */}
           {activeJobsForApp.map((job) => (
             <div key={job.id} style={{ marginTop: 10 }}>
               <div
@@ -568,21 +620,41 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
                   display: 'flex',
                   justifyContent: 'space-between',
                   alignItems: 'center',
+                  gap: 6,
                   fontSize: 11,
                   color: token.colorTextSecondary,
                 }}
               >
-                <span>{formatPhaseText(job)}</span>
-                {(job.progress?.totalLayers ?? 0) > 0 && (
-                  <span>
-                    {t.home.layerStat
-                      .replace('{done}', String(job.progress?.completedLayers ?? 0))
-                      .replace('{total}', String(job.progress?.totalLayers ?? 0))}
-                    {(job.progress?.totalBytes ?? 0) > 0
-                      ? ` (${formatBytes(job.progress?.downloadedBytes ?? 0)} / ${formatBytes(job.progress?.totalBytes ?? 0)})`
-                      : ''}
-                  </span>
-                )}
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {formatPhaseText(job)}
+                </span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                  {(job.progress?.totalLayers ?? 0) > 0 && (
+                    <span>
+                      {t.home.layerStat
+                        .replace('{done}', String(job.progress?.completedLayers ?? 0))
+                        .replace('{total}', String(job.progress?.totalLayers ?? 0))}
+                      {(job.progress?.totalBytes ?? 0) > 0
+                        ? ` (${formatBytes(job.progress?.downloadedBytes ?? 0)} / ${formatBytes(job.progress?.totalBytes ?? 0)})`
+                        : ''}
+                    </span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setActiveLogJobId(job.id)}
+                    style={{
+                      border: 'none',
+                      background: 'transparent',
+                      color: token.colorPrimary,
+                      fontSize: 11,
+                      fontWeight: 500,
+                      padding: 0,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {t.home.viewLogs}
+                  </button>
+                </span>
               </div>
               <Progress percent={job.progress?.percent ?? 0} size="small" status="active" />
             </div>
@@ -594,10 +666,36 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
               type="error"
               showIcon
               title={
-                <span style={{ fontSize: 12 }}>
-                  {t.home.updateFailed}
-                  {job.errorMsg || job.errorCode}
-                </span>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 8,
+                    fontSize: 12,
+                  }}
+                >
+                  <span style={{ minWidth: 0, wordBreak: 'break-word' }}>
+                    {t.home.updateFailed}
+                    {job.errorMsg || job.errorCode}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setActiveLogJobId(job.id)}
+                    style={{
+                      border: 'none',
+                      background: 'transparent',
+                      color: token.colorPrimary,
+                      fontSize: 11.5,
+                      fontWeight: 500,
+                      padding: 0,
+                      cursor: 'pointer',
+                      flexShrink: 0,
+                    }}
+                  >
+                    {t.home.viewLogs}
+                  </button>
+                </div>
               }
               style={{ marginTop: 10, padding: '5px 10px' }}
             />
@@ -664,7 +762,10 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
                   primaryService.kind !== 'uncomparable' && (
                   <button
                     type="button"
-                    onClick={() => setPickerSvc(primaryService)}
+                    onClick={() => {
+                      setPickerInitialTab('version')
+                      setPickerSvc(primaryService)
+                    }}
                     style={{
                       padding: '4px 10px',
                       borderRadius: 8,
@@ -730,24 +831,77 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
                     {t.home.tagVendor}
                   </span>
                 ) : (
-                  <button
-                    type="button"
-                    disabled={updatingNow}
-                    onClick={handleUpdateClick}
+                  /* 统一组合主按钮 [ 更新 | ▾ ] */
+                  <div
                     style={{
-                      padding: '4px 12px',
+                      display: 'inline-flex',
+                      alignItems: 'stretch',
                       borderRadius: 8,
-                      border: 'none',
-                      background: isCaution ? '#f59e0b' : token.colorPrimary,
-                      color: '#ffffff',
-                      fontSize: 12,
-                      fontWeight: 500,
-                      cursor: updatingNow ? 'not-allowed' : 'pointer',
+                      overflow: 'hidden',
                       opacity: updatingNow ? 0.75 : 1,
                     }}
                   >
-                    {updatingNow ? t.home.updating : t.home.updateBtn}
-                  </button>
+                    <button
+                      type="button"
+                      disabled={updatingNow}
+                      onClick={handleUpdateClick}
+                      style={{
+                        padding: '4px 11px',
+                        border: 'none',
+                        background: isCaution ? '#f59e0b' : token.colorPrimary,
+                        color: '#ffffff',
+                        fontSize: 12,
+                        fontWeight: 500,
+                        cursor: updatingNow ? 'not-allowed' : 'pointer',
+                      }}
+                    >
+                      {updatingNow ? t.home.updating : t.home.updateBtn}
+                    </button>
+                    <span
+                      style={{
+                        width: 1,
+                        background: 'rgba(255, 255, 255, 0.28)',
+                      }}
+                    />
+                    <Dropdown
+                      trigger={['click']}
+                      placement="bottomRight"
+                      disabled={updatingNow}
+                      menu={{
+                        items: [
+                          {
+                            key: 'by-config',
+                            label: t.home.updateByNewConfigMenu,
+                            onClick: handleUpdateByConfigClick,
+                          },
+                        ],
+                      }}
+                    >
+                      <button
+                        type="button"
+                        disabled={updatingNow}
+                        aria-label={t.home.updateByNewConfigMenu}
+                        style={{
+                          padding: '4px 7px',
+                          border: 'none',
+                          background: isCaution ? '#f59e0b' : token.colorPrimary,
+                          color: '#ffffff',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          cursor: updatingNow ? 'not-allowed' : 'pointer',
+                        }}
+                      >
+                        <svg width="11" height="11" viewBox="0 0 20 20" fill="currentColor">
+                          <path
+                            fillRule="evenodd"
+                            d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
+                            clipRule="evenodd"
+                          />
+                        </svg>
+                      </button>
+                    </Dropdown>
+                  </div>
                 )}
               </>
             )}
@@ -775,12 +929,14 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
         </Space>
       </Modal>
 
-      {/* 双栏版本选择弹窗 */}
+      {/* 双栏版本选择与按新版配置更新一体化弹窗 */}
       <VersionPickerModal
         open={Boolean(pickerSvc)}
         appName={pickerSvc?.name || app.name}
         subtitle={subtitle}
         service={pickerSvc}
+        app={app}
+        initialTab={pickerInitialTab}
         onClose={() => setPickerSvc(null)}
         onUpdated={onChanged}
       />
@@ -814,12 +970,12 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
         onClose={() => setDetailOpen(false)}
         onOpenVersionPicker={(svc) => {
           setDetailOpen(false)
+          setPickerInitialTab('version')
           setPickerSvc(svc)
         }}
         onOpenComposeYaml={() => {
           setDetailOpen(false)
-          setProjectInitialTab('yaml')
-          setProjectModalOpen(true)
+          handleUpdateByConfigClick()
         }}
       />
     </>

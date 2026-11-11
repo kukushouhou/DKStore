@@ -19,6 +19,7 @@ import (
 	"github.com/kukushouhou/DKStore/internal/ignore"
 	"github.com/kukushouhou/DKStore/internal/inventory"
 	"github.com/kukushouhou/DKStore/internal/platform"
+	"github.com/kukushouhou/DKStore/internal/platform/docker"
 	"github.com/kukushouhou/DKStore/internal/registry"
 	"github.com/kukushouhou/DKStore/internal/store"
 	"github.com/kukushouhou/DKStore/internal/version"
@@ -56,6 +57,8 @@ type Job struct {
 	ErrorCode          string                `json:"errorCode,omitempty"`
 	ErrorMsg           string                `json:"errorMsg,omitempty"`
 	Logs               string                `json:"logs,omitempty"`
+	LogChunk           string                `json:"logChunk,omitempty"`
+	LogOffset          int                   `json:"logOffset,omitempty"`
 	StartedAt          int64                 `json:"startedAt"`
 	FinishedAt         int64                 `json:"finishedAt,omitempty"`
 }
@@ -64,9 +67,30 @@ type Job struct {
 type UpdateItemRequest struct {
 	ServiceKey    string `json:"serviceKey"`
 	TargetTag     string `json:"targetTag,omitempty"`
-	PolicyMode    string `json:"policyMode,omitempty"`    // "" | "all" | "skip_latest" | "prefix" | "forever"
+	PolicyMode    string `json:"policyMode,omitempty"` // "" | "all" | "skip_latest" | "prefix" | "forever"
 	PolicyPrefix  string `json:"policyPrefix,omitempty"`
 	SkipTargetTag string `json:"skipTargetTag,omitempty"`
+}
+
+// ComposeUpdateRequest 是整项目/单容器 YAML 按新版配置更新的异步任务请求（附录 E.4）。
+type ComposeUpdateRequest struct {
+	AppKey        string `json:"appKey"`
+	Content       string `json:"content"`
+	ServiceKey    string `json:"serviceKey,omitempty"`
+	PolicyMode    string `json:"policyMode,omitempty"`
+	PolicyPrefix  string `json:"policyPrefix,omitempty"`
+	SkipTargetTag string `json:"skipTargetTag,omitempty"`
+}
+
+// StandaloneConfigUpdateRequest 是无 YAML 独立容器按新版配置（环境变量 + 端口映射）更新的异步任务请求（附录 E.4）。
+type StandaloneConfigUpdateRequest struct {
+	ServiceKey    string                 `json:"serviceKey"`
+	TargetTag     string                 `json:"targetTag,omitempty"`
+	PolicyMode    string                 `json:"policyMode,omitempty"`
+	PolicyPrefix  string                 `json:"policyPrefix,omitempty"`
+	SkipTargetTag string                 `json:"skipTargetTag,omitempty"`
+	Env           []platform.EnvVar      `json:"env"`
+	Ports         []platform.PortBinding `json:"ports"`
 }
 
 // ComposeInfo 是 GET /api/v1/apps/compose 的返回体（附录 D.4）。
@@ -90,11 +114,12 @@ type Service struct {
 	st    *store.Store
 	hosts *host.Registry
 	inv   *inventory.Service
-	reg   *registry.Client
-	ign   *ignore.Service
+	reg           *registry.Client
+	ign           *ignore.Service
+	onHostUpdated func(hostID string)
 
 	mu          sync.Mutex
-	activeJobs  map[string]Job // key: serviceKey -> running Job
+	activeJobs  map[string]Job // key: serviceKey -> running Job (含实时累积 Logs 与 LogOffset)
 	subscribers map[chan Job]struct{}
 	appLocks    sync.Map // key: appKey -> *sync.Mutex（按 Compose 项目串行化更新，审计 M4）
 }
@@ -123,6 +148,11 @@ func New(
 // SetIgnore 注入忽略/版本锁定服务，用于在发起更新时一并应用用户的提醒策略。
 func (s *Service) SetIgnore(ign *ignore.Service) {
 	s.ign = ign
+}
+
+// SetOnHostUpdated 注入宿主机配置重建完成后的回调（用于异步任务完成后触发后台重检）。
+func (s *Service) SetOnHostUpdated(fn func(hostID string)) {
+	s.onHostUpdated = fn
 }
 
 func (s *Service) recoverInterruptedJobs() {
@@ -160,12 +190,15 @@ func (s *Service) lockApp(appKey string) func() {
 
 // Subscribe 订阅实时更新任务进度事件（SSE）。
 func (s *Service) Subscribe() (<-chan Job, func()) {
-	ch := make(chan Job, 16)
+	ch := make(chan Job, 256)
 	s.mu.Lock()
 	s.subscribers[ch] = struct{}{}
 	for _, j := range s.activeJobs {
+		snap := j
+		snap.Logs = ""
+		snap.LogChunk = ""
 		select {
-		case ch <- j:
+		case ch <- snap:
 		default:
 		}
 	}
@@ -182,7 +215,9 @@ func (s *Service) Subscribe() (<-chan Job, func()) {
 func (s *Service) broadcast(j Job) {
 	s.mu.Lock()
 	if j.Status == "running" || j.Status == "queued" {
-		s.activeJobs[j.ServiceKey] = j
+		stored := j
+		stored.LogChunk = ""
+		s.activeJobs[j.ServiceKey] = stored
 	} else {
 		delete(s.activeJobs, j.ServiceKey)
 	}
@@ -413,7 +448,7 @@ func (s *Service) prepareUpgradeJob(ctx context.Context, item UpdateItemRequest,
 		Source:             source,
 		Status:             "running",
 		Phase:              "precheck",
-		Progress:           platform.PullProgress{Phase: "precheck", StatusText: "Preparing update"},
+		Progress:           platform.PullProgress{Phase: "precheck", StatusText: "Preparing update", Percent: 5},
 		OldImageRef:        oldImageRef,
 		OldImageID:         oldImageID,
 		OldRepoDigest:      oldRepoDigest,
@@ -429,6 +464,10 @@ func (s *Service) prepareUpgradeJob(ctx context.Context, item UpdateItemRequest,
 		RollbackReasonText: i18n.FormatRollbackReason(lang, rollbackReason),
 		StartedAt:          now,
 	}
+	initHeader := formatJobHeader(job)
+	job.Logs = initHeader
+	job.LogChunk = initHeader
+	job.LogOffset = len(initHeader)
 	if err := s.insertJob(ctx, job); err != nil {
 		cleanupPlaceholder()
 		return Job{}, false, "", err
@@ -511,7 +550,270 @@ func (s *Service) GetAppCompose(ctx context.Context, appKey string, lang i18n.La
 	}, nil
 }
 
-// UpdateAppCompose 执行整项目按新版 Compose 配置更新，成功后同步主机库存并返回 hostID 供上层触发重检（附录 D.4）。
+// StartComposeUpdate 校验新版 Compose YAML 后启动异步跟踪任务（SSE 实时推送分层进度与原始 xterm 终端流，附录 E.4）。
+func (s *Service) StartComposeUpdate(ctx context.Context, req ComposeUpdateRequest, lang i18n.Lang) (*Job, error) {
+	appKey := strings.TrimSpace(req.AppKey)
+	svcKey := strings.TrimSpace(req.ServiceKey)
+	req.PolicyMode = strings.TrimSpace(req.PolicyMode)
+	req.PolicyPrefix = strings.TrimSpace(req.PolicyPrefix)
+	req.SkipTargetTag = strings.TrimSpace(req.SkipTargetTag)
+
+	svcImages, err := docker.ValidateComposeYAML(req.Content)
+	if err != nil {
+		return nil, err
+	}
+
+	var hostID, hostName, appName, source, projJSON string
+	err = s.st.DB.QueryRowContext(ctx, `
+		SELECT a.host_id, h.name, a.name, a.source, COALESCE(a.project_json,'')
+		FROM app a
+		JOIN host h ON a.host_id = h.id
+		WHERE a.key=? AND a.gone_at IS NULL`, appKey).Scan(
+		&hostID, &hostName, &appName, &source, &projJSON,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, i18n.NewEngineError(i18n.MsgComposeNotEditable)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if source == string(platform.SourceVendorManaged) {
+		return nil, errors.New(i18n.FormatUpdateError(lang, "vendor_managed_readonly", ""))
+	}
+	if source == string(platform.SourceStandalone) {
+		return nil, i18n.NewEngineError(i18n.MsgComposeNotEditable)
+	}
+
+	var proj platform.ProjectInfo
+	if projJSON != "" {
+		_ = json.Unmarshal([]byte(projJSON), &proj)
+	}
+	if proj.Name == "" {
+		proj.Name = appName
+	}
+
+	// 查询代表服务元数据（若前端指定了 serviceKey 则取该服务，否则取该项目下第一个服务）
+	var svcName, oldImageRef, oldImageID, oldRepoDigest, curVer, prevFindingVer string
+	if svcKey != "" {
+		_ = s.st.DB.QueryRowContext(ctx, `
+			SELECT s.name, COALESCE(s.image_ref,''), COALESCE(s.image_id,''), COALESCE(s.repo_digest,''),
+			       COALESCE(f.current_version,''), COALESCE(f.target_version,'')
+			FROM service s
+			LEFT JOIN finding f ON f.service_key = s.key
+			WHERE s.key=? AND s.app_key=? AND s.gone_at IS NULL`, svcKey, appKey).Scan(
+			&svcName, &oldImageRef, &oldImageID, &oldRepoDigest, &curVer, &prevFindingVer,
+		)
+	}
+	if svcName == "" {
+		_ = s.st.DB.QueryRowContext(ctx, `
+			SELECT s.key, s.name, COALESCE(s.image_ref,''), COALESCE(s.image_id,''), COALESCE(s.repo_digest,''),
+			       COALESCE(f.current_version,''), COALESCE(f.target_version,'')
+			FROM service s
+			LEFT JOIN finding f ON f.service_key = s.key
+			WHERE s.app_key=? AND s.gone_at IS NULL
+			ORDER BY s.name ASC LIMIT 1`, appKey).Scan(
+			&svcKey, &svcName, &oldImageRef, &oldImageID, &oldRepoDigest, &curVer, &prevFindingVer,
+		)
+	}
+	if svcKey == "" {
+		svcKey = appKey
+	}
+	if svcName == "" {
+		svcName = appName
+	}
+
+	targetRef := svcImages[svcName]
+	if targetRef == "" {
+		for _, img := range svcImages {
+			targetRef = img
+			break
+		}
+	}
+	if targetRef == "" {
+		targetRef = oldImageRef
+	}
+	_, targetVer := splitRefAndTag(targetRef)
+
+	s.mu.Lock()
+	if active, ok := s.activeJobs[svcKey]; ok && (active.Status == "running" || active.Status == "queued") {
+		s.mu.Unlock()
+		return &active, nil
+	}
+	s.activeJobs[svcKey] = Job{ServiceKey: svcKey, Status: "queued", Phase: "precheck"}
+	s.mu.Unlock()
+
+	cleanupPlaceholder := func() {
+		s.mu.Lock()
+		if cur, ok := s.activeJobs[svcKey]; ok && cur.ID == "" {
+			delete(s.activeJobs, svcKey)
+		}
+		s.mu.Unlock()
+	}
+
+	if req.ServiceKey != "" && req.PolicyMode != "" {
+		if err := s.applyPostUpdatePolicy(ctx, UpdateItemRequest{
+			ServiceKey:    req.ServiceKey,
+			PolicyMode:    req.PolicyMode,
+			PolicyPrefix:  req.PolicyPrefix,
+			SkipTargetTag: req.SkipTargetTag,
+		}, prevFindingVer); err != nil {
+			cleanupPlaceholder()
+			return nil, err
+		}
+	}
+
+	now := time.Now().Unix()
+	job := Job{
+		ID:                 newJobID(),
+		Kind:               "upgrade",
+		HostID:             hostID,
+		HostName:           hostName,
+		AppKey:             appKey,
+		AppName:            appName,
+		ServiceKey:         svcKey,
+		ServiceName:        svcName,
+		Source:             source,
+		Status:             "running",
+		Phase:              "precheck",
+		Progress:           platform.PullProgress{Phase: "precheck", StatusText: "Preparing Compose config update", Percent: 5},
+		OldImageRef:        oldImageRef,
+		OldImageID:         oldImageID,
+		OldRepoDigest:      oldRepoDigest,
+		OldVersion:         curVer,
+		TargetImageRef:     targetRef,
+		TargetVersion:      targetVer,
+		RollbackEligible:   false,
+		RollbackReason:     "no_exact_version_tag",
+		RollbackReasonText: i18n.FormatRollbackReason(lang, "no_exact_version_tag"),
+		StartedAt:          now,
+	}
+	initHeader := formatJobHeader(job)
+	job.Logs = initHeader
+	job.LogChunk = initHeader
+	job.LogOffset = len(initHeader)
+	if err := s.insertJob(ctx, job); err != nil {
+		cleanupPlaceholder()
+		return nil, err
+	}
+	s.broadcast(job)
+	go s.executeComposeJob(job, proj, req.Content)
+	return &job, nil
+}
+
+// GetServiceStandaloneConfig 读取无 YAML 独立容器（source == "standalone"）的当前环境变量、端口映射与挂载目录（附录 E.4）。
+func (s *Service) GetServiceStandaloneConfig(ctx context.Context, serviceKey string, lang i18n.Lang) (*platform.StandaloneConfig, error) {
+	serviceKey = strings.TrimSpace(serviceKey)
+	var hostID, appName, svcName, source, imageRef string
+	err := s.st.DB.QueryRowContext(ctx, `
+		SELECT a.host_id, a.name, s.name, a.source, COALESCE(s.image_ref,'')
+		FROM service s
+		JOIN app a ON s.app_key = a.key
+		WHERE s.key=? AND s.gone_at IS NULL`, serviceKey).Scan(
+		&hostID, &appName, &svcName, &source, &imageRef,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, i18n.NewEngineError(i18n.MsgUpdateServiceNotFound, serviceKey)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if source != string(platform.SourceStandalone) {
+		return &platform.StandaloneConfig{
+			Editable: false,
+			Reason:   i18n.EngineMessage(lang, i18n.MsgComposeNotEditable),
+			ImageRef: imageRef,
+			Env:      []platform.EnvVar{},
+			Ports:    []platform.PortBinding{},
+			Volumes:  []platform.VolumeBinding{},
+		}, nil
+	}
+
+	ad, _, err := s.hosts.OpenAdapter(ctx, hostID)
+	if err != nil {
+		return &platform.StandaloneConfig{
+			Editable: false,
+			Reason:   i18n.LocalizeErr(lang, err),
+			ImageRef: imageRef,
+			Env:      []platform.EnvVar{},
+			Ports:    []platform.PortBinding{},
+			Volumes:  []platform.VolumeBinding{},
+		}, nil
+	}
+	defer ad.Close()
+
+	scAd, ok := ad.(platform.StandaloneConfigAdapter)
+	if !ok {
+		return &platform.StandaloneConfig{
+			Editable: false,
+			Reason:   i18n.EngineMessage(lang, i18n.MsgUpdateAdapterNoUpdate),
+			ImageRef: imageRef,
+			Env:      []platform.EnvVar{},
+			Ports:    []platform.PortBinding{},
+			Volumes:  []platform.VolumeBinding{},
+		}, nil
+	}
+	cfg, err := scAd.GetStandaloneConfig(ctx, appName, svcName)
+	if err != nil {
+		return &platform.StandaloneConfig{
+			Editable: false,
+			Reason:   i18n.LocalizeErr(lang, err),
+			ImageRef: imageRef,
+			Env:      []platform.EnvVar{},
+			Ports:    []platform.PortBinding{},
+			Volumes:  []platform.VolumeBinding{},
+		}, nil
+	}
+	return cfg, nil
+}
+
+// StartStandaloneConfigUpdate 启动独立容器按新版配置（镜像标签 + 环境变量 + 端口映射）重建任务（附录 E.4）。
+func (s *Service) StartStandaloneConfigUpdate(ctx context.Context, req StandaloneConfigUpdateRequest, lang i18n.Lang) (*Job, error) {
+	svcKey := strings.TrimSpace(req.ServiceKey)
+	if svcKey == "" {
+		return nil, i18n.NewEngineError(i18n.MsgUpdateNoService)
+	}
+	var source string
+	err := s.st.DB.QueryRowContext(ctx, `
+		SELECT a.source
+		FROM service s
+		JOIN app a ON s.app_key = a.key
+		WHERE s.key=? AND s.gone_at IS NULL`, svcKey).Scan(&source)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, i18n.NewEngineError(i18n.MsgUpdateServiceNotFound, svcKey)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if source == string(platform.SourceVendorManaged) {
+		return nil, errors.New(i18n.FormatUpdateError(lang, "vendor_managed_readonly", ""))
+	}
+	if source != string(platform.SourceStandalone) {
+		return nil, i18n.NewEngineError(i18n.MsgComposeNotEditable)
+	}
+
+	item := UpdateItemRequest{
+		ServiceKey:    svcKey,
+		TargetTag:     strings.TrimSpace(req.TargetTag),
+		PolicyMode:    strings.TrimSpace(req.PolicyMode),
+		PolicyPrefix:  strings.TrimSpace(req.PolicyPrefix),
+		SkipTargetTag: strings.TrimSpace(req.SkipTargetTag),
+	}
+	j, alreadyRunning, prevFindingVer, err := s.prepareUpgradeJob(ctx, item, lang)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.applyPostUpdatePolicy(ctx, item, prevFindingVer); err != nil {
+		return nil, err
+	}
+	if !alreadyRunning {
+		envCopy := append([]platform.EnvVar(nil), req.Env...)
+		portsCopy := append([]platform.PortBinding(nil), req.Ports...)
+		go s.executeStandaloneConfigJob(j, envCopy, portsCopy)
+	}
+	return &j, nil
+}
+
+// UpdateAppCompose 执行整项目按新版 Compose 配置同步更新（保留供同步调用方使用，附录 D.4）。
 func (s *Service) UpdateAppCompose(ctx context.Context, appKey, newYAML string, lang i18n.Lang) (string, error) {
 	appKey = strings.TrimSpace(appKey)
 	var hostID, appName, source, projJSON string
@@ -564,13 +866,168 @@ func (s *Service) UpdateAppCompose(ctx context.Context, appKey, newYAML string, 
 	return hostID, nil
 }
 
+// jobProgressTracker 维护运行中任务的单调百分比、镜像层状态快照与实时原始终端日志缓冲（附录 E.1 / E.3）。
+type jobProgressTracker struct {
+	svc         *Service
+	logBuf      strings.Builder
+	prevPercent int
+	prevPhase   string
+	prevLayers  []platform.LayerProgress
+	lastPersist time.Time
+}
+
+func newJobProgressTracker(s *Service, j *Job) *jobProgressTracker {
+	t := &jobProgressTracker{
+		svc:         s,
+		prevPercent: j.Progress.Percent,
+		prevPhase:   j.Phase,
+	}
+	if t.prevPercent < 5 {
+		t.prevPercent = 5
+		j.Progress.Percent = 5
+	}
+	if j.Logs != "" {
+		t.logBuf.WriteString(j.Logs)
+	} else {
+		hdr := formatJobHeader(*j)
+		t.logBuf.WriteString(hdr)
+		j.Logs = hdr
+		j.LogOffset = len(hdr)
+	}
+	return t
+}
+
+func formatJobHeader(j Job) string {
+	oldRef := j.OldImageRef
+	if oldRef == "" {
+		oldRef = "current"
+	}
+	tgtRef := j.TargetImageRef
+	if tgtRef == "" {
+		tgtRef = oldRef
+	}
+	return fmt.Sprintf("\x1b[36m==> [%s] Preparing update: %s / %s (%s -> %s)\x1b[0m\r\n",
+		time.Now().Format("15:04:05"), j.AppName, j.ServiceName, oldRef, tgtRef)
+}
+
+func cloneLayerSlice(in []platform.LayerProgress) []platform.LayerProgress {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]platform.LayerProgress, len(in))
+	copy(out, in)
+	return out
+}
+
+func markLayersDone(in []platform.LayerProgress) []platform.LayerProgress {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]platform.LayerProgress, len(in))
+	for i, lp := range in {
+		lp.Status = "done"
+		if lp.Total > 0 {
+			lp.Current = lp.Total
+		}
+		lp.Percent = 100
+		out[i] = lp
+	}
+	return out
+}
+
+func (t *jobProgressTracker) handleProgress(ctx context.Context, j *Job, p platform.PullProgress) {
+	// 1. 严格保持总进度百分比单调递增，禁止回退（附录 E.1）
+	if p.Percent < t.prevPercent {
+		p.Percent = t.prevPercent
+	} else {
+		t.prevPercent = p.Percent
+	}
+
+	// 2. 维护镜像层状态并在进入重建/校验阶段后保留已完成层展示
+	if len(p.Layers) > 0 {
+		t.prevLayers = cloneLayerSlice(p.Layers)
+	} else if len(t.prevLayers) > 0 {
+		if p.Phase == "recreating" || p.Phase == "verifying" || p.Phase == "done" {
+			t.prevLayers = markLayersDone(t.prevLayers)
+			p.Layers = cloneLayerSlice(t.prevLayers)
+			p.TotalLayers = len(t.prevLayers)
+			p.CompletedLayers = len(t.prevLayers)
+		} else {
+			p.Layers = cloneLayerSlice(t.prevLayers)
+			if p.TotalLayers == 0 {
+				p.TotalLayers = len(t.prevLayers)
+			}
+		}
+	}
+
+	// 3. 追加原始终端增量流并同步 activeJobs 内存态
+	chunk := p.LogChunk
+	if chunk == "" && p.Phase != t.prevPhase && p.StatusText != "" {
+		chunk = fmt.Sprintf("\x1b[90m[%s]\x1b[0m %s\r\n", time.Now().Format("15:04:05"), p.StatusText)
+	}
+	if chunk != "" {
+		t.logBuf.WriteString(chunk)
+	}
+
+	phaseChanged := p.Phase != t.prevPhase
+	t.prevPhase = p.Phase
+
+	progForDB := p
+	progForDB.LogChunk = ""
+	j.Phase = p.Phase
+	j.Progress = progForDB
+	j.LogChunk = chunk
+	j.Logs = t.logBuf.String()
+	j.LogOffset = t.logBuf.Len()
+
+	if phaseChanged || time.Since(t.lastPersist) >= 400*time.Millisecond {
+		t.svc.updateJobProgressAndLogs(ctx, j.ID, progForDB, j.Logs)
+		t.lastPersist = time.Now()
+	}
+	t.svc.broadcast(*j)
+}
+
+func (t *jobProgressTracker) fail(j Job, code, msg string) {
+	displayErr := i18n.FormatUpdateError(i18n.ZhCN, code, msg)
+	errChunk := fmt.Sprintf("\r\n\x1b[31m✖ ERROR: %s\x1b[0m\r\n", displayErr)
+	t.logBuf.WriteString(errChunk)
+	j.LogChunk = errChunk
+	j.Logs = t.logBuf.String()
+	j.LogOffset = t.logBuf.Len()
+	t.svc.finishJobFailed(j, code, msg, j.Logs)
+}
+
+func (t *jobProgressTracker) succeed(j *Job, extraLogs []string) {
+	if len(extraLogs) > 0 && t.logBuf.Len() == 0 {
+		t.logBuf.WriteString(strings.Join(extraLogs, "\r\n") + "\r\n")
+	}
+	doneChunk := "\x1b[32m✔ Update completed successfully.\x1b[0m\r\n"
+	t.logBuf.WriteString(doneChunk)
+	doneLayers := markLayersDone(t.prevLayers)
+
+	j.Status = "succeeded"
+	j.Phase = "done"
+	j.Progress = platform.PullProgress{
+		Phase:           "done",
+		StatusText:      "Completed",
+		Percent:         100,
+		TotalLayers:     len(doneLayers),
+		CompletedLayers: len(doneLayers),
+		Layers:          doneLayers,
+	}
+	j.LogChunk = doneChunk
+	j.Logs = t.logBuf.String()
+	j.LogOffset = t.logBuf.Len()
+}
+
 func (s *Service) executeJob(j Job) {
+	tracker := newJobProgressTracker(s, &j)
 	defer func() {
 		if r := recover(); r != nil {
 			if s.log != nil {
 				s.log.Error("更新任务发生 panic", "job", j.ID, "recover", r)
 			}
-			s.finishJobFailed(j, "recreate_failed", i18n.EngineDetail(i18n.MsgUpdatePanic, fmt.Sprint(r)), "")
+			tracker.fail(j, "recreate_failed", i18n.EngineDetail(i18n.MsgUpdatePanic, fmt.Sprint(r)))
 		}
 	}()
 
@@ -594,14 +1051,14 @@ func (s *Service) executeJob(j Job) {
 
 	ad, _, err := s.hosts.OpenAdapter(ctx, j.HostID)
 	if err != nil {
-		s.finishJobFailed(j, "connect_failed", i18n.DetailOf(err), "")
+		tracker.fail(j, "connect_failed", i18n.DetailOf(err))
 		return
 	}
 	defer ad.Close()
 
 	upAd, ok := ad.(platform.UpdateCapableAdapter)
 	if !ok {
-		s.finishJobFailed(j, "capability_unsupported", i18n.EngineDetail(i18n.MsgUpdateAdapterNoUpdate), "")
+		tracker.fail(j, "capability_unsupported", i18n.EngineDetail(i18n.MsgUpdateAdapterNoUpdate))
 		return
 	}
 
@@ -620,10 +1077,7 @@ func (s *Service) executeJob(j Job) {
 		TargetImageRef:  j.TargetImageRef,
 		RegistryAuthB64: regAuth,
 	}, func(p platform.PullProgress) {
-		j.Phase = p.Phase
-		j.Progress = p
-		s.updateJobProgress(ctx, j.ID, p)
-		s.broadcast(j)
+		tracker.handleProgress(ctx, &j, p)
 	})
 
 	if err != nil {
@@ -634,21 +1088,149 @@ func (s *Service) executeJob(j Job) {
 			code = ue.Code
 			msg = ue.Message
 		}
-		s.finishJobFailed(j, code, msg, "")
+		tracker.fail(j, code, msg)
 		return
 	}
 
+	s.finalizeSucceededServiceJob(&j, tracker, res)
+}
+
+func (s *Service) executeComposeJob(j Job, proj platform.ProjectInfo, newYAML string) {
+	tracker := newJobProgressTracker(s, &j)
+	defer func() {
+		if r := recover(); r != nil {
+			if s.log != nil {
+				s.log.Error("Compose 配置更新任务发生 panic", "job", j.ID, "recover", r)
+			}
+			tracker.fail(j, "recreate_failed", i18n.EngineDetail(i18n.MsgUpdatePanic, fmt.Sprint(r)))
+		}
+	}()
+
+	unlockApp := s.lockApp(j.AppKey)
+	defer unlockApp()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	ad, _, err := s.hosts.OpenAdapter(ctx, j.HostID)
+	if err != nil {
+		tracker.fail(j, "connect_failed", i18n.DetailOf(err))
+		return
+	}
+	defer ad.Close()
+
+	if err := ad.UpdateProjectCompose(ctx, j.AppName, &proj, newYAML, func(p platform.PullProgress) {
+		tracker.handleProgress(ctx, &j, p)
+	}); err != nil {
+		code := "recreate_failed"
+		msg := i18n.DetailOf(err)
+		var ue *platform.UpdateError
+		if errors.As(err, &ue) {
+			code = ue.Code
+			msg = ue.Message
+		}
+		tracker.fail(j, code, msg)
+		return
+	}
+
+	if s.inv != nil {
+		_, _, _ = s.inv.SyncHost(ctx, j.HostID)
+	}
+
 	finished := time.Now().Unix()
-	j.Status = "succeeded"
-	j.Phase = "done"
-	j.Progress = platform.PullProgress{Phase: "done", StatusText: "Completed", Percent: 100}
+	tracker.succeed(&j, nil)
+	j.FinishedAt = finished
+
+	fCtx, fCancel := context.WithTimeout(context.Background(), finalizeTimeout)
+	defer fCancel()
+	progBytes, _ := json.Marshal(j.Progress)
+	_, _ = s.st.DB.ExecContext(fCtx, `
+		UPDATE update_job
+		SET status='succeeded', phase='done', progress_json=?, logs_text=?, finished_at=?
+		WHERE id=?`,
+		string(progBytes), j.Logs, finished, j.ID,
+	)
+	s.broadcast(j)
+
+	if s.onHostUpdated != nil {
+		s.onHostUpdated(j.HostID)
+	}
+}
+
+func (s *Service) executeStandaloneConfigJob(j Job, env []platform.EnvVar, ports []platform.PortBinding) {
+	tracker := newJobProgressTracker(s, &j)
+	defer func() {
+		if r := recover(); r != nil {
+			if s.log != nil {
+				s.log.Error("独立容器配置更新任务发生 panic", "job", j.ID, "recover", r)
+			}
+			tracker.fail(j, "recreate_failed", i18n.EngineDetail(i18n.MsgUpdatePanic, fmt.Sprint(r)))
+		}
+	}()
+
+	unlockApp := s.lockApp(j.AppKey)
+	defer unlockApp()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	ad, _, err := s.hosts.OpenAdapter(ctx, j.HostID)
+	if err != nil {
+		tracker.fail(j, "connect_failed", i18n.DetailOf(err))
+		return
+	}
+	defer ad.Close()
+
+	scAd, ok := ad.(platform.StandaloneConfigAdapter)
+	if !ok {
+		tracker.fail(j, "capability_unsupported", i18n.EngineDetail(i18n.MsgUpdateAdapterNoUpdate))
+		return
+	}
+
+	var regAuth string
+	if pr, err := version.ParseImageRef(j.TargetImageRef); err == nil {
+		regAuth = s.reg.DockerAuthHeader(ctx, pr.Registry)
+	}
+
+	res, err := scAd.UpdateStandaloneConfig(ctx, platform.StandaloneUpdateRequest{
+		AppName:         j.AppName,
+		ServiceName:     j.ServiceName,
+		ExpectedImageID: j.OldImageID,
+		OldImageRef:     j.OldImageRef,
+		TargetImageRef:  j.TargetImageRef,
+		RegistryAuthB64: regAuth,
+		Env:             env,
+		Ports:           ports,
+	}, func(p platform.PullProgress) {
+		tracker.handleProgress(ctx, &j, p)
+	})
+	if err != nil {
+		code := "recreate_failed"
+		msg := i18n.DetailOf(err)
+		var ue *platform.UpdateError
+		if errors.As(err, &ue) {
+			code = ue.Code
+			msg = ue.Message
+		}
+		tracker.fail(j, code, msg)
+		return
+	}
+
+	s.finalizeSucceededServiceJob(&j, tracker, res)
+	if s.onHostUpdated != nil {
+		s.onHostUpdated(j.HostID)
+	}
+}
+
+func (s *Service) finalizeSucceededServiceJob(j *Job, tracker *jobProgressTracker, res *platform.UpdateResult) {
+	finished := time.Now().Unix()
+	tracker.succeed(j, res.Logs)
 	j.NewImageID = res.NewImageID
 	if res.NewRepoDigest != "" {
 		j.NewRepoDigest = res.NewRepoDigest
 	} else {
 		j.NewRepoDigest = j.TargetRepoDigest
 	}
-	j.Logs = strings.Join(res.Logs, "\n")
 	j.FinishedAt = finished
 
 	// 审计 M6：收尾写库使用独立超时上下文，避免 15 分钟执行超时后写库失败导致任务卡死
@@ -691,7 +1273,7 @@ func (s *Service) executeJob(j Job) {
 		WHERE service_key=?`,
 		newDisplayVer, finished, j.ServiceKey,
 	)
-	s.broadcast(j)
+	s.broadcast(*j)
 }
 
 func (s *Service) finishJobFailed(j Job, code, msg, logs string) {
@@ -700,7 +1282,13 @@ func (s *Service) finishJobFailed(j Job, code, msg, logs string) {
 	j.Phase = "done"
 	j.ErrorCode = code
 	j.ErrorMsg = i18n.FormatUpdateError(i18n.ZhCN, code, msg)
+	if logs == "" {
+		errChunk := fmt.Sprintf("\r\n\x1b[31m✖ ERROR: %s\x1b[0m\r\n", j.ErrorMsg)
+		logs = j.Logs + errChunk
+		j.LogChunk = errChunk
+	}
 	j.Logs = logs
+	j.LogOffset = len(logs)
 	j.FinishedAt = finished
 	progBytes, _ := json.Marshal(j.Progress)
 
@@ -716,7 +1304,9 @@ func (s *Service) finishJobFailed(j Job, code, msg, logs string) {
 }
 
 func (s *Service) insertJob(ctx context.Context, j Job) error {
-	progBytes, _ := json.Marshal(j.Progress)
+	progForDB := j.Progress
+	progForDB.LogChunk = ""
+	progBytes, _ := json.Marshal(progForDB)
 	oldTags, _ := json.Marshal(j.OldMatchedTags)
 	tgtTags, _ := json.Marshal(j.TargetMatchedTags)
 	eligibleInt := 0
@@ -729,20 +1319,20 @@ func (s *Service) insertJob(ctx context.Context, j Job) error {
 			status, phase, progress_json,
 			old_image_ref, old_image_id, old_repo_digest, old_version, old_matched_tags_json,
 			target_image_ref, target_repo_digest, target_version, target_matched_tags_json,
-			rollback_eligible, rollback_ref, rollback_reason, started_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			rollback_eligible, rollback_ref, rollback_reason, logs_text, started_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		j.ID, j.Kind, j.HostID, j.HostName, j.AppKey, j.AppName, j.ServiceKey, j.ServiceName, j.Source,
 		j.Status, j.Phase, string(progBytes),
 		j.OldImageRef, j.OldImageID, j.OldRepoDigest, j.OldVersion, string(oldTags),
 		j.TargetImageRef, j.TargetRepoDigest, j.TargetVersion, string(tgtTags),
-		eligibleInt, j.RollbackRef, j.RollbackReason, j.StartedAt,
+		eligibleInt, j.RollbackRef, j.RollbackReason, j.Logs, j.StartedAt,
 	)
 	return err
 }
 
-func (s *Service) updateJobProgress(ctx context.Context, id string, p platform.PullProgress) {
+func (s *Service) updateJobProgressAndLogs(ctx context.Context, id string, p platform.PullProgress, logs string) {
 	b, _ := json.Marshal(p)
-	_, _ = s.st.DB.ExecContext(ctx, `UPDATE update_job SET phase=?, progress_json=? WHERE id=?`, p.Phase, string(b), id)
+	_, _ = s.st.DB.ExecContext(ctx, `UPDATE update_job SET phase=?, progress_json=?, logs_text=? WHERE id=?`, p.Phase, string(b), logs, id)
 }
 
 func newJobID() string {

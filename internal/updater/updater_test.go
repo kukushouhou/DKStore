@@ -5,11 +5,13 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/kukushouhou/DKStore/internal/host"
 	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/inventory"
+	"github.com/kukushouhou/DKStore/internal/platform"
 	"github.com/kukushouhou/DKStore/internal/registry"
 	"github.com/kukushouhou/DKStore/internal/secret"
 	"github.com/kukushouhou/DKStore/internal/store"
@@ -241,5 +243,101 @@ func TestNew_RecoversInterruptedJobs(t *testing.T) {
 	}
 	if got.Status != "failed" || got.ErrorCode != "interrupted" {
 		t.Fatalf("expected status=failed and errorCode=interrupted, got status=%s code=%s", got.Status, got.ErrorCode)
+	}
+}
+
+func TestJobProgressTracker_MonotonicPercentLiveMemoryLogsAndErrorFormatting(t *testing.T) {
+	up, _ := newTestUpdater(t, nil)
+	ctx := context.Background()
+
+	subCh, unsub := up.Subscribe()
+	defer unsub()
+
+	job := Job{
+		ID:             "up_test_live_stream",
+		Kind:           "upgrade",
+		HostID:         "local",
+		HostName:       "Local",
+		AppKey:         "local/dsm_project/demo",
+		AppName:        "demo",
+		ServiceKey:     "local/dsm_project/demo/app",
+		ServiceName:    "app",
+		Source:         "dsm_project",
+		Status:         "running",
+		Phase:          "precheck",
+		Progress:       platform.PullProgress{Phase: "precheck", StatusText: "Preparing", Percent: 5},
+		OldImageRef:    "ghcr.io/org/demo:1.0",
+		TargetImageRef: "ghcr.io/org/demo:1.1",
+		StartedAt:      1700000400,
+	}
+	initHdr := formatJobHeader(job)
+	job.Logs = initHdr
+	job.LogOffset = len(initHdr)
+	if err := up.insertJob(ctx, job); err != nil {
+		t.Fatalf("insertJob: %v", err)
+	}
+
+	tracker := newJobProgressTracker(up, &job)
+
+	// Emit a pulling event with Percent: 0 -> must stay monotonic at 5%
+	tracker.handleProgress(ctx, &job, platform.PullProgress{
+		Phase:      "pulling",
+		StatusText: "Pulling fs layer",
+		Percent:    0,
+		TotalLayers: 1,
+		Layers:     []platform.LayerProgress{{ID: "a1b2c3d4", Status: "waiting", Percent: 0}},
+		LogChunk:   "a1b2c3d4: Pulling fs layer\r\n",
+	})
+	if job.Progress.Percent != 5 {
+		t.Fatalf("expected monotonic percent 5 (not dropping to 0), got %d", job.Progress.Percent)
+	}
+
+	// Verify GetJob returns live in-memory accumulated logs while running
+	liveJob, err := up.GetJob(ctx, job.ID, i18n.EnUS)
+	if err != nil {
+		t.Fatalf("GetJob while active: %v", err)
+	}
+	if !strings.Contains(liveJob.Logs, "a1b2c3d4: Pulling fs layer") || liveJob.LogOffset != len(liveJob.Logs) {
+		t.Fatalf("expected live accumulated logs & offset, got logs=%q offset=%d", liveJob.Logs, liveJob.LogOffset)
+	}
+
+	// Advance to 45%, then try to emit 20% -> must stay at 45%
+	tracker.handleProgress(ctx, &job, platform.PullProgress{
+		Phase:      "pulling",
+		StatusText: "Downloading",
+		Percent:    45,
+		Layers:     []platform.LayerProgress{{ID: "a1b2c3d4", Status: "downloading", Percent: 50}},
+		LogChunk:   "\r\x1b[2Ka1b2c3d4: Downloading 50%",
+	})
+	tracker.handleProgress(ctx, &job, platform.PullProgress{
+		Phase:      "pulling",
+		StatusText: "Downloading",
+		Percent:    20,
+	})
+	if job.Progress.Percent != 45 {
+		t.Fatalf("expected monotonic percent 45, got %d", job.Progress.Percent)
+	}
+
+	// Fail the job -> error must be appended in ANSI red to Logs and persisted to SQLite
+	tracker.fail(job, "pull_failed", "unauthorized: authentication required")
+
+	persisted, err := up.GetJob(ctx, job.ID, i18n.EnUS)
+	if err != nil {
+		t.Fatalf("GetJob after failure: %v", err)
+	}
+	if persisted.Status != "failed" || !strings.Contains(persisted.Logs, "\x1b[31m✖ ERROR:") || !strings.Contains(persisted.Logs, "unauthorized") {
+		t.Fatalf("expected ANSI error persisted in logs_text, got: %q", persisted.Logs)
+	}
+
+	// Drain SSE events to confirm LogChunk was broadcast
+	sawChunk := false
+	for len(subCh) > 0 {
+		ev := <-subCh
+		if strings.Contains(ev.LogChunk, "✖ ERROR:") {
+			sawChunk = true
+		}
+	}
+	if !sawChunk {
+		t.Fatal("expected SSE broadcast to include terminal error LogChunk")
 	}
 }

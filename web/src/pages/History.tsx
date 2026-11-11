@@ -20,6 +20,7 @@ import { ArrowRightOutlined, RollbackOutlined } from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type UpdateJobItem } from '../api/client'
 import { useI18n } from '../i18n'
+import { useUIStore } from '../store/ui'
 
 export default function HistoryPage() {
   const { locale, t } = useI18n()
@@ -85,7 +86,10 @@ export default function HistoryPage() {
     if (!rollbackModalJob) return
     setRollingBack(true)
     try {
-      await api.executeRollback(rollbackModalJob.id)
+      const rbJob = await api.executeRollback(rollbackModalJob.id)
+      if (rbJob?.id) {
+        useUIStore.getState().upsertUpdateJob(rbJob)
+      }
       message.success(t.history.rollbackStarted)
       setRollbackModalJob(null)
       qc.invalidateQueries({ queryKey: ['updates'] })
@@ -138,23 +142,31 @@ export default function HistoryPage() {
                       </Typography.Text>
                     </Space>
 
-                    {job.kind === 'upgrade' && job.status === 'succeeded' && (
-                      <Space wrap>
-                        {!job.rollbackEligible && job.rollbackReasonText && (
-                          <Tag color="default">
-                            {t.history.rollbackUnavailable}: {job.rollbackReasonText}
-                          </Tag>
-                        )}
-                        <Button
-                          size="small"
-                          icon={<RollbackOutlined />}
-                          loading={verifyingId === job.id}
-                          onClick={() => onVerifyRollback(job)}
-                        >
-                          {t.history.verifyRollbackBtn}
-                        </Button>
-                      </Space>
-                    )}
+                    <Space wrap>
+                      <Button
+                        size="small"
+                        onClick={() => useUIStore.getState().setActiveLogJobId(job.id)}
+                      >
+                        {t.home.viewLogs}
+                      </Button>
+                      {job.kind === 'upgrade' && job.status === 'succeeded' && (
+                        <>
+                          {!job.rollbackEligible && job.rollbackReasonText && (
+                            <Tag color="default">
+                              {t.history.rollbackUnavailable}: {job.rollbackReasonText}
+                            </Tag>
+                          )}
+                          <Button
+                            size="small"
+                            icon={<RollbackOutlined />}
+                            loading={verifyingId === job.id}
+                            onClick={() => onVerifyRollback(job)}
+                          >
+                            {t.history.verifyRollbackBtn}
+                          </Button>
+                        </>
+                      )}
+                    </Space>
                   </Flex>
 
                   <Space size={6} wrap>

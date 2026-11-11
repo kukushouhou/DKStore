@@ -55,3 +55,36 @@ func TestSendTest_LocalizedValidationErrors(t *testing.T) {
 		t.Fatalf("expected localized en error, got %v", errEn)
 	}
 }
+
+func TestProgressStylePersistence_DefaultAndPreservation(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	svc := New(st)
+
+	// Default is "layered"
+	if got := svc.LoadConfig(ctx).ProgressStyle; got != "layered" {
+		t.Fatalf("expected default progressStyle=layered, got %q", got)
+	}
+
+	// Save "unified" and verify setting table key "progress_style"
+	if err := svc.SaveConfig(ctx, Config{Locale: "en-US", ProgressStyle: "unified", CheckIntervalHours: 12}); err != nil {
+		t.Fatal(err)
+	}
+	var dbVal string
+	if err := st.DB.QueryRowContext(ctx, `SELECT v FROM setting WHERE k='progress_style'`).Scan(&dbVal); err != nil || dbVal != "unified" {
+		t.Fatalf("expected setting.progress_style=unified, got %q (err=%v)", dbVal, err)
+	}
+
+	// Saving full config without progressStyle preserves "unified"
+	if err := svc.SaveConfig(ctx, Config{Locale: "zh-CN", CheckIntervalHours: 6}); err != nil {
+		t.Fatal(err)
+	}
+	loaded := svc.LoadConfig(ctx)
+	if loaded.ProgressStyle != "unified" || loaded.Locale != "zh-CN" {
+		t.Fatalf("expected progressStyle=unified preserved, got %+v", loaded)
+	}
+}

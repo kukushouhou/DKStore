@@ -4,7 +4,13 @@
 // 核心只依赖本包，不感知具体平台，从而保证“安装位置与管理范围解耦”。
 package platform
 
-import "context"
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"strconv"
+	"strings"
+)
 
 // SourceKind 标识应用的部署来源。
 type SourceKind string
@@ -68,15 +74,117 @@ type RuntimeStatAdapter interface {
 	ListRuntimeApps(ctx context.Context) ([]AppRuntimeTree, error)
 }
 
-// PullProgress 描述更新执行中的实时进度（分层下载字节数/总字节数/百分比与阶段状态，立项文档 §7.3）。
+// LayerProgress 描述单个镜像层的实时下载/解压状态与进度（附录 E.1）。
+type LayerProgress struct {
+	ID      string `json:"id"`
+	Status  string `json:"status"`  // waiting | downloading | extracting | done
+	Current int64  `json:"current"`
+	Total   int64  `json:"total"`
+	Percent int    `json:"percent"` // 0-100
+}
+
+// PullProgress 描述更新执行中的实时进度（分层下载字节数/总字节数/百分比、逐层详情与原始终端流，立项文档 §7.3 / 附录 E）。
 type PullProgress struct {
-	Phase           string `json:"phase"`           // precheck | pulling | recreating | verifying | done
-	StatusText      string `json:"statusText"`      // 阶段可读描述
-	TotalLayers     int    `json:"totalLayers"`     // 已知镜像层总数
-	CompletedLayers int    `json:"completedLayers"` // 已完成层数
-	DownloadedBytes int64  `json:"downloadedBytes"` // 已下载字节数
-	TotalBytes      int64  `json:"totalBytes"`      // 已知总字节数
-	Percent         int    `json:"percent"`         // 0-100（仅当存在可测量进度或完成时计算）
+	Phase           string          `json:"phase"`              // precheck | pulling | recreating | verifying | done
+	StatusText      string          `json:"statusText"`         // 阶段可读描述
+	TotalLayers     int             `json:"totalLayers"`        // 已知镜像层总数
+	CompletedLayers int             `json:"completedLayers"`    // 已完成层数
+	DownloadedBytes int64           `json:"downloadedBytes"`    // 已下载字节数
+	TotalBytes      int64           `json:"totalBytes"`         // 已知总字节数
+	Percent         int             `json:"percent"`            // 0-100（单调递增）
+	Layers          []LayerProgress `json:"layers,omitempty"`   // 各镜像层实时状态
+	LogChunk        string          `json:"logChunk,omitempty"` // 原始终端增量输出（供 @xterm/xterm 实时渲染）
+}
+
+// EnvVar 表示独立容器的单个环境变量键值对。
+type EnvVar struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+// PortBinding 表示独立容器的单条端口映射规则。
+type PortBinding struct {
+	HostIP        string `json:"hostIp,omitempty"`
+	HostPort      string `json:"hostPort"`
+	ContainerPort string `json:"containerPort"`
+	Protocol      string `json:"protocol"` // tcp | udp
+}
+
+// UnmarshalJSON 兼容前端传入字符串端口（"8080"）或数字端口（8080）。
+func (p *PortBinding) UnmarshalJSON(data []byte) error {
+	var raw struct {
+		HostIP        string          `json:"hostIp"`
+		HostPort      json.RawMessage `json:"hostPort"`
+		ContainerPort json.RawMessage `json:"containerPort"`
+		Protocol      string          `json:"protocol"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	p.HostIP = strings.TrimSpace(raw.HostIP)
+	p.HostPort = decodeFlexPort(raw.HostPort)
+	p.ContainerPort = decodeFlexPort(raw.ContainerPort)
+	proto := strings.ToLower(strings.TrimSpace(raw.Protocol))
+	if proto == "" {
+		proto = "tcp"
+	}
+	p.Protocol = proto
+	return nil
+}
+
+func decodeFlexPort(raw json.RawMessage) string {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return strings.TrimSpace(s)
+	}
+	var n int64
+	if json.Unmarshal(raw, &n) == nil {
+		if n <= 0 {
+			return ""
+		}
+		return strconv.FormatInt(n, 10)
+	}
+	return strings.Trim(string(raw), `" `)
+}
+
+// VolumeBinding 表示独立容器的挂载目录映射（只读展示）。
+type VolumeBinding struct {
+	HostPath      string `json:"hostPath"`
+	ContainerPath string `json:"containerPath"`
+	Mode          string `json:"mode"` // rw | ro
+}
+
+// StandaloneConfig 描述非 YAML 独立容器的当前运行参数（附录 E.4）。
+type StandaloneConfig struct {
+	Editable bool            `json:"editable"`
+	Reason   string          `json:"reason,omitempty"`
+	ImageRef string          `json:"imageRef"`
+	Env      []EnvVar        `json:"env"`
+	Ports    []PortBinding   `json:"ports"`
+	Volumes  []VolumeBinding `json:"volumes"`
+}
+
+// StandaloneUpdateRequest 是对独立容器执行镜像切换并同步更新环境变量/端口映射的输入参数（附录 E.4）。
+type StandaloneUpdateRequest struct {
+	AppName         string
+	ServiceName     string
+	ExpectedImageID string
+	OldImageRef     string
+	TargetImageRef  string
+	RegistryAuthB64 string
+	Env             []EnvVar
+	Ports           []PortBinding
+}
+
+// StandaloneConfigAdapter 扩展 Adapter，提供无 YAML 独立容器的配置读取与带配置回滚保护的重建能力（附录 E.4）。
+type StandaloneConfigAdapter interface {
+	Adapter
+	GetStandaloneConfig(ctx context.Context, appName, serviceName string) (*StandaloneConfig, error)
+	UpdateStandaloneConfig(ctx context.Context, req StandaloneUpdateRequest, onProgress func(PullProgress)) (*UpdateResult, error)
 }
 
 // UpdateRequest 是对单个服务执行升级或回退的输入参数。

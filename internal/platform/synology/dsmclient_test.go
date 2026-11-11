@@ -2,6 +2,7 @@ package synology
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -661,5 +662,133 @@ func TestStandaloneSameTagVerifiesImageChange(t *testing.T) {
 		}
 		_ = ad.Close()
 		srv.Close()
+	}
+}
+
+func TestPullImage_SplitsThirdPartyRegistryAndAuth(t *testing.T) {
+	var gotForm map[string]string
+	f := &fakeDSM{handler: func(api, method string, form map[string]string, sid string) (any, int) {
+		if api == "SYNO.Docker.Image" && method == "pull_start" {
+			gotForm = form
+			return map[string]any{"task_id": ""}, 0
+		}
+		return map[string]any{}, 0
+	}}
+	c, done := newTestClient(t, f)
+	defer done()
+
+	if err := c.PullImage(context.Background(), "ghcr.io/kukushouhou/card-bill-assistant", "v1.2.0", "ghuser", "ghtoken", nil); err != nil {
+		t.Fatalf("PullImage ghcr.io failed: %v", err)
+	}
+	if gotForm["registry"] != `"https://ghcr.io"` || gotForm["repository"] != `"kukushouhou/card-bill-assistant"` || gotForm["tag"] != `"v1.2.0"` {
+		t.Fatalf("unexpected ghcr pull_start params: %v", gotForm)
+	}
+	if gotForm["username"] != `"ghuser"` || gotForm["password"] != `"ghtoken"` {
+		t.Fatalf("expected username/password passed to pull_start, got %v", gotForm)
+	}
+
+	if err := c.PullImage(context.Background(), "docker.io/library/nginx", "1.27", "", "", nil); err != nil {
+		t.Fatalf("PullImage docker.io failed: %v", err)
+	}
+	if gotForm["registry"] != `""` || gotForm["repository"] != `"library/nginx"` {
+		t.Fatalf("expected empty registry and stripped docker.io prefix, got %v", gotForm)
+	}
+}
+
+func TestDSMProjectUpdate_GHCRDirectBuildStreamWithLayerStreaming(t *testing.T) {
+	oldTimeout, oldInterval := verifyTimeout, verifyInterval
+	verifyTimeout, verifyInterval = 200*time.Millisecond, 20*time.Millisecond
+	defer func() { verifyTimeout, verifyInterval = oldTimeout, oldInterval }()
+
+	pullStartCalled := false
+	curYAML := "services:\n  app:\n    image: ghcr.io/kukushouhou/card-bill-assistant:v1.1.0\n"
+	curImgID := "sha256:old111"
+
+	f := &fakeDSM{}
+	f.rawHandler = func(w http.ResponseWriter, api, method string) bool {
+		if api == "SYNO.Docker.Project" && method == "build_stream" {
+			fl, _ := w.(http.Flusher)
+			chunks := []string{
+				" app Pulling \r\n",
+				" 6f837d52a1b9 Downloading [=====>     ]  15.0MB/30.0MB\r",
+				" \x1b[32m✔\x1b[0m 6f837d52a1b9 Pull complete\r\n",
+				" Container card-bill-assistant-1  Recreated\r\n",
+				" Container card-bill-assistant-1  Started\r\n",
+			}
+			for _, ch := range chunks {
+				_, _ = w.Write([]byte(ch))
+				if fl != nil {
+					fl.Flush()
+				}
+			}
+			curImgID = "sha256:new222"
+			return true
+		}
+		return false
+	}
+	f.handler = func(api, method string, form map[string]string, sid string) (any, int) {
+		switch api + "." + method {
+		case "SYNO.Docker.Image.pull_start":
+			pullStartCalled = true
+			return nil, 1202
+		case "SYNO.Docker.Project.get":
+			return map[string]any{
+				"id": "p-ghcr", "name": "card-bill-assistant", "path": "/volume1/docker/card-bill-assistant", "content": curYAML,
+				"containers": []any{map[string]any{
+					"Id": "c1", "Name": "/card-bill-assistant-1", "Image": curImgID,
+					"Config": map[string]any{"Image": "ghcr.io/kukushouhou/card-bill-assistant:v1.1.0", "Labels": map[string]string{"com.docker.compose.service": "app"}},
+					"State":  map[string]any{"Status": "running", "Running": true},
+				}},
+			}, 0
+		case "SYNO.Docker.Project.update":
+			_ = json.Unmarshal([]byte(form["content"]), &curYAML)
+			return map[string]any{}, 0
+		case "SYNO.Docker.Image.list":
+			return map[string]any{"images": []any{
+				map[string]any{"id": "sha256:new222", "repository": "ghcr.io/kukushouhou/card-bill-assistant", "tags": []string{"v1.2.0"}},
+			}}, 0
+		}
+		return map[string]any{}, 0
+	}
+
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	ad := New("h1", nil, DSMConfig{URL: srv.URL, Username: "admin", Secret: "x"})
+	defer ad.Close()
+
+	authB64 := base64.URLEncoding.EncodeToString([]byte(`{"username":"u","password":"p"}`))
+	var events []platform.PullProgress
+	res, err := ad.UpdateService(context.Background(), platform.UpdateRequest{
+		AppName:         "card-bill-assistant",
+		ServiceName:     "app",
+		Source:          platform.SourceDSMProject,
+		Project:         &platform.ProjectInfo{Name: "card-bill-assistant", DSMProjectID: "p-ghcr"},
+		OldImageRef:     "ghcr.io/kukushouhou/card-bill-assistant:v1.1.0",
+		TargetImageRef:  "ghcr.io/kukushouhou/card-bill-assistant:v1.2.0",
+		RegistryAuthB64: authB64,
+	}, func(p platform.PullProgress) {
+		events = append(events, p)
+	})
+	if err != nil {
+		t.Fatalf("UpdateService ghcr DSM project failed: %v", err)
+	}
+	if pullStartCalled {
+		t.Fatal("DSM Project tag update must go directly to build_stream without calling SYNO.Docker.Image.pull_start")
+	}
+	if res.NewImageID != "sha256:new222" {
+		t.Fatalf("expected NewImageID=sha256:new222, got %s", res.NewImageID)
+	}
+	sawLayer := false
+	sawANSIChunk := false
+	for _, ev := range events {
+		if len(ev.Layers) > 0 && ev.Layers[0].ID == "6f837d52a1b9" {
+			sawLayer = true
+		}
+		if strings.Contains(ev.LogChunk, "\x1b[32m✔\x1b[0m") {
+			sawANSIChunk = true
+		}
+	}
+	if !sawLayer || !sawANSIChunk {
+		t.Fatalf("expected live layer progress (%v) and raw ANSI LogChunk (%v)", sawLayer, sawANSIChunk)
 	}
 }

@@ -46,8 +46,15 @@ type Server struct {
 
 // New 创建 API 服务。
 func New(d Deps) *Server {
-	if d.Updater != nil && d.Ignore != nil {
-		d.Updater.SetIgnore(d.Ignore)
+	if d.Updater != nil {
+		if d.Ignore != nil {
+			d.Updater.SetIgnore(d.Ignore)
+		}
+		if d.Checker != nil {
+			d.Updater.SetOnHostUpdated(func(hostID string) {
+				d.Checker.Trigger("manual", hostID, false)
+			})
+		}
 	}
 	return &Server{d: d}
 }
@@ -73,6 +80,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/apps/compose", s.requireAuth(s.handleUpdateAppCompose))
 	mux.HandleFunc("GET /api/v1/services/tags", s.requireAuth(s.handleSearchServiceTags))
 	mux.HandleFunc("GET /api/v1/services/{key}/tags", s.requireAuth(s.handleSearchServiceTags))
+	mux.HandleFunc("GET /api/v1/services/config", s.requireAuth(s.handleGetServiceConfig))
+	mux.HandleFunc("POST /api/v1/services/config-update", s.requireAuth(s.handleUpdateServiceConfig))
 	mux.HandleFunc("GET /api/v1/containers", s.requireAuth(s.handleListContainers))
 	mux.HandleFunc("POST /api/v1/check", s.requireAuth(s.handleTriggerCheck))
 	mux.HandleFunc("GET /api/v1/check/current", s.requireAuth(s.handleCurrentCheck))
@@ -488,7 +497,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
-	var cfg notify.Config
+	cfg := s.d.Notify.LoadConfig(r.Context())
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
 		return
@@ -668,18 +677,22 @@ func (s *Server) handleUpdateAppCompose(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var body struct {
-		Key     string `json:"key"`
-		AppKey  string `json:"appKey"`
-		Content string `json:"content"`
-		YAML    string `json:"yaml"`
+		Key           string `json:"key"`
+		AppKey        string `json:"appKey"`
+		Content       string `json:"content"`
+		YAML          string `json:"yaml"`
+		ServiceKey    string `json:"serviceKey"`
+		PolicyMode    string `json:"policyMode"`
+		PolicyPrefix  string `json:"policyPrefix"`
+		SkipTargetTag string `json:"skipTargetTag"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	key := strings.TrimSpace(body.Key)
+	key := strings.TrimSpace(body.AppKey)
 	if key == "" {
-		key = strings.TrimSpace(body.AppKey)
+		key = strings.TrimSpace(body.Key)
 	}
 	if key == "" {
 		key = strings.TrimSpace(r.URL.Query().Get("key"))
@@ -692,15 +705,69 @@ func (s *Server) handleUpdateAppCompose(w http.ResponseWriter, r *http.Request) 
 		writeError(w, lang, http.StatusBadRequest, "bad_request", "missing key or content")
 		return
 	}
-	hostID, err := s.d.Updater.UpdateAppCompose(r.Context(), key, yamlContent, lang)
+	job, err := s.d.Updater.StartComposeUpdate(r.Context(), updater.ComposeUpdateRequest{
+		AppKey:        key,
+		Content:       yamlContent,
+		ServiceKey:    body.ServiceKey,
+		PolicyMode:    body.PolicyMode,
+		PolicyPrefix:  body.PolicyPrefix,
+		SkipTargetTag: body.SkipTargetTag,
+	}, lang)
 	if err != nil {
 		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
 		return
 	}
-	if s.d.Checker != nil {
-		s.d.Checker.Trigger("manual", hostID, false)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "job": job, "hostId": job.HostID})
+}
+
+func (s *Server) handleGetServiceConfig(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
+	if s.d.Updater == nil {
+		writeError(w, lang, http.StatusInternalServerError, "updater_unavailable", "")
+		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "hostId": hostID})
+	svcKey := strings.TrimSpace(r.URL.Query().Get("serviceKey"))
+	if svcKey == "" {
+		svcKey = strings.TrimSpace(r.URL.Query().Get("key"))
+	}
+	if svcKey == "" {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", "missing serviceKey")
+		return
+	}
+	cfg, err := s.d.Updater.GetServiceStandaloneConfig(r.Context(), svcKey, lang)
+	if err != nil {
+		var ee *i18n.EngineError
+		if errors.As(err, &ee) && ee.Key == i18n.MsgUpdateServiceNotFound {
+			writeError(w, lang, http.StatusNotFound, "not_found", i18n.LocalizeError(lang, err))
+			return
+		}
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
+	if s.d.Updater == nil {
+		writeError(w, lang, http.StatusInternalServerError, "updater_unavailable", "")
+		return
+	}
+	var req updater.StandaloneConfigUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if strings.TrimSpace(req.ServiceKey) == "" {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", "missing serviceKey")
+		return
+	}
+	job, err := s.d.Updater.StartStandaloneConfigUpdate(r.Context(), req, lang)
+	if err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "job": job})
 }
 
 func (s *Server) handleGetUpdateJob(w http.ResponseWriter, r *http.Request) {

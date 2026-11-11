@@ -61,6 +61,13 @@ type ExecutableTransport interface {
 	ExecComposeProject(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, pullAndRemoveOrphans bool) (string, error)
 }
 
+// StreamingComposeTransport 扩展 ExecutableTransport，支持实时流式回调 docker compose 命令产生的增量终端输出（附录 E.1 / E.3）。
+type StreamingComposeTransport interface {
+	ExecutableTransport
+	ExecComposeServiceStream(ctx context.Context, workDir string, configFiles, envFiles []string, projectName, serviceName string, startContainer bool, onChunk func(string)) (string, error)
+	ExecComposeProjectStream(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, pullAndRemoveOrphans bool, onChunk func(string)) (string, error)
+}
+
 const maxFileSize = 2 << 20 // 2 MiB
 
 // newReadOnlyHTTPClient 使用自定义 dialer 构建默认 30s 超时的 Docker HTTP 客户端。
@@ -177,6 +184,10 @@ func (l *LocalTransport) WriteFileAtomic(ctx context.Context, path string, data 
 }
 
 func (l *LocalTransport) ExecComposeService(ctx context.Context, workDir string, configFiles, envFiles []string, projectName, serviceName string, startContainer bool) (string, error) {
+	return l.ExecComposeServiceStream(ctx, workDir, configFiles, envFiles, projectName, serviceName, startContainer, nil)
+}
+
+func (l *LocalTransport) ExecComposeServiceStream(ctx context.Context, workDir string, configFiles, envFiles []string, projectName, serviceName string, startContainer bool, onChunk func(string)) (string, error) {
 	args := buildComposeArgs(workDir, configFiles, envFiles, projectName, serviceName, startContainer)
 	env := append(os.Environ(), "PATH="+os.Getenv("PATH")+":/usr/local/bin:/var/packages/ContainerManager/target/usr/bin:/var/packages/Docker/target/usr/bin")
 	newCmd := func(name string, a ...string) *exec.Cmd {
@@ -194,14 +205,23 @@ func (l *LocalTransport) ExecComposeService(ctx context.Context, workDir string,
 			name, cmdArgs = "docker-compose", args
 		}
 	}
-	out, err := newCmd(name, cmdArgs...).CombinedOutput()
+	cmd := newCmd(name, cmdArgs...)
+	buf := &syncBuffer{onChunk: onChunk}
+	cmd.Stdout = buf
+	cmd.Stderr = buf
+	err := cmd.Run()
+	outStr := strings.TrimSpace(string(buf.Bytes()))
 	if err != nil {
-		return strings.TrimSpace(string(out)), fmt.Errorf("%s compose: %w (%s)", name, err, strings.TrimSpace(string(out)))
+		return outStr, fmt.Errorf("%s compose: %w (%s)", name, err, outStr)
 	}
-	return strings.TrimSpace(string(out)), nil
+	return outStr, nil
 }
 
 func (l *LocalTransport) ExecComposeProject(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, pullAndRemoveOrphans bool) (string, error) {
+	return l.ExecComposeProjectStream(ctx, workDir, configFiles, envFiles, projectName, pullAndRemoveOrphans, nil)
+}
+
+func (l *LocalTransport) ExecComposeProjectStream(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, pullAndRemoveOrphans bool, onChunk func(string)) (string, error) {
 	baseFlags := buildComposeBaseFlags(workDir, configFiles, envFiles, projectName)
 	env := append(os.Environ(), "PATH="+os.Getenv("PATH")+":/usr/local/bin:/var/packages/ContainerManager/target/usr/bin:/var/packages/Docker/target/usr/bin")
 	newCmd := func(name string, a ...string) *exec.Cmd {
@@ -221,11 +241,16 @@ func (l *LocalTransport) ExecComposeProject(ctx context.Context, workDir string,
 				name, cmdArgs = "docker-compose", full
 			}
 		}
-		out, err := newCmd(name, cmdArgs...).CombinedOutput()
+		cmd := newCmd(name, cmdArgs...)
+		buf := &syncBuffer{onChunk: onChunk}
+		cmd.Stdout = buf
+		cmd.Stderr = buf
+		err := cmd.Run()
+		outStr := strings.TrimSpace(string(buf.Bytes()))
 		if err != nil {
-			return strings.TrimSpace(string(out)), fmt.Errorf("%s compose: %w (%s)", name, err, strings.TrimSpace(string(out)))
+			return outStr, fmt.Errorf("%s compose: %w (%s)", name, err, outStr)
 		}
-		return strings.TrimSpace(string(out)), nil
+		return outStr, nil
 	}
 	var outputs []string
 	if pullAndRemoveOrphans {
@@ -651,11 +676,15 @@ func composeShellScript(workDir string, args []string) string {
 }
 
 func (t *SSHTransport) ExecComposeService(ctx context.Context, workDir string, configFiles, envFiles []string, projectName, serviceName string, startContainer bool) (string, error) {
+	return t.ExecComposeServiceStream(ctx, workDir, configFiles, envFiles, projectName, serviceName, startContainer, nil)
+}
+
+func (t *SSHTransport) ExecComposeServiceStream(ctx context.Context, workDir string, configFiles, envFiles []string, projectName, serviceName string, startContainer bool, onChunk func(string)) (string, error) {
 	if err := t.ensureClient(ctx); err != nil {
 		return "", err
 	}
 	args := buildComposeArgs(workDir, configFiles, envFiles, projectName, serviceName, startContainer)
-	out, err := t.runPrivilegedCmd(ctx, "sh -c "+shellQuote(composeShellScript(workDir, args)), nil)
+	out, err := t.runPrivilegedCmdStream(ctx, "sh -c "+shellQuote(composeShellScript(workDir, args)), nil, onChunk)
 	if err != nil {
 		return strings.TrimSpace(string(out)), fmt.Errorf("remote docker compose: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
@@ -663,6 +692,10 @@ func (t *SSHTransport) ExecComposeService(ctx context.Context, workDir string, c
 }
 
 func (t *SSHTransport) ExecComposeProject(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, pullAndRemoveOrphans bool) (string, error) {
+	return t.ExecComposeProjectStream(ctx, workDir, configFiles, envFiles, projectName, pullAndRemoveOrphans, nil)
+}
+
+func (t *SSHTransport) ExecComposeProjectStream(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, pullAndRemoveOrphans bool, onChunk func(string)) (string, error) {
 	if err := t.ensureClient(ctx); err != nil {
 		return "", err
 	}
@@ -670,7 +703,7 @@ func (t *SSHTransport) ExecComposeProject(ctx context.Context, workDir string, c
 	var outputs []string
 	runSub := func(subArgs ...string) (string, error) {
 		args := append(append([]string(nil), baseFlags...), subArgs...)
-		out, err := t.runPrivilegedCmd(ctx, "sh -c "+shellQuote(composeShellScript(workDir, args)), nil)
+		out, err := t.runPrivilegedCmdStream(ctx, "sh -c "+shellQuote(composeShellScript(workDir, args)), nil, onChunk)
 		if err != nil {
 			return strings.TrimSpace(string(out)), fmt.Errorf("remote docker compose: %w (%s)", err, strings.TrimSpace(string(out)))
 		}
@@ -706,6 +739,10 @@ func (t *SSHTransport) ExecSynoWebAPIProjectList(ctx context.Context) ([]byte, e
 // runSession 在新 SSH 会话中执行命令。stdin 可为空；limit>0 时只读取前 limit 字节的标准输出（达到上限后结束会话）；
 // combined=true 时合并 stdout 与 stderr。ctx 取消时关闭会话。
 func (t *SSHTransport) runSession(ctx context.Context, cmd string, stdin io.Reader, limit int64, combined bool) ([]byte, error) {
+	return t.runSessionStream(ctx, cmd, stdin, limit, combined, nil)
+}
+
+func (t *SSHTransport) runSessionStream(ctx context.Context, cmd string, stdin io.Reader, limit int64, combined bool, onChunk func(string)) ([]byte, error) {
 	cli, err := t.getClient()
 	if err != nil {
 		return nil, err
@@ -722,7 +759,7 @@ func (t *SSHTransport) runSession(ctx context.Context, cmd string, stdin io.Read
 	defer stop()
 
 	if combined {
-		var buf syncBuffer
+		buf := syncBuffer{onChunk: onChunk}
 		sess.Stdout = &buf
 		sess.Stderr = &buf
 		err := sess.Run(cmd)
@@ -794,17 +831,21 @@ func (t *SSHTransport) runReadOnlyCmd(ctx context.Context, baseCmd string, limit
 }
 
 func (t *SSHTransport) runPrivilegedCmd(ctx context.Context, baseCmd string, payload []byte) ([]byte, error) {
+	return t.runPrivilegedCmdStream(ctx, baseCmd, payload, nil)
+}
+
+func (t *SSHTransport) runPrivilegedCmdStream(ctx context.Context, baseCmd string, payload []byte, onChunk func(string)) ([]byte, error) {
 	var plain io.Reader
 	if payload != nil {
 		plain = bytes.NewReader(payload)
 	}
 	if t.mode == ModeSudoStdio {
-		return t.runSession(ctx, "sudo -n "+baseCmd, plain, 0, true)
+		return t.runSessionStream(ctx, "sudo -n "+baseCmd, plain, 0, true, onChunk)
 	}
 	if t.mode == ModeSudoPassStdio && t.cfg.Secret != "" {
-		return t.runSession(ctx, "sudo -k -S -p '' "+baseCmd, sudoStdin(t.cfg.Secret, payload), 0, true)
+		return t.runSessionStream(ctx, "sudo -k -S -p '' "+baseCmd, sudoStdin(t.cfg.Secret, payload), 0, true, onChunk)
 	}
-	return t.runSession(ctx, baseCmd, plain, 0, true)
+	return t.runSessionStream(ctx, baseCmd, plain, 0, true, onChunk)
 }
 
 // Close 关闭 SSH 连接并标记为已关闭；之后的任何请求都不会重新建立连接（审计 M8）。
@@ -826,16 +867,22 @@ func (t *SSHTransport) Close() error {
 	return nil
 }
 
-// syncBuffer 是并发安全的 bytes.Buffer（SSH 会话会在独立协程中写入 stdout/stderr）。
+// syncBuffer 是并发安全的 bytes.Buffer（SSH/本地会话会在独立协程中写入 stdout/stderr，并支持实时增量回调）。
 type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	onChunk func(string)
 }
 
 func (b *syncBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
+	n, err := b.buf.Write(p)
+	cb := b.onChunk
+	b.mu.Unlock()
+	if cb != nil && n > 0 {
+		cb(string(p[:n]))
+	}
+	return n, err
 }
 
 func (b *syncBuffer) Bytes() []byte {

@@ -23,14 +23,15 @@ var ErrQuietHours = errors.New("notification skipped during quiet hours")
 
 // Config 是通知推送与全局偏好的设置结构（保存在 setting 表）。
 type Config struct {
-	Locale              string `json:"locale"`              // "zh-CN" | "en-US"
-	CheckIntervalHours  int    `json:"checkIntervalHours"`  // 0=关闭, 1/3/6/12/24，默认 6
-	Channel             string `json:"channel"`             // "" | "webhook" | "bark" | "wecom" | "telegram" | "ntfy"
-	WebhookURL          string `json:"webhookUrl"`          // Webhook / Bark / 企业微信 / ntfy 地址
-	TelegramBotToken    string `json:"telegramBotToken"`    // Telegram Bot Token
-	TelegramChatID      string `json:"telegramChatId"`      // Telegram Chat ID
-	QuietHoursStart     string `json:"quietHoursStart"`     // 如 "23:00"，可选
-	QuietHoursEnd       string `json:"quietHoursEnd"`       // 如 "08:00"，可选
+	Locale             string `json:"locale"`             // "zh-CN" | "en-US"
+	ProgressStyle      string `json:"progressStyle"`      // "layered" | "unified"，默认 "layered"
+	CheckIntervalHours int    `json:"checkIntervalHours"` // 0=关闭, 1/3/6/12/24，默认 6
+	Channel            string `json:"channel"`            // "" | "webhook" | "bark" | "wecom" | "telegram" | "ntfy"
+	WebhookURL         string `json:"webhookUrl"`         // Webhook / Bark / 企业微信 / ntfy 地址
+	TelegramBotToken   string `json:"telegramBotToken"`   // Telegram Bot Token
+	TelegramChatID     string `json:"telegramChatId"`     // Telegram Chat ID
+	QuietHoursStart    string `json:"quietHoursStart"`    // 如 "23:00"，可选
+	QuietHoursEnd      string `json:"quietHoursEnd"`      // 如 "08:00"，可选
 }
 
 // Service 管理设置读写与通知发送。
@@ -47,17 +48,43 @@ func New(st *store.Store) *Service {
 	}
 }
 
-const settingKey = "app_config"
+const (
+	settingKey       = "app_config"
+	progressStyleKey = "progress_style"
+)
+
+func normalizeProgressStyle(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "unified":
+		return "unified"
+	case "layered":
+		return "layered"
+	default:
+		return ""
+	}
+}
 
 // LoadConfig 读取当前设置（未设置时返回默认值）。
 func (s *Service) LoadConfig(ctx context.Context) Config {
 	cfg := Config{
 		Locale:             string(i18n.ZhCN),
+		ProgressStyle:      "layered",
 		CheckIntervalHours: 6,
 	}
 	var raw string
 	if err := s.st.DB.QueryRowContext(ctx, `SELECT v FROM setting WHERE k=?`, settingKey).Scan(&raw); err == nil && raw != "" {
 		_ = json.Unmarshal([]byte(raw), &cfg)
+	}
+	var rawStyle string
+	if err := s.st.DB.QueryRowContext(ctx, `SELECT v FROM setting WHERE k=?`, progressStyleKey).Scan(&rawStyle); err == nil {
+		if st := normalizeProgressStyle(rawStyle); st != "" {
+			cfg.ProgressStyle = st
+		}
+	}
+	if st := normalizeProgressStyle(cfg.ProgressStyle); st != "" {
+		cfg.ProgressStyle = st
+	} else {
+		cfg.ProgressStyle = "layered"
 	}
 	cfg.Locale = string(i18n.Normalize(cfg.Locale))
 	if cfg.CheckIntervalHours < 0 {
@@ -66,17 +93,28 @@ func (s *Service) LoadConfig(ctx context.Context) Config {
 	return cfg
 }
 
-// SaveConfig 保存设置。
+// SaveConfig 保存设置（并将 progressStyle 独立持久化到 setting.progress_style 键中，附录 E.2）。
 func (s *Service) SaveConfig(ctx context.Context, cfg Config) error {
 	cfg.Locale = string(i18n.Normalize(cfg.Locale))
+	if st := normalizeProgressStyle(cfg.ProgressStyle); st != "" {
+		cfg.ProgressStyle = st
+	} else {
+		cfg.ProgressStyle = s.LoadConfig(ctx).ProgressStyle
+	}
 	b, err := json.Marshal(cfg)
 	if err != nil {
+		return err
+	}
+	if _, err := s.st.DB.ExecContext(ctx, `
+		INSERT INTO setting(k, v) VALUES (?, ?)
+		ON CONFLICT(k) DO UPDATE SET v=excluded.v`,
+		settingKey, string(b)); err != nil {
 		return err
 	}
 	_, err = s.st.DB.ExecContext(ctx, `
 		INSERT INTO setting(k, v) VALUES (?, ?)
 		ON CONFLICT(k) DO UPDATE SET v=excluded.v`,
-		settingKey, string(b))
+		progressStyleKey, cfg.ProgressStyle)
 	return err
 }
 

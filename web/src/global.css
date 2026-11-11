@@ -48,3 +48,21 @@ html[data-theme='dark'] body {
   cursor: pointer;
   transition: border-color 0.16s ease, background-color 0.16s ease;
 }
+
+.xterm .xterm-viewport {
+  scrollbar-width: thin;
+  scrollbar-color: #374151 #0a0a0a;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar {
+  width: 8px;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar-track {
+  background: #0a0a0a;
+}
+
+.xterm .xterm-viewport::-webkit-scrollbar-thumb {
+  background-color: #374151;
+  border-radius: 4px;
+}

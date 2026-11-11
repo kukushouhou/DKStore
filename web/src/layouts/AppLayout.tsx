@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Button, Card, Flex, Grid, Input, Layout, Menu, Segmented, Space, Spin, Typography, message, theme } from 'antd'
+import { useEffect, useRef, useState } from 'react'
+import { Button, Card, Flex, Grid, Input, Layout, Menu, Popover, Segmented, Space, Spin, Typography, message, theme } from 'antd'
 import {
   AppstoreOutlined,
   CloudServerOutlined,
@@ -10,14 +10,18 @@ import {
   ReloadOutlined,
   SettingOutlined,
   SafetyCertificateOutlined,
+  SyncOutlined,
 } from '@ant-design/icons'
 import { Outlet, useLocation, useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError, api } from '../api/client'
+import UpdateLogModal from '../components/UpdateLogModal'
+import UpdateQueuePanel from '../components/UpdateQueuePanel'
 import { useEvents } from '../hooks/useEvents'
+import { useIsUltrawide, useOrderedQueueJobs } from '../hooks/useUpdateQueue'
 import { useI18n } from '../i18n'
 import SetupPage from '../pages/Setup'
-import type { Locale } from '../store/ui'
+import { useUIStore, type Locale } from '../store/ui'
 
 export default function AppLayout() {
   const navigate = useNavigate()
@@ -38,12 +42,58 @@ export default function AppLayout() {
     () => typeof window !== 'undefined' && localStorage.getItem('dkstore_dismiss_local_remind') === '1',
   )
 
+  const isUltrawide = useIsUltrawide()
+  const queueJobs = useOrderedQueueJobs()
+  const queueCollapsed = useUIStore((s) => s.queueCollapsed)
+  const toggleQueueCollapsed = useUIStore((s) => s.toggleQueueCollapsed)
+  const [popoverOpen, setPopoverOpen] = useState(false)
+  const hydratedProgressStyleRef = useRef(false)
+
   const canSubscribeEvents =
     Boolean(auth.data) &&
     auth.data?.mode !== 'setup_required' &&
     auth.data?.mode !== 'host_login_required' &&
     (auth.data?.mode !== 'password' || auth.data.authenticated)
   useEvents(canSubscribeEvents)
+
+  const settingsQuery = useQuery({
+    queryKey: ['settings'],
+    queryFn: api.getSettings,
+    enabled: canSubscribeEvents,
+  })
+
+  // 同步后端保存的 progressStyle（默认 layered）
+  useEffect(() => {
+    if (!hydratedProgressStyleRef.current && settingsQuery.data?.progressStyle) {
+      const s = settingsQuery.data.progressStyle
+      if (s === 'layered' || s === 'unified') {
+        hydratedProgressStyleRef.current = true
+        useUIStore.getState().setProgressStyle(s)
+      }
+    }
+  }, [settingsQuery.data?.progressStyle])
+
+  // 页面首次加载时若后台已有正在排队/执行中的升级任务，立即恢复到更新队列中
+  useEffect(() => {
+    if (!canSubscribeEvents) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await api.listUpdates()
+        if (cancelled || !res.items) return
+        for (const job of res.items) {
+          if (job.status === 'queued' || job.status === 'running') {
+            useUIStore.getState().upsertUpdateJob(job)
+          }
+        }
+      } catch {
+        // ignore
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [canSubscribeEvents])
 
   const hostsQuery = useQuery({
     queryKey: ['hosts', locale],
@@ -206,6 +256,55 @@ export default function AppLayout() {
     !hasLocalHost &&
     !dismissedRemind
 
+  const anyQueueRunning = queueJobs.some((j) => j.status === 'queued' || j.status === 'running')
+  const isHomeRoute = pathname === '/'
+  const useHeaderPopover = !isUltrawide && !isHomeRoute
+
+  const queuePillBtn =
+    queueJobs.length > 0 ? (
+      <button
+        type="button"
+        onClick={() => {
+          if (useHeaderPopover) {
+            setPopoverOpen((v) => !v)
+          } else {
+            toggleQueueCollapsed()
+          }
+        }}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '4px 11px',
+          borderRadius: 999,
+          border: `1px solid ${
+            anyQueueRunning ? 'rgba(37, 99, 235, 0.38)' : token.colorBorderSecondary
+          }`,
+          background: anyQueueRunning ? 'rgba(37, 99, 235, 0.10)' : token.colorFillQuaternary,
+          color: anyQueueRunning ? token.colorPrimary : token.colorText,
+          fontSize: 12,
+          fontWeight: 600,
+          cursor: 'pointer',
+          whiteSpace: 'nowrap',
+          lineHeight: 1.4,
+        }}
+      >
+        {anyQueueRunning ? (
+          <SyncOutlined spin style={{ fontSize: 12 }} />
+        ) : (
+          <span
+            style={{
+              width: 7,
+              height: 7,
+              borderRadius: '50%',
+              background: queueJobs.some((j) => j.status === 'failed') ? '#ef4444' : '#10b981',
+            }}
+          />
+        )}
+        <span>{t.queue.headerPill.replace('{count}', String(queueJobs.length))}</span>
+      </button>
+    ) : null
+
   return (
     <Layout style={{ minHeight: '100vh', background: 'transparent' }}>
       <Layout.Header
@@ -229,6 +328,24 @@ export default function AppLayout() {
           style={{ flex: 1, minWidth: 0, borderBottom: 'none', background: 'transparent' }}
         />
         <Space size={8}>
+          {queuePillBtn &&
+            (useHeaderPopover ? (
+              <Popover
+                open={popoverOpen && queueJobs.length > 0}
+                onOpenChange={setPopoverOpen}
+                trigger="click"
+                placement="bottomRight"
+                content={
+                  <div style={{ width: 332, maxWidth: 'calc(100vw - 40px)' }}>
+                    <UpdateQueuePanel mode="popover" onCollapse={() => setPopoverOpen(false)} />
+                  </div>
+                }
+              >
+                {queuePillBtn}
+              </Popover>
+            ) : (
+              queuePillBtn
+            ))}
           <Segmented
             size="small"
             value={locale}
@@ -313,6 +430,24 @@ export default function AppLayout() {
         )}
         <Outlet />
       </Layout.Content>
+
+      {/* 超宽屏（>= 1840px）停靠在右侧纯空白边距区域：0 遮挡、0 挤压卡片 */}
+      {isUltrawide && queueJobs.length > 0 && !queueCollapsed && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 80,
+            right: 'max(16px, calc((100vw - 1120px) / 2 - 348px))',
+            width: 332,
+            zIndex: 90,
+          }}
+        >
+          <UpdateQueuePanel mode="docked" />
+        </div>
+      )}
+
+      {/* 全局只读 xterm.js 实时原始日志终端弹窗 */}
+      <UpdateLogModal />
     </Layout>
   )
 }

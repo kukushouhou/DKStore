@@ -286,6 +286,19 @@ func (a *Adapter) recreateContainerViaEngine(
 	targetImageRef string,
 	wasRunning bool,
 ) (newID string, err error) {
+	return a.recreateContainerViaEngineWithOverrides(ctx, execTr, oldID, rawInspect, targetImageRef, wasRunning, nil, nil)
+}
+
+func (a *Adapter) recreateContainerViaEngineWithOverrides(
+	ctx context.Context,
+	execTr transport.ExecutableTransport,
+	oldID string,
+	rawInspect map[string]any,
+	targetImageRef string,
+	wasRunning bool,
+	overrideEnv *[]platform.EnvVar,
+	overridePorts *[]platform.PortBinding,
+) (newID string, err error) {
 	rawName, _ := rawInspect["Name"].(string)
 	origName := strings.TrimPrefix(rawName, "/")
 	if origName == "" {
@@ -309,6 +322,7 @@ func (a *Adapter) recreateContainerViaEngine(
 		}
 	}
 	createPayload := buildCreatePayload(oldID, rawInspect, imageCfg, targetImageRef)
+	applyPayloadOverrides(createPayload, overrideEnv, overridePorts)
 
 	// 提取原容器连接的全部网络（首个网络放入 NetworkingConfig.EndpointsConfig，其余在 create 后 connect）
 	type extraNet struct {

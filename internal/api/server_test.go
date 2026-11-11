@@ -131,4 +131,46 @@ func TestAPIEndpoints_IconsTagsIgnoreAndCustomUpdateValidation(t *testing.T) {
 	if recUpd.Code != http.StatusBadRequest || !strings.Contains(recUpd.Body.String(), "99.99.99") {
 		t.Fatalf("expected localized tag-not-found error, got code=%d body=%s", recUpd.Code, recUpd.Body.String())
 	}
+
+	// 5. GET & PUT /api/v1/settings supports progressStyle (default "layered") and partial/full preservation
+	recSet0 := doReq(http.MethodGet, "/api/v1/settings", "")
+	if recSet0.Code != http.StatusOK || !strings.Contains(recSet0.Body.String(), `"progressStyle":"layered"`) {
+		t.Fatalf("expected default progressStyle=layered, got %d %s", recSet0.Code, recSet0.Body.String())
+	}
+	recSet1 := doReq(http.MethodPut, "/api/v1/settings", `{"locale":"en-US","checkIntervalHours":12,"channel":"webhook","webhookUrl":"https://example.com/hook"}`)
+	if recSet1.Code != http.StatusOK {
+		t.Fatalf("save full settings failed: %d %s", recSet1.Code, recSet1.Body.String())
+	}
+	// Partial update of progressStyle must NOT wipe webhookUrl or checkIntervalHours
+	recSet2 := doReq(http.MethodPut, "/api/v1/settings", `{"progressStyle":"unified"}`)
+	if recSet2.Code != http.StatusOK || !strings.Contains(recSet2.Body.String(), `"progressStyle":"unified"`) || !strings.Contains(recSet2.Body.String(), `"checkIntervalHours":12`) || !strings.Contains(recSet2.Body.String(), `"https://example.com/hook"`) {
+		t.Fatalf("partial progressStyle save clobbered settings: %d %s", recSet2.Code, recSet2.Body.String())
+	}
+	// Full update without progressStyle must preserve "unified"
+	recSet3 := doReq(http.MethodPut, "/api/v1/settings", `{"locale":"zh-CN","checkIntervalHours":6}`)
+	if recSet3.Code != http.StatusOK || !strings.Contains(recSet3.Body.String(), `"progressStyle":"unified"`) {
+		t.Fatalf("full settings save lost progressStyle: %d %s", recSet3.Code, recSet3.Body.String())
+	}
+
+	// 6. POST /api/v1/apps/compose-update launches tracked Job and applies policyMode
+	_, _ = st.DB.ExecContext(ctx, `INSERT INTO app(key, host_id, name, source, project_json, updated_at) VALUES ('h1/compose/stack', 'h1', 'stack', 'compose', '{"name":"stack","workingDir":"/tmp/nonexistent"}', ?)`, now)
+	_, _ = st.DB.ExecContext(ctx, `INSERT INTO service(key, app_key, name, state, image_ref, image_id, repo_digest, platform, updated_at) VALUES ('h1/compose/stack/api', 'h1/compose/stack', 'api', 'running', 'nginx:1.26.2', 'sha256:bbb', 'sha256:bbb', 'linux/amd64', ?)`, now)
+
+	recComp := doReq(http.MethodPost, "/api/v1/apps/compose-update", `{"appKey":"h1/compose/stack","serviceKey":"h1/compose/stack/api","policyMode":"prefix","policyPrefix":"1.27","content":"services:\n  api:\n    image: nginx:1.27.3\n"}`)
+	if recComp.Code != http.StatusOK || !strings.Contains(recComp.Body.String(), `"job":{`) {
+		t.Fatalf("expected compose-update to return tracked job, got %d %s", recComp.Code, recComp.Body.String())
+	}
+
+	// 7. GET /api/v1/services/config & POST /api/v1/services/config-update
+	recCfgNonSA := doReq(http.MethodGet, "/api/v1/services/config?serviceKey=h1%2Fcompose%2Fstack%2Fapi", "")
+	if recCfgNonSA.Code != http.StatusOK || !strings.Contains(recCfgNonSA.Body.String(), `"editable":false`) {
+		t.Fatalf("expected non-standalone service config editable=false, got %d %s", recCfgNonSA.Code, recCfgNonSA.Body.String())
+	}
+	recCfgUpd := doReq(http.MethodPost, "/api/v1/services/config-update", `{"serviceKey":"h1/container/web/main","policyMode":"forever","env":[{"key":"TZ","value":"UTC"}],"ports":[{"hostPort":"8080","containerPort":"80","protocol":"tcp"}]}`)
+	if recCfgUpd.Code != http.StatusOK || !strings.Contains(recCfgUpd.Body.String(), `"job":{`) {
+		t.Fatalf("expected services/config-update to return tracked job, got %d %s", recCfgUpd.Code, recCfgUpd.Body.String())
+	}
+
+	// Wait briefly for background goroutines launched against mock local socket to settle before TempDir cleanup
+	time.Sleep(150 * time.Millisecond)
 }

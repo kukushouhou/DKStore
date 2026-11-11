@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { apiBase, type CheckProgress, type UpdateJobItem } from '../api/client'
-import { useUIStore } from '../store/ui'
+import { emitJobLog, useUIStore } from '../store/ui'
 
 /** 全局订阅 SSE 实时检查与更新进度事件，并节流流式刷新相关缓存。 */
 export function useEvents(enabled: boolean) {
@@ -57,6 +57,10 @@ export function useEvents(enabled: boolean) {
     es.addEventListener('update_job', (ev) => {
       try {
         const job = JSON.parse((ev as MessageEvent).data) as UpdateJobItem
+        const chunk = job.logChunk ?? job.progress?.logChunk
+        if (chunk) {
+          emitJobLog(job.id, chunk, job.logOffset)
+        }
         useUIStore.getState().upsertUpdateJob(job)
         if (job.status === 'succeeded' || job.status === 'failed') {
           qc.invalidateQueries({ queryKey: ['overview'] })

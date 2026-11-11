@@ -5,6 +5,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router'
 import { api, type AppCardItem, type FailedItem } from '../api/client'
 import AppCard from '../components/AppCard'
+import UpdateQueuePanel from '../components/UpdateQueuePanel'
+import { useIsUltrawide, useOrderedQueueJobs } from '../hooks/useUpdateQueue'
 import { useI18n } from '../i18n'
 import { useUIStore } from '../store/ui'
 
@@ -17,6 +19,9 @@ export default function HomePage() {
   const [hostFilter, setHostFilter] = useState<string>('')
   const liveProgress = useUIStore((s) => s.liveProgress)
   const setLiveProgress = useUIStore((s) => s.setLiveProgress)
+  const queueCollapsed = useUIStore((s) => s.queueCollapsed)
+  const isUltrawide = useIsUltrawide()
+  const queueJobs = useOrderedQueueJobs()
 
   // 分组折叠状态：默认展开可更新、需谨慎更新（非空时自动展开）与无需更新
   const [normalExpanded, setNormalExpanded] = useState(true)
@@ -328,6 +333,11 @@ export default function HomePage() {
           {isRunning ? t.home.checking : t.home.checkNow}
         </Button>
       </div>
+
+      {/* 中小屏（< 1840px）全宽内嵌更新任务队列：紧接标题栏下方，0 横向挤压、0 遮挡卡片 */}
+      {!isUltrawide && queueJobs.length > 0 && !queueCollapsed && (
+        <UpdateQueuePanel mode="inline" />
+      )}
 
       {/* 多设备筛选 */}
       {hosts.length > 1 && (

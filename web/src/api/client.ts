@@ -316,6 +316,53 @@ export interface AppComposeResponse {
   reason?: string
 }
 
+export interface UpdateAppComposePayload {
+  appKey: string
+  content: string
+  serviceKey?: string
+  policyMode?: string
+  policyPrefix?: string
+  skipTargetTag?: string
+}
+
+export interface ServiceEnvItem {
+  key: string
+  value: string
+}
+
+export interface ServicePortItem {
+  hostIp?: string
+  hostPort: string
+  containerPort: string
+  protocol: string
+}
+
+export interface ServiceVolumeItem {
+  hostPath: string
+  containerPath: string
+  mode?: string
+}
+
+export interface ServiceConfigResponse {
+  editable: boolean
+  reason?: string
+  imageRef: string
+  env: ServiceEnvItem[]
+  ports: ServicePortItem[]
+  volumes?: ServiceVolumeItem[]
+}
+
+export interface UpdateServiceConfigPayload {
+  serviceKey: string
+  targetTag?: string
+  policyMode?: string
+  policyPrefix?: string
+  skipTargetTag?: string
+  env: ServiceEnvItem[]
+  ports: ServicePortItem[]
+  volumes?: ServiceVolumeItem[]
+}
+
 export interface CheckRunItem {
   id: number
   trigger: string
@@ -336,6 +383,7 @@ export interface CheckRunItem {
 
 export interface AppSettings {
   locale: 'zh-CN' | 'en-US'
+  progressStyle?: 'layered' | 'unified'
   checkIntervalHours: number
   channel: string
   webhookUrl: string
@@ -351,6 +399,14 @@ export interface RegistryCred {
   secret?: string
 }
 
+export interface LayerProgress {
+  id: string
+  status: 'waiting' | 'downloading' | 'extracting' | 'done' | string
+  current: number
+  total: number
+  percent: number
+}
+
 export interface PullProgress {
   phase: 'precheck' | 'pulling' | 'recreating' | 'verifying' | 'done' | string
   statusText: string
@@ -359,6 +415,8 @@ export interface PullProgress {
   downloadedBytes: number
   totalBytes: number
   percent: number
+  layers?: LayerProgress[]
+  logChunk?: string
 }
 
 export interface UpdateJobItem {
@@ -391,6 +449,8 @@ export interface UpdateJobItem {
   rollbackReasonText?: string
   errorCode?: string
   errorMsg?: string
+  logChunk?: string
+  logOffset?: number
   logs?: string
   startedAt: number
   finishedAt?: number
@@ -458,10 +518,18 @@ export const api = {
 
   getAppCompose: (appKey: string) =>
     request<AppComposeResponse>(`/apps/compose?key=${encodeURIComponent(appKey)}`),
-  updateAppCompose: (appKey: string, content: string) =>
-    request<{ ok: boolean; items?: UpdateJobItem[] }>('/apps/compose-update', {
+  updateAppCompose: (payload: UpdateAppComposePayload) =>
+    request<{ ok: boolean; job?: UpdateJobItem; items?: UpdateJobItem[] }>('/apps/compose-update', {
       method: 'POST',
-      body: JSON.stringify({ appKey, content }),
+      body: JSON.stringify(payload),
+    }),
+
+  getServiceConfig: (serviceKey: string) =>
+    request<ServiceConfigResponse>(`/services/config?serviceKey=${encodeURIComponent(serviceKey)}`),
+  updateServiceConfig: (payload: UpdateServiceConfigPayload) =>
+    request<{ ok: boolean; job?: UpdateJobItem }>('/services/config-update', {
+      method: 'POST',
+      body: JSON.stringify(payload),
     }),
 
   listHosts: () => request<HostsListResponse>('/hosts'),
@@ -495,6 +563,8 @@ export const api = {
     }),
 
   listUpdates: () => request<{ items: UpdateJobItem[] }>('/updates'),
+  getUpdateJob: (id: string) =>
+    request<UpdateJobItem>(`/updates/${encodeURIComponent(id)}`),
   startUpdates: (payload: string[] | StartUpdatesPayload) =>
     request<{ items: UpdateJobItem[] }>('/updates', {
       method: 'POST',

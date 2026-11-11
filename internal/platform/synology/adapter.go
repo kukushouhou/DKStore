@@ -13,6 +13,7 @@ import (
 	"math"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -169,42 +170,77 @@ func (a *Adapter) UpdateService(
 			onProgress(p)
 		}
 	}
-	emit(platform.PullProgress{Phase: "precheck", StatusText: "Prechecking DSM Container Manager state", Percent: 5})
+	emit(platform.PullProgress{
+		Phase:      "precheck",
+		StatusText: "Prechecking DSM Container Manager state",
+		Percent:    5,
+		LogChunk:   "Prechecking DSM Container Manager state...\r\n",
+	})
 
 	repo, tag := splitDSMRepoTag(req.TargetImageRef)
+	authUser, authPass := decodeRegistryAuth(req.RegistryAuthB64)
 	isProject := req.Project != nil && req.Project.DSMProjectID != ""
 
-	var standalone *dsmContainerListItem
-	if !isProject {
-		containers, err := a.dsmCli.ListContainers(ctx)
-		if err != nil {
-			return nil, &platform.UpdateError{Code: "recreate_failed", Message: biErr(err)}
-		}
-		standalone = findStandaloneContainer(containers, req)
-		oldRef := req.OldImageRef
-		if oldRef == "" && standalone != nil {
-			oldRef = containerImageRef(*standalone)
-		}
-		oldRepo, oldTag := splitDSMRepoTag(oldRef)
-		sameRepoTag := oldRef != "" && normalizeRepo(oldRepo) == normalizeRepo(repo) && oldTag == tag
-
-		isCLICompose := req.Source == platform.SourceCompose ||
-			(standalone != nil && strings.TrimSpace(standalone.Labels["com.docker.compose.project"]) != "")
-		if isCLICompose && !sameRepoTag {
-			return nil, dsmCLIComposeUnsupportedErr()
-		}
-		if standalone == nil {
-			return nil, &platform.UpdateError{
-				Code:    "recreate_failed",
-				Message: bi("未在群晖容器列表中找到目标容器 "+req.AppName, "Target container not found in DSM container list: "+req.AppName),
+	if isProject {
+		oldRepo, oldTag := splitDSMRepoTag(req.OldImageRef)
+		sameRepoTag := req.OldImageRef != "" && normalizeRepo(oldRepo) == normalizeRepo(repo) && oldTag == tag
+		if sameRepoTag {
+			// 同标签 digest_update：先尝试带正确 registry 地址调用 PullImage 拉取最新层；
+			// 若群晖后台尚未将该第三方仓库登记到 SYNO.Docker.Registry（返回 1202/1051/1052 等 DSMError），
+			// 不中断任务，继续交由 updateProjectService 的原生 build_stream 尝试拉取与重建校验（附录 E.1）。
+			if err := a.dsmCli.PullImage(ctx, repo, tag, authUser, authPass, onProgress); err != nil {
+				if ctx.Err() != nil {
+					return nil, &platform.UpdateError{
+						Code:    "pull_failed",
+						Message: fmt.Sprintf("%s:%s — %s", repo, tag, biErr(err)),
+					}
+				}
+				var de *DSMError
+				if !errors.As(err, &de) {
+					return nil, &platform.UpdateError{
+						Code:    "pull_failed",
+						Message: fmt.Sprintf("%s:%s — %s", repo, tag, biErr(err)),
+					}
+				}
+				emit(platform.PullProgress{
+					Phase:      "pulling",
+					StatusText: "Fallback to native Docker Compose build_stream",
+					Percent:    15,
+					LogChunk:   fmt.Sprintf("DSM Image API returned code %d, delegating pull to native Compose build_stream...\r\n", de.Code),
+				})
 			}
 		}
-		if !sameRepoTag {
-			return a.recreateStandalone(ctx, req, repo, tag, standalone, onProgress, emit)
-		}
+		return a.updateProjectService(ctx, req, repo, tag, emit)
 	}
 
-	if err := a.dsmCli.PullImage(ctx, repo, tag, onProgress); err != nil {
+	containers, err := a.dsmCli.ListContainers(ctx)
+	if err != nil {
+		return nil, &platform.UpdateError{Code: "recreate_failed", Message: biErr(err)}
+	}
+	standalone := findStandaloneContainer(containers, req)
+	oldRef := req.OldImageRef
+	if oldRef == "" && standalone != nil {
+		oldRef = containerImageRef(*standalone)
+	}
+	oldRepo, oldTag := splitDSMRepoTag(oldRef)
+	sameRepoTag := oldRef != "" && normalizeRepo(oldRepo) == normalizeRepo(repo) && oldTag == tag
+
+	isCLICompose := req.Source == platform.SourceCompose ||
+		(standalone != nil && strings.TrimSpace(standalone.Labels["com.docker.compose.project"]) != "")
+	if isCLICompose && !sameRepoTag {
+		return nil, dsmCLIComposeUnsupportedErr()
+	}
+	if standalone == nil {
+		return nil, &platform.UpdateError{
+			Code:    "recreate_failed",
+			Message: bi("未在群晖容器列表中找到目标容器 "+req.AppName, "Target container not found in DSM container list: "+req.AppName),
+		}
+	}
+	if !sameRepoTag {
+		return a.recreateStandalone(ctx, req, repo, tag, authUser, authPass, standalone, onProgress, emit, nil, nil)
+	}
+
+	if err := a.dsmCli.PullImage(ctx, repo, tag, authUser, authPass, onProgress); err != nil {
 		return nil, &platform.UpdateError{
 			Code:    "pull_failed",
 			Message: fmt.Sprintf("%s:%s — %s", repo, tag, biErr(err)),
@@ -215,14 +251,15 @@ func (a *Adapter) UpdateService(
 	if imgs, err := a.dsmCli.ListImages(ctx); err == nil {
 		expectedID = findImageID(imgs, repo, tag)
 	}
-
-	if isProject {
-		return a.updateProjectService(ctx, req, expectedID, emit)
-	}
 	return a.upgradeStandalone(ctx, req, repo, expectedID, standalone, emit)
 }
 
-func (a *Adapter) updateProjectService(ctx context.Context, req platform.UpdateRequest, expectedID string, emit func(platform.PullProgress)) (*platform.UpdateResult, error) {
+func (a *Adapter) updateProjectService(
+	ctx context.Context,
+	req platform.UpdateRequest,
+	repo, tag string,
+	emit func(platform.PullProgress),
+) (*platform.UpdateResult, error) {
 	projectID := req.Project.DSMProjectID
 	detail, err := a.dsmCli.GetProject(ctx, projectID)
 	if err != nil {
@@ -249,8 +286,17 @@ func (a *Adapter) updateProjectService(ctx context.Context, req platform.UpdateR
 			),
 		}
 	}
-	emit(platform.PullProgress{Phase: "recreating", StatusText: "Updating DSM Project YAML & rebuilding service", Percent: 85})
-	if err := a.dsmCli.UpdateAndBuildProject(ctx, projectID, string(afterBytes)); err != nil {
+
+	parser := platform.NewComposeStreamParser()
+	emit(platform.PullProgress{
+		Phase:      "pulling",
+		StatusText: "Updating DSM Project YAML & streaming Docker Compose build",
+		Percent:    10,
+		LogChunk:   fmt.Sprintf("==> Updating DSM Project %s (service %s -> %s)\r\n", req.Project.Name, req.ServiceName, req.TargetImageRef),
+	})
+	if err := a.dsmCli.UpdateAndBuildProjectStream(ctx, projectID, string(afterBytes), func(chunk string) {
+		emit(parser.Feed(chunk))
+	}); err != nil {
 		var pbe *ProjectBuildError
 		restoreNote := ""
 		if errors.As(err, &pbe) && pbe.YAMLWritten {
@@ -261,8 +307,19 @@ func (a *Adapter) updateProjectService(ctx context.Context, req platform.UpdateR
 			Message: biErr(err) + restoreNote,
 		}
 	}
+	parser.Flush()
 
-	emit(platform.PullProgress{Phase: "verifying", StatusText: "Verifying container image via DSM WebAPI", Percent: 95})
+	expectedID := ""
+	if imgs, err := a.dsmCli.ListImages(ctx); err == nil {
+		expectedID = findImageID(imgs, repo, tag)
+	}
+
+	emit(platform.PullProgress{
+		Phase:      "verifying",
+		StatusText: "Verifying container image via DSM WebAPI",
+		Percent:    95,
+		LogChunk:   "Verifying container state & switched image via DSM WebAPI...\r\n",
+	})
 	var (
 		found      *dsmContainerDetailed
 		lastReason string
@@ -418,15 +475,17 @@ func dsmCLIComposeUnsupportedErr() *platform.UpdateError {
 	}
 }
 
-// recreateStandalone 跨版本号升级或回退普通独立单容器：
-// 先读取原 profile 再拉取新镜像（拉取失败不影响运行中的旧容器），随后停止、删除并用新镜像重建，失败时自动用备份 profile 恢复原容器。
+// recreateStandalone 跨版本号升级、回退或修改独立单容器配置：
+// 先读取原 profile 再拉取新镜像（拉取失败不影响运行中的旧容器），随后停止、删除并用新镜像/新配置重建，失败时自动用备份 profile 恢复原容器。
 func (a *Adapter) recreateStandalone(
 	ctx context.Context,
 	req platform.UpdateRequest,
-	repo, tag string,
+	repo, tag, authUser, authPass string,
 	before *dsmContainerListItem,
 	onProgress func(platform.PullProgress),
 	emit func(platform.PullProgress),
+	overrideEnv *[]platform.EnvVar,
+	overridePorts *[]platform.PortBinding,
 ) (*platform.UpdateResult, error) {
 	cName := strings.TrimSpace(req.ServiceName)
 	if cName == "" || cName == "main" {
@@ -448,14 +507,16 @@ func (a *Adapter) recreateStandalone(
 	backupProfile := cloneProfile(origProfile)
 
 	oldImageID := ""
+	beforeID := ""
 	if before != nil {
 		oldImageID = before.ImageID
+		beforeID = before.ID
 	}
 	if oldImageID == "" {
 		oldImageID = req.ExpectedImageID
 	}
 
-	if err := a.dsmCli.PullImage(ctx, repo, tag, onProgress); err != nil {
+	if err := a.dsmCli.PullImage(ctx, repo, tag, authUser, authPass, onProgress); err != nil {
 		return nil, &platform.UpdateError{
 			Code:    "pull_failed",
 			Message: fmt.Sprintf("%s:%s — %s", repo, tag, biErr(err)),
@@ -468,8 +529,20 @@ func (a *Adapter) recreateStandalone(
 
 	newProfile := cloneProfile(origProfile)
 	newProfile["image"] = req.TargetImageRef
+	isConfigOverride := overrideEnv != nil || overridePorts != nil
+	if overrideEnv != nil {
+		applyDSMEnvToProfile(newProfile, *overrideEnv)
+	}
+	if overridePorts != nil {
+		applyDSMPortsToProfile(newProfile, *overridePorts)
+	}
 
-	emit(platform.PullProgress{Phase: "recreating", StatusText: "Recreating standalone container via DSM WebAPI", Percent: 85})
+	emit(platform.PullProgress{
+		Phase:      "recreating",
+		StatusText: "Recreating standalone container via DSM WebAPI",
+		Percent:    85,
+		LogChunk:   fmt.Sprintf("Recreating standalone container %s via DSM WebAPI...\r\n", cName),
+	})
 	if wasRunning {
 		if err := a.dsmCli.StopContainer(ctx, cName); err != nil {
 			return nil, &platform.UpdateError{Code: "recreate_failed", Message: biErr(err)}
@@ -478,25 +551,36 @@ func (a *Adapter) recreateStandalone(
 	if err := a.dsmCli.DeleteContainer(ctx, cName); err != nil {
 		return nil, &platform.UpdateError{Code: "recreate_failed", Message: biErr(err)}
 	}
-	if err := a.dsmCli.CreateContainer(ctx, newProfile, wasRunning); err != nil {
+
+	restoreBackup := func(cleanCurrent bool) string {
 		restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dsmDefaultTimeout)
 		defer cancel()
-		restoreNote := ""
+		if cleanCurrent {
+			_ = a.dsmCli.StopContainer(restoreCtx, cName)
+			_ = a.dsmCli.DeleteContainer(restoreCtx, cName)
+		}
 		if rErr := a.dsmCli.CreateContainer(restoreCtx, backupProfile, wasRunning); rErr != nil {
-			restoreNote = " | " + bi(
+			return " | " + bi(
 				"恢复原容器失败，请在 Container Manager 中手动检查："+i18n.LocalizeErr(i18n.ZhCN, rErr),
 				"failed to restore original container, please check in Container Manager: "+i18n.LocalizeErr(i18n.EnUS, rErr),
 			)
-		} else {
-			restoreNote = " | " + bi("已自动恢复原容器", "original container restored")
 		}
+		return " | " + bi("已自动恢复原容器", "original container restored")
+	}
+
+	if err := a.dsmCli.CreateContainer(ctx, newProfile, wasRunning); err != nil {
 		return nil, &platform.UpdateError{
 			Code:    "recreate_failed",
-			Message: biErr(err) + restoreNote,
+			Message: biErr(err) + restoreBackup(false),
 		}
 	}
 
-	emit(platform.PullProgress{Phase: "verifying", StatusText: "Verifying container image via DSM WebAPI", Percent: 95})
+	emit(platform.PullProgress{
+		Phase:      "verifying",
+		StatusText: "Verifying container image via DSM WebAPI",
+		Percent:    95,
+		LogChunk:   "Verifying container state via DSM WebAPI...\r\n",
+	})
 	var (
 		found      *dsmContainerListItem
 		lastReason string
@@ -508,7 +592,7 @@ func (a *Adapter) recreateStandalone(
 			lastReason = biErr(err)
 		} else if c := findStandaloneContainer(containers, req); c == nil {
 			lastReason = bi("重建后未找到容器 "+cName, "Container not found after recreate: "+cName)
-		} else if !imageSwitched(c.ImageID, expectedID, oldImageID) {
+		} else if !imageSwitched(c.ImageID, expectedID, oldImageID) && !(isConfigOverride && expectedID == "" && c.ID != "" && c.ID != beforeID) {
 			lastReason = bi(
 				fmt.Sprintf("容器镜像 ID 未切换为新镜像（当前 %s，原 %s，期望 %s）", shortID(c.ImageID), shortID(oldImageID), shortID(expectedID)),
 				fmt.Sprintf("container image ID did not switch to the new image (current %s, old %s, expected %s)", shortID(c.ImageID), shortID(oldImageID), shortID(expectedID)),
@@ -536,7 +620,11 @@ func (a *Adapter) recreateStandalone(
 		}
 	}
 	if found == nil {
-		return nil, &platform.UpdateError{Code: "verify_failed", Message: lastReason}
+		restoreNote := ""
+		if isConfigOverride {
+			restoreNote = restoreBackup(true)
+		}
+		return nil, &platform.UpdateError{Code: "verify_failed", Message: lastReason + restoreNote}
 	}
 
 	state := found.State.Status
@@ -562,6 +650,242 @@ func (a *Adapter) recreateStandalone(
 		HealthStatus:   health,
 		Logs:           []string{"Recreated via Synology DSM WebAPI SYNO.Docker.Container"},
 	}, nil
+}
+
+// GetStandaloneConfig 读取群晖独立容器当前生效的镜像、环境变量、端口映射与只读挂载卷（附录 E.4）。
+func (a *Adapter) GetStandaloneConfig(ctx context.Context, appName, serviceName string) (*platform.StandaloneConfig, error) {
+	if a.dock != nil {
+		return a.dock.GetStandaloneConfig(ctx, appName, serviceName)
+	}
+	if a.dsmCli == nil {
+		return nil, i18n.NewHostError("dsm.not_configured", nil)
+	}
+	cName := strings.TrimSpace(serviceName)
+	if cName == "" || cName == "main" {
+		cName = strings.TrimSpace(appName)
+	}
+	if containers, err := a.dsmCli.ListContainers(ctx); err == nil {
+		if c := findStandaloneContainer(containers, platform.UpdateRequest{AppName: appName, ServiceName: serviceName}); c != nil {
+			if n := strings.TrimPrefix(c.Name, "/"); n != "" {
+				cName = n
+			}
+		}
+	}
+	prof, _, err := a.dsmCli.GetContainerProfile(ctx, cName)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(profileLabelValue(prof, "com.docker.compose.project")) != "" {
+		return &platform.StandaloneConfig{
+			Editable: false,
+			Reason:   dsmCLIComposeUnsupportedErr().Message,
+			ImageRef: anyString(prof["image"]),
+			Env:      []platform.EnvVar{},
+			Ports:    []platform.PortBinding{},
+			Volumes:  []platform.VolumeBinding{},
+		}, nil
+	}
+	return &platform.StandaloneConfig{
+		Editable: true,
+		ImageRef: anyString(prof["image"]),
+		Env:      extractDSMEnv(prof),
+		Ports:    extractDSMPorts(prof),
+		Volumes:  extractDSMVolumes(prof),
+	}, nil
+}
+
+// UpdateStandaloneConfig 拉取目标镜像并按更新后的环境变量/端口映射重建群晖独立容器，失败时自动恢复原备份 profile（附录 E.4）。
+func (a *Adapter) UpdateStandaloneConfig(
+	ctx context.Context,
+	req platform.StandaloneUpdateRequest,
+	onProgress func(platform.PullProgress),
+) (*platform.UpdateResult, error) {
+	if a.dock != nil {
+		return a.dock.UpdateStandaloneConfig(ctx, req, onProgress)
+	}
+	if a.dsmCli == nil {
+		return nil, &platform.UpdateError{Code: "recreate_failed", Message: biErr(i18n.NewHostError("dsm.not_configured", nil))}
+	}
+	emit := func(p platform.PullProgress) {
+		if onProgress != nil {
+			onProgress(p)
+		}
+	}
+	emit(platform.PullProgress{
+		Phase:      "precheck",
+		StatusText: "Prechecking standalone container configuration",
+		Percent:    5,
+		LogChunk:   "Prechecking DSM standalone container configuration...\r\n",
+	})
+
+	containers, err := a.dsmCli.ListContainers(ctx)
+	if err != nil {
+		return nil, &platform.UpdateError{Code: "recreate_failed", Message: biErr(err)}
+	}
+	upReq := platform.UpdateRequest{
+		AppName:         req.AppName,
+		ServiceName:     req.ServiceName,
+		Source:          platform.SourceStandalone,
+		ExpectedImageID: req.ExpectedImageID,
+		OldImageRef:     req.OldImageRef,
+		TargetImageRef:  req.TargetImageRef,
+		RegistryAuthB64: req.RegistryAuthB64,
+	}
+	standalone := findStandaloneContainer(containers, upReq)
+	if standalone == nil {
+		return nil, &platform.UpdateError{
+			Code:    "recreate_failed",
+			Message: bi("未在群晖容器列表中找到目标容器 "+req.AppName, "Target container not found in DSM container list: "+req.AppName),
+		}
+	}
+	if strings.TrimSpace(standalone.Labels["com.docker.compose.project"]) != "" {
+		return nil, dsmCLIComposeUnsupportedErr()
+	}
+	repo, tag := splitDSMRepoTag(req.TargetImageRef)
+	authUser, authPass := decodeRegistryAuth(req.RegistryAuthB64)
+	envCopy := append([]platform.EnvVar(nil), req.Env...)
+	portsCopy := append([]platform.PortBinding(nil), req.Ports...)
+	return a.recreateStandalone(ctx, upReq, repo, tag, authUser, authPass, standalone, onProgress, emit, &envCopy, &portsCopy)
+}
+
+func extractDSMEnv(prof map[string]any) []platform.EnvVar {
+	out := []platform.EnvVar{}
+	raw, ok := prof["env_variables"].([]any)
+	if !ok {
+		return out
+	}
+	for _, item := range raw {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		k := strings.TrimSpace(anyString(m["key"]))
+		if k == "" {
+			continue
+		}
+		out = append(out, platform.EnvVar{
+			Key:   k,
+			Value: anyString(m["value"]),
+		})
+	}
+	return out
+}
+
+func applyDSMEnvToProfile(prof map[string]any, env []platform.EnvVar) {
+	items := make([]map[string]string, 0, len(env))
+	for _, e := range env {
+		k := strings.TrimSpace(e.Key)
+		if k == "" {
+			continue
+		}
+		items = append(items, map[string]string{
+			"key":   k,
+			"value": e.Value,
+		})
+	}
+	prof["env_variables"] = items
+}
+
+func extractDSMPorts(prof map[string]any) []platform.PortBinding {
+	out := []platform.PortBinding{}
+	raw, ok := prof["port_bindings"].([]any)
+	if !ok {
+		return out
+	}
+	for _, item := range raw {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		cPort := anyString(m["container_port"])
+		hPort := anyString(m["host_port"])
+		proto := strings.ToLower(anyString(m["type"]))
+		if proto == "" {
+			proto = "tcp"
+		}
+		if cPort == "" {
+			continue
+		}
+		out = append(out, platform.PortBinding{
+			HostIP:        anyString(m["host_ip"]),
+			HostPort:      hPort,
+			ContainerPort: cPort,
+			Protocol:      proto,
+		})
+	}
+	return out
+}
+
+func applyDSMPortsToProfile(prof map[string]any, ports []platform.PortBinding) {
+	items := make([]map[string]any, 0, len(ports))
+	for _, p := range ports {
+		cPortStr := strings.TrimSpace(p.ContainerPort)
+		if cPortStr == "" {
+			continue
+		}
+		proto := strings.ToLower(strings.TrimSpace(p.Protocol))
+		if proto == "" {
+			proto = "tcp"
+		}
+		entry := map[string]any{
+			"type": proto,
+		}
+		if cInt, err := strconv.Atoi(cPortStr); err == nil {
+			entry["container_port"] = cInt
+		} else {
+			entry["container_port"] = cPortStr
+		}
+		hPortStr := strings.TrimSpace(p.HostPort)
+		if hPortStr != "" {
+			if hInt, err := strconv.Atoi(hPortStr); err == nil {
+				entry["host_port"] = hInt
+			} else {
+				entry["host_port"] = hPortStr
+			}
+		} else {
+			entry["host_port"] = ""
+		}
+		if hip := strings.TrimSpace(p.HostIP); hip != "" {
+			entry["host_ip"] = hip
+		}
+		items = append(items, entry)
+	}
+	prof["port_bindings"] = items
+}
+
+func extractDSMVolumes(prof map[string]any) []platform.VolumeBinding {
+	out := []platform.VolumeBinding{}
+	raw, ok := prof["volume_bindings"].([]any)
+	if !ok {
+		return out
+	}
+	for _, item := range raw {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		hp := anyString(m["host_volume_file"])
+		if hp == "" {
+			hp = anyString(m["host_path"])
+		}
+		cp := anyString(m["mount_point"])
+		if cp == "" {
+			cp = anyString(m["container_path"])
+		}
+		mode := strings.ToLower(anyString(m["type"]))
+		if mode != "ro" {
+			mode = "rw"
+		}
+		if hp == "" && cp == "" {
+			continue
+		}
+		out = append(out, platform.VolumeBinding{
+			HostPath:      hp,
+			ContainerPath: cp,
+			Mode:          mode,
+		})
+	}
+	return out
 }
 
 func standaloneStateMatches(c dsmContainerListItem, wantRunning bool) bool {
@@ -691,7 +1015,8 @@ func (a *Adapter) GetProjectCompose(ctx context.Context, project *platform.Proje
 	return detail.Content, nil
 }
 
-// UpdateProjectCompose 按新版完整 YAML 更新群晖项目：校验 services、备份原配置、拉取全部声明镜像并重建；失败自动写回原 YAML 并恢复（附录 D.4）。
+// UpdateProjectCompose 按新版完整 YAML 更新群晖项目：校验 services、备份原配置、写入新版 YAML 并流式执行 build_stream 拉取与重建；
+// 失败自动写回原 YAML 并恢复（附录 D.4 / 附录 E.1）。
 func (a *Adapter) UpdateProjectCompose(
 	ctx context.Context,
 	appName string,
@@ -708,8 +1033,7 @@ func (a *Adapter) UpdateProjectCompose(
 	if project == nil || strings.TrimSpace(project.DSMProjectID) == "" {
 		return i18n.NewEngineError(i18n.MsgComposeNotEditable)
 	}
-	svcImages, err := docker.ValidateComposeYAML(newYAML)
-	if err != nil {
+	if _, err := docker.ValidateComposeYAML(newYAML); err != nil {
 		return err
 	}
 
@@ -724,32 +1048,23 @@ func (a *Adapter) UpdateProjectCompose(
 			onProgress(p)
 		}
 	}
-	emit(platform.PullProgress{Phase: "precheck", StatusText: "Prechecking DSM project compose update", Percent: 5})
+	emit(platform.PullProgress{
+		Phase:      "precheck",
+		StatusText: "Prechecking DSM project compose update",
+		Percent:    5,
+		LogChunk:   fmt.Sprintf("==> Preparing DSM Project %s compose configuration update...\r\n", project.Name),
+	})
 
-	// 按字典序依次拉取新版 YAML 中声明的各个服务镜像（拉取失败尚未改写 DSM 项目，无需回滚）
-	svcNames := make([]string, 0, len(svcImages))
-	for name := range svcImages {
-		svcNames = append(svcNames, name)
-	}
-	sort.Strings(svcNames)
-	seenRef := make(map[string]bool, len(svcNames))
-	for _, svcName := range svcNames {
-		imgRef := svcImages[svcName]
-		if imgRef == "" || strings.Contains(imgRef, "${") || seenRef[imgRef] {
-			continue
-		}
-		seenRef[imgRef] = true
-		repo, tag := splitDSMRepoTag(imgRef)
-		if err := a.dsmCli.PullImage(ctx, repo, tag, onProgress); err != nil {
-			return &platform.UpdateError{
-				Code:    "pull_failed",
-				Message: fmt.Sprintf("%s:%s — %s", repo, tag, biErr(err)),
-			}
-		}
-	}
-
-	emit(platform.PullProgress{Phase: "recreating", StatusText: "Updating DSM project compose.yaml & rebuilding", Percent: 85})
-	if err := a.dsmCli.UpdateAndBuildProject(ctx, project.DSMProjectID, newYAML); err != nil {
+	parser := platform.NewComposeStreamParser()
+	emit(platform.PullProgress{
+		Phase:      "pulling",
+		StatusText: "Updating DSM project compose.yaml & streaming Docker Compose build",
+		Percent:    10,
+		LogChunk:   "Writing updated compose.yaml and starting native Docker Compose build_stream...\r\n",
+	})
+	if err := a.dsmCli.UpdateAndBuildProjectStream(ctx, project.DSMProjectID, newYAML, func(chunk string) {
+		emit(parser.Feed(chunk))
+	}); err != nil {
 		var pbe *ProjectBuildError
 		restoreNote := ""
 		if !errors.As(err, &pbe) || pbe.YAMLWritten {
@@ -760,15 +1075,24 @@ func (a *Adapter) UpdateProjectCompose(
 			Message: biErr(err) + restoreNote,
 		}
 	}
-	emit(platform.PullProgress{Phase: "done", StatusText: "Compose project updated", Percent: 100})
+	parser.Flush()
+	emit(platform.PullProgress{
+		Phase:      "done",
+		StatusText: "Compose project updated",
+		Percent:    100,
+		LogChunk:   "Compose project build_stream completed.\r\n",
+	})
 	return nil
 }
 
-// findImageID 在 DSM 镜像列表中查找 repo:tag 对应的镜像 ID。
+// findImageID 在 DSM 镜像列表中查找 repo:tag 对应的镜像 ID（兼容带域名前缀与剥离域名前缀两种仓库记录格式）。
 func findImageID(imgs []dsmImageListItem, repo, tag string) string {
 	want := normalizeRepo(repo)
+	_, stripped := splitDSMRegistryAndRepo(repo)
+	wantStripped := normalizeRepo(stripped)
 	for _, img := range imgs {
-		if normalizeRepo(img.Repository) != want {
+		normImg := normalizeRepo(img.Repository)
+		if normImg != want && (wantStripped == "" || normImg != wantStripped) {
 			continue
 		}
 		for _, t := range img.Tags {

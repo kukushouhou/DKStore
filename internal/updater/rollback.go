@@ -54,11 +54,52 @@ func (s *Service) ListJobs(ctx context.Context, limit int, lang i18n.Lang) ([]Jo
 		}
 		out = append(out, j)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// 若任务仍在运行中，叠加内存态的最新实时分层进度与日志偏移量
+	s.mu.Lock()
+	if len(s.activeJobs) > 0 {
+		byID := make(map[string]Job, len(s.activeJobs))
+		for _, aj := range s.activeJobs {
+			if aj.ID != "" {
+				byID[aj.ID] = aj
+			}
+		}
+		for i := range out {
+			if live, ok := byID[out[i].ID]; ok {
+				out[i].Status = live.Status
+				out[i].Phase = live.Phase
+				out[i].Progress = live.Progress
+				out[i].LogOffset = len(live.Logs)
+			}
+		}
+	}
+	s.mu.Unlock()
+	return out, nil
 }
 
-// GetJob 查询单个更新任务详情。
+// GetJob 查询单个更新任务详情（运行中任务直接返回实时累积内存态 Logs 与 LogOffset，附录 E.3）。
 func (s *Service) GetJob(ctx context.Context, id string, lang i18n.Lang) (*Job, error) {
+	s.mu.Lock()
+	for _, active := range s.activeJobs {
+		if active.ID == id {
+			cp := active
+			s.mu.Unlock()
+			cp.LogChunk = ""
+			cp.LogOffset = len(cp.Logs)
+			if cp.RollbackReason != "" {
+				cp.RollbackReasonText = i18n.FormatRollbackReason(lang, cp.RollbackReason)
+			}
+			if cp.TargetVersion != "" {
+				cp.TargetVersion = i18n.FormatTargetVersion(lang, cp.TargetVersion)
+			}
+			return &cp, nil
+		}
+	}
+	s.mu.Unlock()
+
 	rows, err := s.st.DB.QueryContext(ctx, `
 		SELECT id, kind, host_id, host_name, app_key, app_name, service_key, service_name, source,
 		       status, phase, COALESCE(progress_json,''),
@@ -220,7 +261,7 @@ func (s *Service) ExecuteRollback(ctx context.Context, jobID string, lang i18n.L
 		Source:             orig.Source,
 		Status:             "running",
 		Phase:              "precheck",
-		Progress:           platform.PullProgress{Phase: "precheck", StatusText: "Preparing rollback"},
+		Progress:           platform.PullProgress{Phase: "precheck", StatusText: "Preparing rollback", Percent: 5},
 		OldImageRef:        curImageRef,
 		OldImageID:         curImageID,
 		OldRepoDigest:      curRepoDigest,
@@ -234,6 +275,10 @@ func (s *Service) ExecuteRollback(ctx context.Context, jobID string, lang i18n.L
 		RollbackReasonText: i18n.FormatRollbackReason(lang, "no_exact_version_tag"),
 		StartedAt:          now,
 	}
+	initHeader := formatJobHeader(rbJob)
+	rbJob.Logs = initHeader
+	rbJob.LogChunk = initHeader
+	rbJob.LogOffset = len(initHeader)
 	if err := s.insertJob(ctx, rbJob); err != nil {
 		cleanupPlaceholder()
 		return nil, err
@@ -282,5 +327,6 @@ func scanJobRow(rows *sql.Rows, lang i18n.Lang) (Job, error) {
 	if j.TargetVersion != "" {
 		j.TargetVersion = i18n.FormatTargetVersion(lang, j.TargetVersion)
 	}
+	j.LogOffset = len(j.Logs)
 	return j, nil
 }

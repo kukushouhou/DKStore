@@ -1,8 +1,10 @@
 package synology
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -689,21 +691,97 @@ func anyFloat(v any) float64 {
 // taskPollInterval 为任务状态轮询间隔（测试中可调小）。
 var taskPollInterval = 1200 * time.Millisecond
 
+// splitDSMRegistryAndRepo 拆分群晖 SYNO.Docker.Image.pull_start 所需的 registry 地址与不含域名前缀的 repository（附录 E.1）：
+// 若首段路径包含 '.' / ':' 或为 'localhost'（如 ghcr.io/kukushouhou/card-bill-assistant），
+// 提取域名作为 registry="https://<host>" 并剥离前缀；若域名为 docker.io 系列则 registry="" 且仅剥离 docker.io/ 前缀。
+func splitDSMRegistryAndRepo(repository string) (registryURL, strippedRepo string) {
+	r := strings.TrimSpace(repository)
+	first, rest, hasSlash := strings.Cut(r, "/")
+	if !hasSlash || rest == "" {
+		return "", r
+	}
+	if strings.Contains(first, ".") || strings.Contains(first, ":") || strings.EqualFold(first, "localhost") {
+		switch strings.ToLower(first) {
+		case "docker.io", "index.docker.io", "registry-1.docker.io":
+			return "", rest
+		default:
+			return "https://" + first, rest
+		}
+	}
+	return "", r
+}
+
+// decodeRegistryAuth 从 Docker X-Registry-Auth Base64 头中解析可选的仓库账号与密码。
+func decodeRegistryAuth(b64 string) (user, pass string) {
+	b64 = strings.TrimSpace(b64)
+	if b64 == "" {
+		return "", ""
+	}
+	for _, enc := range []*base64.Encoding{
+		base64.URLEncoding,
+		base64.RawURLEncoding,
+		base64.StdEncoding,
+		base64.RawStdEncoding,
+	} {
+		raw, err := enc.DecodeString(b64)
+		if err != nil || len(raw) == 0 {
+			continue
+		}
+		var payload struct {
+			Username string `json:"username"`
+			Password string `json:"password"`
+		}
+		if json.Unmarshal(raw, &payload) == nil && payload.Username != "" {
+			return payload.Username, payload.Password
+		}
+	}
+	return "", ""
+}
+
 // PullImage 通过 SYNO.Docker.Image (pull_start + pull_status) 拉取目标镜像并回报进度。
-func (c *dsmClient) PullImage(ctx context.Context, repository, tag string, onProgress func(platform.PullProgress)) error {
+func (c *dsmClient) PullImage(
+	ctx context.Context,
+	repository, tag, authUser, authPass string,
+	onProgress func(platform.PullProgress),
+) error {
 	if tag == "" {
 		tag = "latest"
 	}
+	registryURL, strippedRepo := splitDSMRegistryAndRepo(repository)
+	params := map[string]string{
+		"registry":   jsonParam(registryURL),
+		"repository": jsonParam(strippedRepo),
+		"tag":        jsonParam(tag),
+	}
+	if authUser != "" {
+		params["username"] = jsonParam(authUser)
+		params["password"] = jsonParam(authPass)
+	}
+
+	if onProgress != nil {
+		onProgress(platform.PullProgress{
+			Phase:      "pulling",
+			StatusText: fmt.Sprintf("Pulling %s:%s", repository, tag),
+			Percent:    10,
+			LogChunk:   fmt.Sprintf("Pulling %s:%s via DSM WebAPI...\r\n", repository, tag),
+		})
+	}
+
 	var startRes struct {
 		TaskID string `json:"task_id"`
 	}
-	if err := c.call(ctx, "SYNO.Docker.Image", "1", "pull_start", map[string]string{
-		"repository": jsonParam(repository),
-		"tag":        jsonParam(tag),
-	}, &startRes); err != nil {
+	if err := c.call(ctx, "SYNO.Docker.Image", "1", "pull_start", params, &startRes); err != nil {
 		return err
 	}
 	if startRes.TaskID == "" {
+		if onProgress != nil {
+			onProgress(platform.PullProgress{
+				Phase:      "pulling",
+				StatusText: "Pull complete",
+				Percent:    80,
+				LogChunk:   fmt.Sprintf("Pull complete: %s:%s\r\n", repository, tag),
+			})
+		}
 		return nil
 	}
 
@@ -728,12 +806,20 @@ func (c *dsmClient) PullImage(ctx context.Context, repository, tag string, onPro
 				downloaded := anyFloat(st["downloaded"])
 				current := int64(anyFloat(st["current"]))
 				total := int64(anyFloat(st["total"]))
-				pct := int(downloaded * 100)
-				if pct <= 0 && total > 0 {
-					pct = int(current * 100 / total)
+				rawPct := int(downloaded * 100)
+				if rawPct <= 0 && total > 0 {
+					rawPct = int(current * 100 / total)
 				}
-				if pct > 99 && !finished {
-					pct = 99
+				if rawPct > 99 && !finished {
+					rawPct = 99
+				}
+				if rawPct < 0 {
+					rawPct = 0
+				}
+				pct := 10 + rawPct*70/100
+				chunk := ""
+				if !finished && rawPct > 0 {
+					chunk = fmt.Sprintf("\r\x1b[2KPulling %s:%s ... %d%%", strippedRepo, tag, rawPct)
 				}
 				onProgress(platform.PullProgress{
 					Phase:           "pulling",
@@ -741,6 +827,7 @@ func (c *dsmClient) PullImage(ctx context.Context, repository, tag string, onPro
 					DownloadedBytes: current,
 					TotalBytes:      total,
 					Percent:         pct,
+					LogChunk:        chunk,
 				})
 			}
 			if finished {
@@ -748,7 +835,8 @@ func (c *dsmClient) PullImage(ctx context.Context, repository, tag string, onPro
 					onProgress(platform.PullProgress{
 						Phase:      "pulling",
 						StatusText: "Pull complete",
-						Percent:    100,
+						Percent:    80,
+						LogChunk:   fmt.Sprintf("\r\x1b[2K\x1b[32m✔\x1b[0m Pull complete: %s:%s\r\n", repository, tag),
 					})
 				}
 				return nil
@@ -756,6 +844,13 @@ func (c *dsmClient) PullImage(ctx context.Context, repository, tag string, onPro
 		}
 	}
 }
+
+// dsmStreamDaemonError 表示 build_stream 实时终端输出中明确包含守护进程或仓库拉取致命错误。
+type dsmStreamDaemonError struct {
+	Line string
+}
+
+func (e *dsmStreamDaemonError) Error() string { return e.Line }
 
 // ProjectBuildError 表示 Project 更新/重建失败；YAMLWritten 表示新 YAML 是否已写入 DSM（需要回写原内容）。
 type ProjectBuildError struct {
@@ -772,39 +867,163 @@ func (e *ProjectBuildError) Localize(lang i18n.Lang) string {
 	return i18n.NewHostError("dsm.build_failed", e.Err).Localize(lang)
 }
 
-// UpdateAndBuildProject 通过 SYNO.Docker.Project 更新 compose.yaml 内容并触发重建。
-// build_stream 与 build 均失败时返回 *ProjectBuildError{YAMLWritten: true}，由调用方写回原 YAML。
+// UpdateAndBuildProject 通过 SYNO.Docker.Project 更新 compose.yaml 内容并触发重建（兼容无流回调调用）。
 func (c *dsmClient) UpdateAndBuildProject(ctx context.Context, projectID, content string) error {
+	return c.UpdateAndBuildProjectStream(ctx, projectID, content, nil)
+}
+
+// UpdateAndBuildProjectStream 通过 SYNO.Docker.Project 写入新版 compose.yaml 并实时流式读取 build_stream 输出。
+// build_stream 与 build 均失败时返回 *ProjectBuildError{YAMLWritten: true}，由调用方写回原 YAML。
+func (c *dsmClient) UpdateAndBuildProjectStream(ctx context.Context, projectID, content string, onChunk func(chunk string)) error {
 	if err := c.call(ctx, "SYNO.Docker.Project", "1", "update", map[string]string{
 		"id":      jsonParam(projectID),
 		"content": jsonParam(content),
 	}, nil); err != nil {
 		return &ProjectBuildError{YAMLWritten: false, Err: err}
 	}
-	if err := c.buildProject(ctx, projectID); err != nil {
+	if err := c.buildProjectWithStream(ctx, projectID, onChunk); err != nil {
 		return &ProjectBuildError{YAMLWritten: true, Err: err}
 	}
 	return nil
 }
 
-// buildProject 优先调用 build_stream，失败再调用 build；两者都失败时返回错误。
+// buildProject 优先调用实时流式 build_stream，失败再回退 build。
 func (c *dsmClient) buildProject(ctx context.Context, projectID string) error {
-	params := map[string]string{"id": jsonParam(projectID)}
-	errStream := c.call(ctx, "SYNO.Docker.Project", "1", "build_stream", params, nil)
+	return c.buildProjectWithStream(ctx, projectID, nil)
+}
+
+func (c *dsmClient) buildProjectWithStream(ctx context.Context, projectID string, onChunk func(chunk string)) error {
+	errStream := c.buildProjectStream(ctx, projectID, onChunk)
 	if errStream == nil {
 		return nil
 	}
-	// build_stream 以流式文本返回构建日志而非 JSON 信封：HTTP 成功即视为已触发，
-	// 结果由上层校验阶段（容器镜像是否切换）最终确认。
-	var decErr *dsmDecodeError
-	if errors.As(errStream, &decErr) {
-		return nil
+	var daemonErr *dsmStreamDaemonError
+	if errors.As(errStream, &daemonErr) {
+		return errStream
 	}
+	params := map[string]string{"id": jsonParam(projectID)}
 	errBuild := c.call(ctx, "SYNO.Docker.Project", "1", "build", params, nil)
 	if errBuild == nil {
 		return nil
 	}
 	return fmt.Errorf("build_stream: %s; build: %s", errStream.Error(), errBuild.Error())
+}
+
+// buildProjectStream 调用 SYNO.Docker.Project (method=build_stream)，以 2048 字节块增量读取流式日志并回调 onChunk（附录 E.1）。
+// 若响应为 DSM JSON 错误信封（如会话失效或接口报错）则解析为 *DSMError（支持会话自动重登重试）；
+// 若流中检测到致命 docker compose / daemon 拉取错误则返回 *dsmStreamDaemonError。
+func (c *dsmClient) buildProjectStream(ctx context.Context, projectID string, onChunk func(chunk string)) error {
+	sid, err := c.currentSID(ctx)
+	if err != nil {
+		return err
+	}
+	err = c.doBuildProjectStream(ctx, sid, projectID, onChunk)
+	var de *DSMError
+	if errors.As(err, &de) && de.SessionExpired() {
+		newSID, loginErr := c.relogin(ctx, sid)
+		if loginErr != nil {
+			return loginErr
+		}
+		return c.doBuildProjectStream(ctx, newSID, projectID, onChunk)
+	}
+	return err
+}
+
+func (c *dsmClient) doBuildProjectStream(ctx context.Context, sid, projectID string, onChunk func(chunk string)) error {
+	cctx, cancel := context.WithTimeout(ctx, dsmLongCallTimeout)
+	defer cancel()
+
+	vals := url.Values{
+		"api":     {"SYNO.Docker.Project"},
+		"version": {"1"},
+		"method":  {"build_stream"},
+		"id":      {jsonParam(projectID)},
+		"_sid":    {sid},
+	}
+	req, err := http.NewRequestWithContext(cctx, http.MethodPost, c.cfg.URL+"/webapi/entry.cgi", strings.NewReader(vals.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	parser := platform.NewComposeStreamParser()
+	buf := make([]byte, 2048)
+	var headBuf bytes.Buffer
+	decidedNotJSON := false
+
+	flushHeadAsStream := func() {
+		if decidedNotJSON {
+			return
+		}
+		decidedNotJSON = true
+		if headBuf.Len() > 0 {
+			s := headBuf.String()
+			headBuf.Reset()
+			parser.Feed(s)
+			if onChunk != nil {
+				onChunk(s)
+			}
+		}
+	}
+
+	for {
+		n, rErr := resp.Body.Read(buf)
+		if n > 0 {
+			chunkBytes := buf[:n]
+			if !decidedNotJSON {
+				headBuf.Write(chunkBytes)
+				trimmed := bytes.TrimSpace(headBuf.Bytes())
+				if len(trimmed) > 0 && trimmed[0] != '{' {
+					flushHeadAsStream()
+				} else if headBuf.Len() > 4096 {
+					flushHeadAsStream()
+				}
+			} else {
+				s := string(chunkBytes)
+				parser.Feed(s)
+				if onChunk != nil {
+					onChunk(s)
+				}
+			}
+		}
+		if rErr != nil {
+			if errors.Is(rErr, io.EOF) {
+				break
+			}
+			return rErr
+		}
+	}
+
+	if !decidedNotJSON && headBuf.Len() > 0 {
+		var env struct {
+			Success *bool `json:"success"`
+			Error   struct {
+				Code int `json:"code"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(bytes.TrimSpace(headBuf.Bytes()), &env) == nil && env.Success != nil {
+			if !*env.Success {
+				return &DSMError{API: "SYNO.Docker.Project", Method: "build_stream", Code: env.Error.Code}
+			}
+			return nil
+		}
+		flushHeadAsStream()
+	}
+
+	parser.Flush()
+	if fatal := parser.FatalError(); fatal != "" {
+		return &dsmStreamDaemonError{Line: fatal}
+	}
+	return nil
 }
 
 // UpgradeByRepository 通过 SYNO.Docker.Image (upgrade_start + upgrade_status) 重建使用该镜像的独立容器。

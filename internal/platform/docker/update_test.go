@@ -181,6 +181,16 @@ func TestPullImageStream_LayerProgress(t *testing.T) {
 	if last.TotalLayers != 2 || last.CompletedLayers != 2 {
 		t.Fatalf("expected 2/2 layers completed, got %+v", last)
 	}
+	if len(last.Layers) != 2 || last.Layers[0].ID != "a1b2c3d4e5f6" || last.Layers[0].Status != "done" || last.Layers[1].Status != "done" {
+		t.Fatalf("expected ordered Layers slice with done status, got %+v", last.Layers)
+	}
+	var allChunks strings.Builder
+	for _, ev := range events {
+		allChunks.WriteString(ev.LogChunk)
+	}
+	if !strings.Contains(allChunks.String(), "a1b2c3d4e5f6") || !strings.Contains(allChunks.String(), "\r\n") {
+		t.Fatalf("expected formatted terminal LogChunk output, got %q", allChunks.String())
+	}
 }
 
 func TestRecreateContainerViaEngine_StoppedContainerStaysStopped(t *testing.T) {
@@ -299,5 +309,93 @@ func TestUpdateService_DetectsExternalConflict(t *testing.T) {
 	var ue *platform.UpdateError
 	if !errors.As(err, &ue) || ue.Code != "external_conflict" {
 		t.Fatalf("expected external_conflict UpdateError, got: %v", err)
+	}
+}
+
+func TestStandaloneConfig_ReadDiffsImageEnvAndUpdateOverridesPorts(t *testing.T) {
+	var createdBody map[string]any
+	curImgID := "sha256:oldimg1"
+	tr := &fakeExecTransport{
+		doHandler: func(path string) (*http.Response, error) {
+			switch {
+			case strings.HasPrefix(path, "/containers/json"):
+				return jsonHTTPResp(200, []map[string]any{
+					{"Id": "cid-sa", "Names": []string{"/jellyfin"}},
+				}), nil
+			case strings.HasPrefix(path, "/containers/cid-sa/json"), strings.HasPrefix(path, "/containers/cid-new/json"):
+				return jsonHTTPResp(200, map[string]any{
+					"Id":    "cid-sa",
+					"Name":  "/jellyfin",
+					"Image": curImgID,
+					"State": map[string]any{"Running": true, "Status": "running"},
+					"Config": map[string]any{
+						"Image": "jellyfin/jellyfin:10.9.0",
+						"Env":   []string{"PATH=/usr/local/bin:/usr/bin", "TZ=Asia/Shanghai", "PUID=1000"},
+					},
+					"HostConfig": map[string]any{
+						"PortBindings": map[string]any{
+							"8096/tcp": []map[string]string{{"HostIp": "0.0.0.0", "HostPort": "8096"}},
+						},
+					},
+					"Mounts": []map[string]any{
+						{"Source": "/srv/media", "Destination": "/media", "RW": false},
+					},
+				}), nil
+			case strings.Contains(path, "oldimg1"):
+				return jsonHTTPResp(200, map[string]any{
+					"Id":     "sha256:oldimg1",
+					"Config": map[string]any{"Env": []string{"PATH=/usr/local/bin:/usr/bin"}},
+				}), nil
+			default:
+				return jsonHTTPResp(200, map[string]any{
+					"Id":          "sha256:newimg2",
+					"RepoDigests": []string{"jellyfin/jellyfin@sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+				}), nil
+			}
+		},
+		reqHandler: func(method, path string, body []byte) (*http.Response, error) {
+			if strings.HasPrefix(path, "/images/create") {
+				return &http.Response{
+					StatusCode: 200,
+					Body:       io.NopCloser(strings.NewReader(`{"status":"Pull complete","id":"112233445566"}` + "\n")),
+				}, nil
+			}
+			if strings.HasPrefix(path, "/containers/create") {
+				_ = json.Unmarshal(body, &createdBody)
+				curImgID = "sha256:newimg2"
+				return jsonHTTPResp(201, map[string]any{"Id": "cid-new"}), nil
+			}
+			return jsonHTTPResp(204, nil), nil
+		},
+	}
+
+	ad := New("local", tr)
+	cfg, err := ad.GetStandaloneConfig(context.Background(), "jellyfin", "main")
+	if err != nil {
+		t.Fatalf("GetStandaloneConfig failed: %v", err)
+	}
+	if !cfg.Editable || len(cfg.Env) != 2 || cfg.Env[0].Key != "TZ" {
+		t.Fatalf("expected image default PATH stripped and 2 user env vars returned, got %+v", cfg)
+	}
+	if len(cfg.Ports) != 1 || cfg.Ports[0].ContainerPort != "8096" || len(cfg.Volumes) != 1 || cfg.Volumes[0].Mode != "ro" {
+		t.Fatalf("unexpected ports/volumes: %+v", cfg)
+	}
+
+	res, err := ad.UpdateStandaloneConfig(context.Background(), platform.StandaloneUpdateRequest{
+		AppName:         "jellyfin",
+		ServiceName:     "main",
+		ExpectedImageID: "sha256:oldimg1",
+		OldImageRef:     "jellyfin/jellyfin:10.9.0",
+		TargetImageRef:  "jellyfin/jellyfin:10.10.0",
+		Env:             []platform.EnvVar{{Key: "TZ", Value: "UTC"}},
+		Ports:           []platform.PortBinding{{HostIP: "127.0.0.1", HostPort: "18096", ContainerPort: "8096", Protocol: "tcp"}},
+	}, nil)
+	if err != nil || res.NewImageID != "sha256:newimg2" {
+		t.Fatalf("UpdateStandaloneConfig failed: res=%+v err=%v", res, err)
+	}
+	hc, _ := createdBody["HostConfig"].(map[string]any)
+	pbs, _ := hc["PortBindings"].(map[string]any)
+	if pbs == nil || pbs["8096/tcp"] == nil {
+		t.Fatalf("expected overridden PortBindings in create payload, got %+v", createdBody)
 	}
 }

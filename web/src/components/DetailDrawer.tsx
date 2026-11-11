@@ -182,7 +182,7 @@ export default function DetailDrawer({
 
           {app.source !== 'vendor_managed' && (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-              {app.composeEditable && (
+              {(app.composeEditable || (totalCount <= 1 && app.source === 'standalone')) && (
                 <Button size="small" onClick={onOpenComposeYaml}>
                   {t.detail.updateByConfigBtn}
                 </Button>

@@ -51,6 +51,7 @@ export default function SettingsPage() {
   const onSaveSettings = async () => {
     const vals = form.getFieldsValue(true) as AppSettings
     vals.locale = locale
+    vals.progressStyle = useUIStore.getState().progressStyle
     setSaving(true)
     try {
       await api.saveSettings(vals)
