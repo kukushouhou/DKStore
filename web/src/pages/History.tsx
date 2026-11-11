@@ -15,6 +15,7 @@ import {
   Timeline,
   Typography,
   message,
+  theme,
 } from 'antd'
 import { ArrowRightOutlined, RollbackOutlined } from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -24,6 +25,7 @@ import { useUIStore } from '../store/ui'
 
 export default function HistoryPage() {
   const { locale, t } = useI18n()
+  const { token } = theme.useToken()
   const qc = useQueryClient()
   const [tab, setTab] = useState<'updates' | 'scans'>('updates')
   const [verifyingId, setVerifyingId] = useState<string | null>(null)
@@ -118,7 +120,9 @@ export default function HistoryPage() {
 
       {tab === 'updates' ? (
         updateItems.length === 0 ? (
-          <Empty description={t.history.emptyUpdates} />
+          <Card style={{ textAlign: 'center', padding: '32px 16px' }}>
+            <Empty description={t.history.emptyUpdates} />
+          </Card>
         ) : (
           <Space direction="vertical" size="middle" style={{ width: '100%' }}>
             {updateItems.map((job) => (
@@ -137,7 +141,7 @@ export default function HistoryPage() {
                       </Typography.Text>
                       <Typography.Text type="secondary">({job.hostName})</Typography.Text>
                       {statusTag(job.status)}
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                         {new Date(job.startedAt * 1000).toLocaleString(locale)}
                       </Typography.Text>
                     </Space>
@@ -170,18 +174,21 @@ export default function HistoryPage() {
                   </Flex>
 
                   <Space size={6} wrap>
-                    <Tag style={{ fontFamily: 'monospace' }}>
+                    <Tag style={{ fontFamily: token.fontFamilyCode, margin: 0 }}>
                       {job.oldVersion || job.oldImageRef || t.home.unknownCurrent}
                     </Tag>
-                    <ArrowRightOutlined style={{ fontSize: 12 }} />
-                    <Tag color="processing" style={{ fontFamily: 'monospace', fontWeight: 600 }}>
+                    <ArrowRightOutlined style={{ fontSize: token.fontSizeSM }} />
+                    <Tag
+                      color="processing"
+                      style={{ fontFamily: token.fontFamilyCode, fontWeight: 600, margin: 0 }}
+                    >
                       {job.targetVersion || job.targetImageRef || t.home.newImageDetected}
                     </Tag>
                   </Space>
 
                   {job.status !== 'succeeded' && job.status !== 'failed' && (
                     <div>
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                         {job.progress?.statusText || job.phase}
                       </Typography.Text>
                       <Progress percent={job.progress?.percent ?? 0} size="small" status="active" />
@@ -202,19 +209,25 @@ export default function HistoryPage() {
                             <Descriptions column={1} size="small">
                               <Descriptions.Item label={t.detail.imageRef}>
                                 <Typography.Text code>{job.oldImageRef}</Typography.Text>{' '}
-                                <ArrowRightOutlined style={{ fontSize: 11 }} />{' '}
+                                <ArrowRightOutlined style={{ fontSize: token.fontSizeSM }} />{' '}
                                 <Typography.Text code>{job.targetImageRef}</Typography.Text>
                               </Descriptions.Item>
                               {job.oldRepoDigest && (
                                 <Descriptions.Item label={t.detail.localDigest}>
-                                  <Typography.Text code style={{ fontSize: 11, wordBreak: 'break-all' }}>
+                                  <Typography.Text
+                                    code
+                                    style={{ fontSize: token.fontSizeSM, wordBreak: 'break-all' }}
+                                  >
                                     {job.oldRepoDigest}
                                   </Typography.Text>
                                 </Descriptions.Item>
                               )}
                               {job.targetRepoDigest && (
                                 <Descriptions.Item label={t.detail.targetDigest}>
-                                  <Typography.Text code style={{ fontSize: 11, wordBreak: 'break-all' }}>
+                                  <Typography.Text
+                                    code
+                                    style={{ fontSize: token.fontSizeSM, wordBreak: 'break-all' }}
+                                  >
                                     {job.targetRepoDigest}
                                   </Typography.Text>
                                 </Descriptions.Item>
@@ -229,10 +242,12 @@ export default function HistoryPage() {
                               <pre
                                 style={{
                                   margin: 0,
-                                  padding: 8,
-                                  fontSize: 11,
-                                  background: 'rgba(127,127,127,0.08)',
-                                  borderRadius: 6,
+                                  padding: 10,
+                                  fontFamily: token.fontFamilyCode,
+                                  fontSize: token.fontSizeSM,
+                                  background: token.colorFillAlter,
+                                  border: `1px solid ${token.colorBorderSecondary}`,
+                                  borderRadius: token.borderRadiusSM,
                                   whiteSpace: 'pre-wrap',
                                   wordBreak: 'break-all',
                                 }}
@@ -251,7 +266,9 @@ export default function HistoryPage() {
           </Space>
         )
       ) : scanItems.length === 0 ? (
-        <Empty description={t.history.empty} />
+        <Card style={{ textAlign: 'center', padding: '32px 16px' }}>
+          <Empty description={t.history.empty} />
+        </Card>
       ) : (
         <Timeline
           items={scanItems.map((r) => ({
@@ -264,7 +281,7 @@ export default function HistoryPage() {
                       {new Date(r.startedAt * 1000).toLocaleString(locale)}
                     </Typography.Text>
                     <Tag>{triggerLabel(r.trigger)}</Tag>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                       {t.history.summary
                         .replace('{total}', String(r.summary?.total ?? 0))
                         .replace('{normal}', String(r.summary?.normal ?? 0))
@@ -289,7 +306,7 @@ export default function HistoryPage() {
                               <Typography.Text code>
                                 {c.currentVersion || t.home.unknownCurrent}
                               </Typography.Text>
-                              <ArrowRightOutlined style={{ fontSize: 11 }} />
+                              <ArrowRightOutlined style={{ fontSize: token.fontSizeSM }} />
                               <Typography.Text code>{c.targetVersion}</Typography.Text>
                             </Space>
                           )}
@@ -297,7 +314,7 @@ export default function HistoryPage() {
                       ))}
                     </Space>
                   ) : (
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                       {t.history.noChanges}
                     </Typography.Text>
                   )}

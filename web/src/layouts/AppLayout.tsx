@@ -1,15 +1,31 @@
 import { useEffect, useRef, useState } from 'react'
-import { Button, Card, Flex, Grid, Input, Layout, Menu, Popover, Segmented, Space, Spin, Typography, message, theme } from 'antd'
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  Flex,
+  Grid,
+  Input,
+  Layout,
+  Menu,
+  Popover,
+  Segmented,
+  Space,
+  Spin,
+  Typography,
+  message,
+  theme,
+} from 'antd'
 import {
   AppstoreOutlined,
   CloudServerOutlined,
   ContainerOutlined,
-  GlobalOutlined,
   HistoryOutlined,
   LockOutlined,
   ReloadOutlined,
-  SettingOutlined,
   SafetyCertificateOutlined,
+  SettingOutlined,
   SyncOutlined,
 } from '@ant-design/icons'
 import { Outlet, useLocation, useNavigate } from 'react-router'
@@ -257,13 +273,24 @@ export default function AppLayout() {
     !dismissedRemind
 
   const anyQueueRunning = queueJobs.some((j) => j.status === 'queued' || j.status === 'running')
+  const hasFailed = queueJobs.some((j) => j.status === 'failed')
   const isHomeRoute = pathname === '/'
   const useHeaderPopover = !isUltrawide && !isHomeRoute
 
   const queuePillBtn =
     queueJobs.length > 0 ? (
-      <button
-        type="button"
+      <Button
+        size="small"
+        shape="round"
+        type={anyQueueRunning ? 'primary' : 'default'}
+        ghost={anyQueueRunning}
+        icon={
+          anyQueueRunning ? (
+            <SyncOutlined spin />
+          ) : (
+            <Badge status={hasFailed ? 'error' : 'success'} />
+          )
+        }
         onClick={() => {
           if (useHeaderPopover) {
             setPopoverOpen((v) => !v)
@@ -271,173 +298,135 @@ export default function AppLayout() {
             toggleQueueCollapsed()
           }
         }}
-        style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '4px 11px',
-          borderRadius: 999,
-          border: `1px solid ${
-            anyQueueRunning ? 'rgba(37, 99, 235, 0.38)' : token.colorBorderSecondary
-          }`,
-          background: anyQueueRunning ? 'rgba(37, 99, 235, 0.10)' : token.colorFillQuaternary,
-          color: anyQueueRunning ? token.colorPrimary : token.colorText,
-          fontSize: 12,
-          fontWeight: 600,
-          cursor: 'pointer',
-          whiteSpace: 'nowrap',
-          lineHeight: 1.4,
-        }}
       >
-        {anyQueueRunning ? (
-          <SyncOutlined spin style={{ fontSize: 12 }} />
-        ) : (
-          <span
-            style={{
-              width: 7,
-              height: 7,
-              borderRadius: '50%',
-              background: queueJobs.some((j) => j.status === 'failed') ? '#ef4444' : '#10b981',
-            }}
-          />
-        )}
-        <span>{t.queue.headerPill.replace('{count}', String(queueJobs.length))}</span>
-      </button>
+        {t.queue.headerPill.replace('{count}', String(queueJobs.length))}
+      </Button>
     ) : null
 
   return (
     <Layout style={{ minHeight: '100vh', background: 'transparent' }}>
       <Layout.Header
         style={{
+          padding: 0,
+          height: 60,
+          lineHeight: 'normal',
+          background: token.colorBgContainer,
+          borderBottom: '1px solid ' + token.colorBorderSecondary,
           display: 'flex',
           alignItems: 'center',
-          gap: 16,
-          background: token.colorBgContainer,
-          borderBottom: `1px solid ${token.colorBorderSecondary}`,
-          paddingInline: screens.md ? 32 : 12,
         }}
       >
-        <Typography.Title level={4} style={{ margin: 0, whiteSpace: 'nowrap' }}>
-          DKStore
-        </Typography.Title>
-        <Menu
-          mode="horizontal"
-          selectedKeys={[selected]}
-          items={items}
-          onClick={(e) => navigate(e.key)}
-          style={{ flex: 1, minWidth: 0, borderBottom: 'none', background: 'transparent' }}
-        />
-        <Space size={8}>
-          {queuePillBtn &&
-            (useHeaderPopover ? (
-              <Popover
-                open={popoverOpen && queueJobs.length > 0}
-                onOpenChange={setPopoverOpen}
-                trigger="click"
-                placement="bottomRight"
-                content={
-                  <div style={{ width: 332, maxWidth: 'calc(100vw - 40px)' }}>
-                    <UpdateQueuePanel mode="popover" onCollapse={() => setPopoverOpen(false)} />
-                  </div>
-                }
-              >
-                {queuePillBtn}
-              </Popover>
-            ) : (
-              queuePillBtn
-            ))}
-          <Segmented
-            size="small"
-            value={locale}
-            onChange={(v) => onSwitchLang(v as Locale)}
-            options={[
-              { label: screens.sm ? '简体中文' : '中', value: 'zh-CN', icon: <GlobalOutlined /> },
-              { label: 'EN', value: 'en-US' },
-            ]}
+        <div
+          style={{
+            width: '100%',
+            maxWidth: 1280,
+            margin: '0 auto',
+            paddingInline: screens.md ? 32 : 16,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 16,
+          }}
+        >
+          <Typography.Title level={4} style={{ margin: 0, whiteSpace: 'nowrap' }}>
+            DKStore
+          </Typography.Title>
+          <Menu
+            mode="horizontal"
+            selectedKeys={[selected]}
+            items={items}
+            onClick={(e) => navigate(e.key)}
+            style={{
+              flex: 1,
+              minWidth: 0,
+              borderBottom: 'none',
+              background: 'transparent',
+              lineHeight: '58px',
+            }}
           />
-          {auth.data?.mode === 'password' && (
-            <Button
+          <Space size={8} align="center">
+            {queuePillBtn &&
+              (useHeaderPopover ? (
+                <Popover
+                  open={popoverOpen && queueJobs.length > 0}
+                  onOpenChange={setPopoverOpen}
+                  trigger="click"
+                  placement="bottomRight"
+                  content={
+                    <div style={{ width: 332, maxWidth: 'calc(100vw - 40px)' }}>
+                      <UpdateQueuePanel mode="popover" onCollapse={() => setPopoverOpen(false)} />
+                    </div>
+                  }
+                >
+                  {queuePillBtn}
+                </Popover>
+              ) : (
+                queuePillBtn
+              ))}
+            <Segmented
               size="small"
-              onClick={async () => {
-                await api.logout()
-                qc.invalidateQueries()
-              }}
-            >
-              {t.nav.logout}
-            </Button>
-          )}
-        </Space>
+              value={locale}
+              onChange={(v) => onSwitchLang(v as Locale)}
+              options={[
+                { label: '中文', value: 'zh-CN' },
+                { label: 'EN', value: 'en-US' },
+              ]}
+            />
+            {auth.data?.mode === 'password' && (
+              <Button
+                size="small"
+                onClick={async () => {
+                  await api.logout()
+                  qc.invalidateQueries()
+                }}
+              >
+                {t.nav.logout}
+              </Button>
+            )}
+          </Space>
+        </div>
       </Layout.Header>
+
       <Layout.Content
         style={{
+          maxWidth: 1280,
           width: '100%',
-          maxWidth: 1120,
           margin: '0 auto',
-          padding: screens.md ? 32 : 16,
+          padding: screens.md ? '24px 32px 40px' : 16,
         }}
       >
         {showLocalRemind && (
-          <Flex
-            align="center"
-            justify="space-between"
-            wrap
-            gap={12}
-            style={{
-              padding: '10px 16px',
-              marginBottom: 16,
-              borderRadius: 12,
-              background: token.colorBgContainer,
-              border: `1px solid ${token.colorBorderSecondary}`,
+          <Alert
+            type="info"
+            showIcon
+            closable={{
+              onClose: () => {
+                localStorage.setItem('dkstore_dismiss_local_remind', '1')
+                setDismissedRemind(true)
+              },
             }}
-          >
-            <Flex align="center" gap={10} style={{ fontSize: 12 }}>
-              <span
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: '50%',
-                  background: token.colorPrimary,
-                  flexShrink: 0,
-                }}
-              />
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {t.auth.localRemindText}
-              </Typography.Text>
-            </Flex>
-            <Flex align="center" gap={4}>
+            title={t.auth.localRemindText}
+            action={
               <Button
-                type="text"
                 size="small"
-                style={{ fontSize: 12, fontWeight: 500, color: token.colorPrimary }}
+                type="link"
                 onClick={() => navigate('/hosts?connectLocal=1')}
               >
                 {t.auth.localRemindConnectBtn}
               </Button>
-              <Button
-                type="text"
-                size="small"
-                title={t.auth.localRemindDismissTitle}
-                style={{ fontSize: 12, color: token.colorTextSecondary, paddingInline: 6 }}
-                onClick={() => {
-                  localStorage.setItem('dkstore_dismiss_local_remind', '1')
-                  setDismissedRemind(true)
-                }}
-              >
-                ✕
-              </Button>
-            </Flex>
-          </Flex>
+            }
+            style={{ marginBottom: 16 }}
+          />
         )}
         <Outlet />
       </Layout.Content>
 
-      {/* 超宽屏（>= 1840px）停靠在右侧纯空白边距区域：0 遮挡、0 挤压卡片 */}
+      {/* 超宽屏（>= 1980px）停靠在右侧纯空白边距区域：0 遮挡、0 挤压卡片 */}
       {isUltrawide && queueJobs.length > 0 && !queueCollapsed && (
         <div
           style={{
             position: 'fixed',
             top: 80,
-            right: 'max(16px, calc((100vw - 1120px) / 2 - 348px))',
+            right: 'max(16px, calc((100vw - 1280px) / 2 - 348px))',
             width: 332,
             zIndex: 90,
           }}

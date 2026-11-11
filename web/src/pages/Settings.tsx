@@ -13,6 +13,7 @@ import {
   Tag,
   Typography,
   message,
+  theme,
 } from 'antd'
 import { DeleteOutlined, GithubOutlined, PlusOutlined, ReloadOutlined, SendOutlined } from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -22,6 +23,7 @@ import { useUIStore, type Locale, type ThemeMode } from '../store/ui'
 
 export default function SettingsPage() {
   const { locale, setLocale, t } = useI18n()
+  const { token } = theme.useToken()
   const { themeMode, setThemeMode } = useUIStore()
   const qc = useQueryClient()
 
@@ -142,14 +144,17 @@ export default function SettingsPage() {
         <Space direction="vertical" size="small" style={{ width: '100%' }}>
           <Space wrap>
             <Typography.Text type="secondary">{t.settings.curVersionLabel}:</Typography.Text>
-            <Tag style={{ fontFamily: 'monospace' }}>
+            <Tag style={{ fontFamily: token.fontFamilyCode, margin: 0 }}>
               {selfUpdateQuery.data?.currentVersion || 'v0.2.0'}
             </Tag>
             <Typography.Text type="secondary">{t.settings.latestVersionLabel}:</Typography.Text>
-            <Tag color={selfUpdateQuery.data?.hasUpdate ? 'processing' : 'success'} style={{ fontFamily: 'monospace' }}>
+            <Tag
+              color={selfUpdateQuery.data?.hasUpdate ? 'processing' : 'success'}
+              style={{ fontFamily: token.fontFamilyCode, margin: 0 }}
+            >
               {selfUpdateQuery.data?.latestVersion || selfUpdateQuery.data?.currentVersion || 'v0.2.0'}
             </Tag>
-            <Tag color={selfUpdateQuery.data?.hasUpdate ? 'processing' : 'success'}>
+            <Tag color={selfUpdateQuery.data?.hasUpdate ? 'processing' : 'success'} style={{ margin: 0 }}>
               {selfUpdateQuery.data?.hasUpdate ? t.settings.newVersionBadge : t.settings.upToDateBadge}
             </Tag>
             {selfUpdateQuery.data?.releaseUrl && (
@@ -166,7 +171,7 @@ export default function SettingsPage() {
             )}
           </Space>
           {selfUpdateQuery.data?.hasUpdate && selfUpdateQuery.data?.commandHint && (
-            <Typography.Text code style={{ fontSize: 12 }}>
+            <Typography.Text code style={{ fontSize: token.fontSizeSM }}>
               {selfUpdateQuery.data.commandHint}
             </Typography.Text>
           )}

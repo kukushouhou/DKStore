@@ -310,7 +310,7 @@ export default function HostsPage() {
 
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
-      <Flex justify="space-between" align="center">
+      <Flex justify="space-between" align="center" wrap gap={12}>
         <Typography.Title level={3} style={{ margin: 0 }}>
           {t.hosts.title}
         </Typography.Title>
@@ -320,7 +320,9 @@ export default function HostsPage() {
       </Flex>
 
       {hosts.length === 0 ? (
-        <Empty description={t.hosts.empty} />
+        <Card style={{ textAlign: 'center', padding: '32px 16px' }}>
+          <Empty description={t.hosts.empty} />
+        </Card>
       ) : (
         <Row gutter={[16, 16]}>
           {hosts.map((h) => (
@@ -429,7 +431,7 @@ export default function HostsPage() {
                     )}
                   </Space>
                   {h.info && (
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                       Docker {h.info.dockerVersion} · {h.info.platformVersion || h.info.os} ({h.info.os}/{h.info.arch || t.hosts.archUnknown})
                     </Typography.Text>
                   )}
@@ -438,9 +440,9 @@ export default function HostsPage() {
                       type="warning"
                       showIcon
                       icon={<WarningOutlined />}
-                      style={{ padding: '6px 10px', marginTop: 4 }}
+                      style={{ marginTop: 4 }}
                       title={
-                        <span style={{ fontSize: 12 }}>
+                        <span style={{ fontSize: token.fontSizeSM }}>
                           {t.hosts.fingerprintChanged}
                           {h.sshHostKeyChangedAt
                             ? ` · ${new Date(h.sshHostKeyChangedAt * 1000).toLocaleString(locale)}`
@@ -449,7 +451,10 @@ export default function HostsPage() {
                       }
                       description={
                         h.sshPrevHostKey ? (
-                          <Typography.Text type="secondary" style={{ fontSize: 11, fontFamily: 'monospace' }}>
+                          <Typography.Text
+                            type="secondary"
+                            style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
+                          >
                             {t.hosts.fingerprintPrevious}: {h.sshPrevHostKey}
                           </Typography.Text>
                         ) : undefined
@@ -505,16 +510,15 @@ export default function HostsPage() {
                           height: '100%',
                           borderColor: active ? token.colorPrimary : token.colorBorderSecondary,
                           background: active ? token.colorPrimaryBg : token.colorBgContainer,
-                          borderRadius: 10,
                         }}
                       >
                         <Flex align="flex-start" gap={10}>
                           {meta.icon}
                           <div style={{ minWidth: 0 }}>
-                            <Typography.Text strong style={{ display: 'block', fontSize: 14 }}>
+                            <Typography.Text strong style={{ display: 'block' }}>
                               {meta.title}
                             </Typography.Text>
-                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                            <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                               {meta.desc}
                             </Typography.Text>
                           </div>
@@ -551,34 +555,42 @@ export default function HostsPage() {
                       value: tr,
                     }))}
                   />
-                  <div
+                  <Card
+                    size="small"
                     style={{
                       marginTop: 10,
-                      padding: '10px 12px',
-                      borderRadius: 12,
                       background: token.colorFillAlter,
-                      border: `1px solid ${token.colorBorderSecondary}`,
-                      fontSize: 12,
-                      lineHeight: 1.65,
                     }}
                   >
-                    <div style={{ marginBottom: 4 }}>
-                      <span style={{ fontWeight: 600, color: token.colorSuccess }}>{t.hosts.connProsLabel}</span>
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                        {(transportVal || currentSpec.defaultTransport) === 'dsm_api'
-                          ? t.hosts.connDsmPros
-                          : t.hosts.connSshPros}
-                      </Typography.Text>
-                    </div>
-                    <div>
-                      <span style={{ fontWeight: 600, color: token.colorWarning }}>{t.hosts.connLimitLabel}</span>
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                        {(transportVal || currentSpec.defaultTransport) === 'dsm_api'
-                          ? t.hosts.connDsmLimit
-                          : t.hosts.connSshLimit}
-                      </Typography.Text>
-                    </div>
-                  </div>
+                    <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                      <div>
+                        <Typography.Text
+                          strong
+                          style={{ color: token.colorSuccess, fontSize: token.fontSizeSM }}
+                        >
+                          {t.hosts.connProsLabel}
+                        </Typography.Text>
+                        <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                          {(transportVal || currentSpec.defaultTransport) === 'dsm_api'
+                            ? t.hosts.connDsmPros
+                            : t.hosts.connSshPros}
+                        </Typography.Text>
+                      </div>
+                      <div>
+                        <Typography.Text
+                          strong
+                          style={{ color: token.colorWarning, fontSize: token.fontSizeSM }}
+                        >
+                          {t.hosts.connLimitLabel}
+                        </Typography.Text>
+                        <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                          {(transportVal || currentSpec.defaultTransport) === 'dsm_api'
+                            ? t.hosts.connDsmLimit
+                            : t.hosts.connSshLimit}
+                        </Typography.Text>
+                      </div>
+                    </Space>
+                  </Card>
                 </div>
               </Form.Item>
             )}
@@ -595,7 +607,10 @@ export default function HostsPage() {
             {transportVal === 'dsm_api' && (
               <>
                 <Form.Item name="dsmUrl" label={t.hosts.dsmUrlLabel} rules={[{ required: true }]}>
-                  <Input placeholder="http://192.168.1.10:5000" />
+                  <Input
+                    placeholder="http://192.168.1.10:5000"
+                    style={{ fontFamily: token.fontFamilyCode }}
+                  />
                 </Form.Item>
                 <Row gutter={12}>
                   <Col xs={24} sm={12}>
@@ -621,7 +636,10 @@ export default function HostsPage() {
                 <Row gutter={12}>
                   <Col span={17}>
                     <Form.Item name="address" label={t.hosts.addressLabel} rules={[{ required: true }]}>
-                      <Input placeholder="192.168.1.10" />
+                      <Input
+                        placeholder="192.168.1.10"
+                        style={{ fontFamily: token.fontFamilyCode }}
+                      />
                     </Form.Item>
                   </Col>
                   <Col span={7}>
@@ -659,7 +677,10 @@ export default function HostsPage() {
                         title={t.hosts.generatedPubTip}
                         description={
                           <Space direction="vertical" style={{ width: '100%' }}>
-                            <Typography.Text code style={{ fontSize: 11, wordBreak: 'break-all' }}>
+                            <Typography.Text
+                              code
+                              style={{ fontSize: token.fontSizeSM, wordBreak: 'break-all' }}
+                            >
                               {generatedPubKey}
                             </Typography.Text>
                             <Button
@@ -677,7 +698,11 @@ export default function HostsPage() {
                       />
                     )}
                     <Form.Item name="sshSecret" label={t.hosts.privateKeyLabel}>
-                      <Input.TextArea rows={3} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" />
+                      <Input.TextArea
+                        rows={3}
+                        placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                        style={{ fontFamily: token.fontFamilyCode }}
+                      />
                     </Form.Item>
                     <Form.Item name="sshPassphrase" label={t.hosts.passphraseLabel} style={{ marginBottom: 4 }}>
                       <Input.Password />
@@ -698,7 +723,6 @@ export default function HostsPage() {
               size="small"
               style={{
                 background: token.colorFillAlter,
-                borderRadius: 8,
               }}
             >
               <Space direction="vertical" size="small" style={{ width: '100%' }}>
@@ -716,7 +740,7 @@ export default function HostsPage() {
                       <div>
                         <Typography.Text strong>{s.step}</Typography.Text>
                         <div>
-                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                          <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                             {s.message}
                           </Typography.Text>
                         </div>
@@ -763,11 +787,12 @@ export default function HostsPage() {
         }
       >
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
             {t.hosts.otpModalDesc}
           </Typography.Text>
           <Input
             autoFocus
+            size="large"
             maxLength={6}
             placeholder="000000"
             value={otpCode}
@@ -776,9 +801,7 @@ export default function HostsPage() {
             style={{
               textAlign: 'center',
               letterSpacing: '0.4em',
-              fontFamily: 'monospace',
-              fontSize: 18,
-              padding: '8px 12px',
+              fontFamily: token.fontFamilyCode,
             }}
           />
         </Space>

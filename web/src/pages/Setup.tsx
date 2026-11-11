@@ -5,6 +5,7 @@ import {
   Col,
   Divider,
   Flex,
+  Form,
   Input,
   InputNumber,
   Modal,
@@ -185,7 +186,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
         </Flex>
       }
     >
-      <Typography.Text type="secondary" style={{ fontSize: 13, lineHeight: 1.65 }}>
+      <Typography.Text type="secondary" style={{ fontSize: token.fontSize }}>
         {t.auth.skipConfirmDesc}
       </Typography.Text>
     </Modal>
@@ -199,7 +200,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
     if (isDockerMode) {
       return (
         <Flex align="center" justify="center" style={{ minHeight: '100vh', padding: 16 }}>
-          <Card style={{ width: '100%', maxWidth: 580, borderRadius: 16 }}>
+          <Card style={{ width: '100%', maxWidth: 580 }}>
             <Space direction="vertical" size={20} style={{ width: '100%' }}>
               {/* 顶部标题栏 */}
               <Flex justify="space-between" align="flex-start" gap={12}>
@@ -208,7 +209,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
                     style={{
                       width: 40,
                       height: 40,
-                      borderRadius: 12,
+                      borderRadius: token.borderRadiusLG,
                       background: token.colorWarningBg,
                       color: token.colorWarning,
                       display: 'flex',
@@ -225,12 +226,12 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
                       <Typography.Title level={5} style={{ margin: 0 }}>
                         {t.auth.dockerTitle}
                       </Typography.Title>
-                      <Tag color="processing" style={{ margin: 0, borderRadius: 999 }}>
+                      <Tag color="processing" style={{ margin: 0 }}>
                         {t.auth.stepBadge}
                       </Tag>
                     </Space>
                     <div>
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                         {t.auth.dockerSubtitle}
                       </Typography.Text>
                     </div>
@@ -254,8 +255,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
                     size="small"
                     style={{
                       width: '100%',
-                      borderRadius: 12,
-                      background: token.colorFillQuaternary,
+                      background: token.colorFillAlter,
                       display: 'flex',
                       flexDirection: 'column',
                     }}
@@ -274,7 +274,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
                         style={{
                           width: 32,
                           height: 32,
-                          borderRadius: 8,
+                          borderRadius: token.borderRadius,
                           background: token.colorPrimaryBg,
                           color: token.colorPrimary,
                           display: 'flex',
@@ -289,7 +289,10 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
                       <Typography.Text strong style={{ display: 'block', marginBottom: 4 }}>
                         {t.auth.dockerCardLocalTitle}
                       </Typography.Text>
-                      <Typography.Text type="secondary" style={{ fontSize: 12, lineHeight: 1.6 }}>
+                      <Typography.Text
+                        type="secondary"
+                        style={{ fontSize: token.fontSizeSM, lineHeight: 1.6 }}
+                      >
                         {t.auth.dockerCardLocalDesc}
                       </Typography.Text>
                     </div>
@@ -303,7 +306,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
                       <Button
                         type="link"
                         size="small"
-                        style={{ padding: 0, height: 'auto', fontSize: 12 }}
+                        style={{ padding: 0, height: 'auto' }}
                         onClick={() => setDockerGuideOpen(true)}
                       >
                         {t.auth.dockerCardLocalLink} <ArrowRightOutlined />
@@ -317,8 +320,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
                     size="small"
                     style={{
                       width: '100%',
-                      borderRadius: 12,
-                      background: token.colorFillQuaternary,
+                      background: token.colorFillAlter,
                       display: 'flex',
                       flexDirection: 'column',
                     }}
@@ -337,7 +339,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
                         style={{
                           width: 32,
                           height: 32,
-                          borderRadius: 8,
+                          borderRadius: token.borderRadius,
                           background: token.colorSuccessBg,
                           color: token.colorSuccess,
                           display: 'flex',
@@ -352,7 +354,10 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
                       <Typography.Text strong style={{ display: 'block', marginBottom: 4 }}>
                         {t.auth.dockerCardRemoteTitle}
                       </Typography.Text>
-                      <Typography.Text type="secondary" style={{ fontSize: 12, lineHeight: 1.6 }}>
+                      <Typography.Text
+                        type="secondary"
+                        style={{ fontSize: token.fontSizeSM, lineHeight: 1.6 }}
+                      >
                         {t.auth.dockerCardRemoteDesc}
                       </Typography.Text>
                     </div>
@@ -363,7 +368,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
                         borderTop: `1px solid ${token.colorBorderSecondary}`,
                       }}
                     >
-                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                         {t.auth.dockerCardRemoteFooter}
                       </Typography.Text>
                     </div>
@@ -395,9 +400,9 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
             }
           >
             <Space direction="vertical" size={12} style={{ width: '100%' }}>
-              <Card size="small" style={{ background: token.colorFillAlter, borderRadius: 10 }}>
+              <Card size="small" style={{ background: token.colorFillAlter }}>
                 <Flex justify="space-between" align="center" style={{ marginBottom: 4 }}>
-                  <Typography.Text strong style={{ fontSize: 13 }}>
+                  <Typography.Text strong>
                     {t.auth.dockerGuideMethod1Title}
                   </Typography.Text>
                   <Button
@@ -412,18 +417,21 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
                     {t.detail.copyCmd}
                   </Button>
                 </Flex>
-                <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 8 }}>
+                <Typography.Paragraph
+                  type="secondary"
+                  style={{ fontSize: token.fontSizeSM, marginBottom: 8 }}
+                >
                   {t.auth.dockerGuideMethod1Desc}
                 </Typography.Paragraph>
                 <pre
                   style={{
                     margin: 0,
                     padding: '8px 12px',
-                    borderRadius: 8,
+                    borderRadius: token.borderRadiusSM,
                     background: token.colorBgContainer,
                     border: `1px solid ${token.colorBorderSecondary}`,
-                    fontFamily: 'monospace',
-                    fontSize: 12,
+                    fontFamily: token.fontFamilyCode,
+                    fontSize: token.fontSizeSM,
                     overflowX: 'auto',
                   }}
                 >
@@ -431,9 +439,9 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
                 </pre>
               </Card>
 
-              <Card size="small" style={{ background: token.colorFillAlter, borderRadius: 10 }}>
+              <Card size="small" style={{ background: token.colorFillAlter }}>
                 <Flex justify="space-between" align="center" style={{ marginBottom: 4 }}>
-                  <Typography.Text strong style={{ fontSize: 13 }}>
+                  <Typography.Text strong>
                     {t.auth.dockerGuideMethod2Title}
                   </Typography.Text>
                   <Button
@@ -448,18 +456,21 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
                     {t.detail.copyCmd}
                   </Button>
                 </Flex>
-                <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 8 }}>
+                <Typography.Paragraph
+                  type="secondary"
+                  style={{ fontSize: token.fontSizeSM, marginBottom: 8 }}
+                >
                   {t.auth.dockerGuideMethod2Desc}
                 </Typography.Paragraph>
                 <pre
                   style={{
                     margin: 0,
                     padding: '8px 12px',
-                    borderRadius: 8,
+                    borderRadius: token.borderRadiusSM,
                     background: token.colorBgContainer,
                     border: `1px solid ${token.colorBorderSecondary}`,
-                    fontFamily: 'monospace',
-                    fontSize: 12,
+                    fontFamily: token.fontFamilyCode,
+                    fontSize: token.fontSizeSM,
                     overflowX: 'auto',
                   }}
                 >
@@ -475,7 +486,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
     // 分支 A：套件安装模式（当场绑定本机表单）
     return (
       <Flex align="center" justify="center" style={{ minHeight: '100vh', padding: 16 }}>
-        <Card style={{ width: '100%', maxWidth: 520, borderRadius: 16 }}>
+        <Card style={{ width: '100%', maxWidth: 520 }}>
           <Space direction="vertical" size={16} style={{ width: '100%' }}>
             {/* 顶部标题栏 */}
             <Flex justify="space-between" align="flex-start" gap={12}>
@@ -484,7 +495,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
                   style={{
                     width: 40,
                     height: 40,
-                    borderRadius: 12,
+                    borderRadius: token.borderRadiusLG,
                     background: token.colorPrimaryBg,
                     color: token.colorPrimary,
                     display: 'flex',
@@ -501,12 +512,12 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
                     <Typography.Title level={5} style={{ margin: 0 }}>
                       {t.auth.spkTitle}
                     </Typography.Title>
-                    <Tag color="processing" style={{ margin: 0, borderRadius: 999 }}>
+                    <Tag color="processing" style={{ margin: 0 }}>
                       {t.auth.stepBadge}
                     </Tag>
                   </Space>
                   <div>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                       {t.auth.spkSubtitle}
                     </Typography.Text>
                   </div>
@@ -534,134 +545,135 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
                   { label: t.auth.spkModeSsh, value: 'ssh' },
                 ]}
               />
-              <div
+              <Card
+                size="small"
                 style={{
                   marginTop: 10,
-                  padding: '10px 12px',
-                  borderRadius: 12,
                   background: token.colorFillAlter,
-                  border: `1px solid ${token.colorBorderSecondary}`,
-                  fontSize: 12,
-                  lineHeight: 1.65,
                 }}
               >
-                <div style={{ marginBottom: 4 }}>
-                  <span style={{ fontWeight: 600, color: token.colorSuccess }}>{t.hosts.connProsLabel}</span>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    {spkMode === 'dsm_api' ? t.hosts.connDsmPros : t.hosts.connSshPros}
-                  </Typography.Text>
-                </div>
-                <div>
-                  <span style={{ fontWeight: 600, color: token.colorWarning }}>{t.hosts.connLimitLabel}</span>
-                  <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                    {spkMode === 'dsm_api' ? t.hosts.connDsmLimit : t.hosts.connSshLimit}
-                  </Typography.Text>
-                </div>
-              </div>
+                <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                  <div>
+                    <Typography.Text
+                      strong
+                      style={{ color: token.colorSuccess, fontSize: token.fontSizeSM }}
+                    >
+                      {t.hosts.connProsLabel}
+                    </Typography.Text>
+                    <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                      {spkMode === 'dsm_api' ? t.hosts.connDsmPros : t.hosts.connSshPros}
+                    </Typography.Text>
+                  </div>
+                  <div>
+                    <Typography.Text
+                      strong
+                      style={{ color: token.colorWarning, fontSize: token.fontSizeSM }}
+                    >
+                      {t.hosts.connLimitLabel}
+                    </Typography.Text>
+                    <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                      {spkMode === 'dsm_api' ? t.hosts.connDsmLimit : t.hosts.connSshLimit}
+                    </Typography.Text>
+                  </div>
+                </Space>
+              </Card>
             </div>
 
             {/* 紧凑表单（不展示任何 2FA 字段） */}
-            {spkMode === 'dsm_api' ? (
-              <Row gutter={[12, 12]}>
-                <Col xs={24} sm={10}>
-                  <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
-                    {t.hosts.nameLabel}
-                  </Typography.Text>
-                  <Input
-                    value={hostName}
-                    onChange={(e) => setHostName(e.target.value)}
-                    placeholder={t.auth.spkDefaultName}
-                  />
-                </Col>
-                <Col xs={24} sm={14}>
-                  <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
-                    {t.auth.spkWebAddrLabel}
-                  </Typography.Text>
-                  <Input
-                    value={dsmUrl}
-                    onChange={(e) => setDsmUrl(e.target.value)}
-                    style={{ fontFamily: 'monospace' }}
-                    placeholder="http://127.0.0.1:5000"
-                  />
-                </Col>
-                <Col xs={24} sm={12}>
-                  <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
-                    {t.hosts.dsmUserLabel}
-                  </Typography.Text>
-                  <Input
-                    value={username}
-                    onChange={(e) => setUsername(e.target.value)}
-                    placeholder={t.auth.spkUserPlaceholder}
-                  />
-                </Col>
-                <Col xs={24} sm={12}>
-                  <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
-                    {t.hosts.dsmSecretLabel}
-                  </Typography.Text>
-                  <Input.Password
-                    value={secret}
-                    onChange={(e) => setSecret(e.target.value)}
-                    onPressEnter={() => submitSpkHost()}
-                  />
-                </Col>
-              </Row>
-            ) : (
-              <Row gutter={[12, 12]}>
-                <Col xs={24} sm={9}>
-                  <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
-                    {t.hosts.nameLabel}
-                  </Typography.Text>
-                  <Input
-                    value={hostName}
-                    onChange={(e) => setHostName(e.target.value)}
-                    placeholder={t.auth.spkDefaultName}
-                  />
-                </Col>
-                <Col xs={16} sm={10}>
-                  <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
-                    {t.hosts.addressLabel}
-                  </Typography.Text>
-                  <Input
-                    value={sshAddress}
-                    onChange={(e) => setSshAddress(e.target.value)}
-                    style={{ fontFamily: 'monospace' }}
-                    placeholder="127.0.0.1"
-                  />
-                </Col>
-                <Col xs={8} sm={5}>
-                  <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
-                    {t.hosts.portLabel}
-                  </Typography.Text>
-                  <InputNumber
-                    min={1}
-                    max={65535}
-                    value={sshPort}
-                    onChange={(v) => setSshPort(v || 22)}
-                    style={{ width: '100%' }}
-                  />
-                </Col>
-                <Col xs={24} sm={12}>
-                  <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
-                    {t.hosts.userLabel}
-                  </Typography.Text>
-                  <Input
-                    value={username}
-                    onChange={(e) => setUsername(e.target.value)}
-                    placeholder="admin / root"
-                  />
-                </Col>
-                <Col xs={24} sm={12}>
-                  <Typography.Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 4 }}>
-                    {t.hosts.passwordLabel}
-                  </Typography.Text>
-                  <Input.Password
-                    value={secret}
-                    onChange={(e) => setSecret(e.target.value)}
-                    onPressEnter={() => submitSpkHost()}
-                  />
-                </Col>
-              </Row>
-            )}
+            <Form layout="vertical">
+              {spkMode === 'dsm_api' ? (
+                <Row gutter={12}>
+                  <Col xs={24} sm={10}>
+                    <Form.Item label={t.hosts.nameLabel} style={{ marginBottom: 12 }}>
+                      <Input
+                        value={hostName}
+                        onChange={(e) => setHostName(e.target.value)}
+                        placeholder={t.auth.spkDefaultName}
+                      />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} sm={14}>
+                    <Form.Item label={t.auth.spkWebAddrLabel} style={{ marginBottom: 12 }}>
+                      <Input
+                        value={dsmUrl}
+                        onChange={(e) => setDsmUrl(e.target.value)}
+                        style={{ fontFamily: token.fontFamilyCode }}
+                        placeholder="http://127.0.0.1:5000"
+                      />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} sm={12}>
+                    <Form.Item label={t.hosts.dsmUserLabel} style={{ marginBottom: 0 }}>
+                      <Input
+                        value={username}
+                        onChange={(e) => setUsername(e.target.value)}
+                        placeholder={t.auth.spkUserPlaceholder}
+                      />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} sm={12}>
+                    <Form.Item label={t.hosts.dsmSecretLabel} style={{ marginBottom: 0 }}>
+                      <Input.Password
+                        value={secret}
+                        onChange={(e) => setSecret(e.target.value)}
+                        onPressEnter={() => submitSpkHost()}
+                      />
+                    </Form.Item>
+                  </Col>
+                </Row>
+              ) : (
+                <Row gutter={12}>
+                  <Col xs={24} sm={9}>
+                    <Form.Item label={t.hosts.nameLabel} style={{ marginBottom: 12 }}>
+                      <Input
+                        value={hostName}
+                        onChange={(e) => setHostName(e.target.value)}
+                        placeholder={t.auth.spkDefaultName}
+                      />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={16} sm={10}>
+                    <Form.Item label={t.hosts.addressLabel} style={{ marginBottom: 12 }}>
+                      <Input
+                        value={sshAddress}
+                        onChange={(e) => setSshAddress(e.target.value)}
+                        style={{ fontFamily: token.fontFamilyCode }}
+                        placeholder="127.0.0.1"
+                      />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={8} sm={5}>
+                    <Form.Item label={t.hosts.portLabel} style={{ marginBottom: 12 }}>
+                      <InputNumber
+                        min={1}
+                        max={65535}
+                        value={sshPort}
+                        onChange={(v) => setSshPort(v || 22)}
+                        style={{ width: '100%' }}
+                      />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} sm={12}>
+                    <Form.Item label={t.hosts.userLabel} style={{ marginBottom: 0 }}>
+                      <Input
+                        value={username}
+                        onChange={(e) => setUsername(e.target.value)}
+                        placeholder="admin / root"
+                      />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} sm={12}>
+                    <Form.Item label={t.hosts.passwordLabel} style={{ marginBottom: 0 }}>
+                      <Input.Password
+                        value={secret}
+                        onChange={(e) => setSecret(e.target.value)}
+                        onPressEnter={() => submitSpkHost()}
+                      />
+                    </Form.Item>
+                  </Col>
+                </Row>
+              )}
+            </Form>
 
             <Divider style={{ margin: '4px 0 0' }} />
 
@@ -671,7 +683,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
                 type="link"
                 size="small"
                 icon={<InfoCircleOutlined />}
-                style={{ padding: 0, fontSize: 12 }}
+                style={{ padding: 0 }}
                 onClick={() => setWhyModalOpen(true)}
               >
                 {t.auth.spkWhyLink}
@@ -705,10 +717,10 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
           }
         >
           <Space direction="vertical" size={10}>
-            <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+            <Typography.Text type="secondary">
               {t.auth.spkWhyP1}
             </Typography.Text>
-            <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+            <Typography.Text type="secondary">
               {t.auth.spkWhyP2}
             </Typography.Text>
           </Space>
@@ -734,11 +746,12 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
           }
         >
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
               {t.hosts.otpModalDesc}
             </Typography.Text>
             <Input
               autoFocus
+              size="large"
               maxLength={6}
               placeholder="000000"
               value={otpCode}
@@ -747,9 +760,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
               style={{
                 textAlign: 'center',
                 letterSpacing: '0.4em',
-                fontFamily: 'monospace',
-                fontSize: 18,
-                padding: '8px 12px',
+                fontFamily: token.fontFamilyCode,
               }}
             />
           </Space>
@@ -761,7 +772,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
   // 步骤 1：设置管理员密码
   return (
     <Flex align="center" justify="center" style={{ minHeight: '100vh', padding: 16 }}>
-      <Card style={{ width: 420, borderRadius: 16 }}>
+      <Card style={{ width: 420 }}>
         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
           <Flex justify="space-between" align="center">
             <Typography.Title level={4} style={{ margin: 0 }}>

@@ -1,5 +1,33 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Button, Col, Grid, Input, Modal, Row, Select, Spin, message, theme } from 'antd'
+import {
+  Alert,
+  Button,
+  Card,
+  Col,
+  Empty,
+  Flex,
+  Grid,
+  Input,
+  Modal,
+  Radio,
+  Row,
+  Segmented,
+  Select,
+  Space,
+  Spin,
+  Tag,
+  Tooltip,
+  Typography,
+  message,
+  theme,
+} from 'antd'
+import type { TextAreaRef } from 'antd/es/input/TextArea'
+import {
+  ArrowRightOutlined,
+  CheckOutlined,
+  DeleteOutlined,
+  PlusOutlined,
+} from '@ant-design/icons'
 import {
   api,
   type AppCardItem,
@@ -124,7 +152,7 @@ function VersionPickerModalBody({
   const { t } = useI18n()
   const screens = Grid.useBreakpoint()
   const upsertUpdateJob = useUIStore((s) => s.upsertUpdateJob)
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const textareaRef = useRef<TextAreaRef | null>(null)
   const nextRowIdRef = useRef<number>(1)
 
   const canShowConfigTab = Boolean(!onPickOnly && app && app.source !== 'vendor_managed')
@@ -556,42 +584,43 @@ function VersionPickerModalBody({
     return (
       <div
         key={key}
-        className="dkstore-radio-card"
         onClick={() => setPolicy(key)}
         style={{
           padding: '10px 12px',
-          borderRadius: 12,
-          border: checked
-            ? `1px solid ${token.colorPrimary}`
-            : `1px solid ${token.colorBorderSecondary}`,
-          background: checked ? 'rgba(47, 107, 255, 0.08)' : token.colorFillQuaternary,
+          borderRadius: token.borderRadiusLG,
+          border: `1px solid ${checked ? token.colorPrimary : token.colorBorderSecondary}`,
+          background: checked ? token.colorPrimaryBg : token.colorBgContainer,
+          cursor: 'pointer',
+          transition: 'border-color 0.15s ease, background-color 0.15s ease',
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-          <input
-            type="radio"
+        <Flex align="flex-start" gap={10}>
+          <Radio
             checked={checked}
             onChange={() => setPolicy(key)}
-            style={{ marginTop: 3, accentColor: token.colorPrimary, cursor: 'pointer' }}
+            style={{ marginTop: 2, marginInlineEnd: 0 }}
           />
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div
+            <Typography.Text
+              strong
               style={{
-                fontSize: 13,
-                fontWeight: 500,
                 color: checked ? token.colorPrimary : token.colorText,
+                display: 'block',
               }}
             >
               {titleText}
-            </div>
+            </Typography.Text>
             {extraNode}
             {descNode && (
-              <div style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 2 }}>
+              <Typography.Text
+                type="secondary"
+                style={{ fontSize: token.fontSizeSM, display: 'block', marginTop: 2 }}
+              >
                 {descNode}
-              </div>
+              </Typography.Text>
             )}
           </div>
-        </div>
+        </Flex>
       </div>
     )
   }
@@ -602,395 +631,271 @@ function VersionPickerModalBody({
   const configReason = isStandaloneConfigMode ? standaloneReason : yamlReason
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <Flex vertical gap={16}>
       {/* 顶栏 */}
-      <div
+      <Flex
+        wrap="wrap"
+        align="center"
+        justify="space-between"
+        gap={12}
         style={{
-          display: 'flex',
-          flexWrap: 'wrap',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 12,
           paddingBottom: 14,
-          borderBottom: `1px solid ${token.colorBorderSecondary}`,
+          borderBottom: `1px solid ${token.colorSplit}`,
         }}
       >
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 16, fontWeight: 700, color: token.colorText }}>
+          <Typography.Title level={5} style={{ margin: 0 }}>
             {(tab === 'config' ? t.versionPicker.configTitle : t.versionPicker.title).replace(
               '{name}',
               appName,
             )}
-          </div>
-          <div style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 2 }}>
+          </Typography.Title>
+          <Typography.Text
+            type="secondary"
+            style={{ fontSize: token.fontSizeSM, display: 'block', marginTop: 2 }}
+          >
             {subtitle} · {t.versionPicker.runningNow}
-            <code style={{ fontFamily: 'monospace', color: token.colorText }}>{curVer}</code>
-          </div>
+            <Typography.Text code>{curVer}</Typography.Text>
+          </Typography.Text>
         </div>
 
-        <div
-          style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            alignItems: 'center',
-            gap: 8,
-            maxWidth: '100%',
-          }}
-        >
+        <Flex wrap="wrap" align="center" gap={8} style={{ maxWidth: '100%' }}>
           {/* 目标镜像胶囊（在配置页签上支持一键点回选版页签重选版本） */}
-          <div
+          <Tag
+            variant="filled"
+            color="processing"
             style={{
-              padding: '5px 11px',
-              borderRadius: 10,
-              background: token.colorFillQuaternary,
-              border: `1px solid ${token.colorBorderSecondary}`,
+              margin: 0,
+              padding: '4px 10px',
               display: 'inline-flex',
               alignItems: 'center',
-              gap: 8,
-              fontSize: 12,
+              gap: 6,
               maxWidth: '100%',
             }}
           >
-            <span style={{ color: token.colorTextSecondary, flexShrink: 0 }}>
+            <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}>
               {t.versionPicker.targetImage}
-            </span>
-            <code
+            </Typography.Text>
+            <Typography.Text
+              strong
+              ellipsis
               style={{
-                fontFamily: 'monospace',
-                fontWeight: 600,
+                fontFamily: token.fontFamilyCode,
+                fontSize: token.fontSizeSM,
                 color: token.colorPrimary,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
               }}
             >
               {shortRepo}:{selectedTag}
-            </code>
+            </Typography.Text>
             {tab === 'config' && (
-              <button
-                type="button"
+              <Typography.Link
                 onClick={() => setTab('version')}
-                style={{
-                  padding: '1px 6px',
-                  borderRadius: 5,
-                  border: 'none',
-                  background: 'rgba(47, 107, 255, 0.12)',
-                  color: token.colorPrimary,
-                  fontSize: 11,
-                  fontWeight: 500,
-                  cursor: 'pointer',
-                  flexShrink: 0,
-                }}
+                style={{ fontSize: token.fontSizeSM, marginLeft: 2, flexShrink: 0 }}
               >
                 {t.versionPicker.changeVerLink}
-              </button>
+              </Typography.Link>
             )}
-          </div>
+          </Tag>
 
           {/* 右上角双页签切换：选择版本更新 | 按新版配置更新 */}
           {canShowConfigTab && (
-            <div
-              style={{
-                display: 'inline-flex',
-                padding: 3,
-                borderRadius: 10,
-                background: token.colorFillQuaternary,
-                border: `1px solid ${token.colorBorderSecondary}`,
-                gap: 2,
-              }}
-            >
-              <button
-                type="button"
-                onClick={() => setTab('version')}
-                style={{
-                  padding: '5px 11px',
-                  borderRadius: 8,
-                  border: 'none',
-                  fontSize: 12,
-                  fontWeight: 500,
-                  cursor: 'pointer',
-                  background: tab === 'version' ? token.colorPrimary : 'transparent',
-                  color: tab === 'version' ? '#ffffff' : token.colorTextSecondary,
-                }}
-              >
-                {t.versionPicker.tabVersion}
-              </button>
-              <button
-                type="button"
-                onClick={() => setTab('config')}
-                style={{
-                  padding: '5px 11px',
-                  borderRadius: 8,
-                  border: 'none',
-                  fontSize: 12,
-                  fontWeight: 500,
-                  cursor: 'pointer',
-                  background: tab === 'config' ? token.colorPrimary : 'transparent',
-                  color: tab === 'config' ? '#ffffff' : token.colorTextSecondary,
-                }}
-              >
-                {t.versionPicker.tabConfig}
-              </button>
-            </div>
+            <Segmented
+              value={tab}
+              onChange={(val) => setTab(val as 'version' | 'config')}
+              options={[
+                { label: t.versionPicker.tabVersion, value: 'version' },
+                { label: t.versionPicker.tabConfig, value: 'config' },
+              ]}
+            />
           )}
-        </div>
-      </div>
+        </Flex>
+      </Flex>
 
       {tab === 'version' ? (
         <>
           {/* 双栏主体：桌面左右 10:14，移动端上下叠放（100% 完整保留） */}
           <Row gutter={[20, 16]} align="stretch">
             <Col xs={24} md={10} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {/* 内嵌式搜索框（输入仅过滤本地列表，回车/点搜索请求远端） */}
-              <div style={{ position: 'relative' }}>
-                <input
-                  type="text"
+              {/* 组合式搜索框（输入仅过滤本地列表，回车/点搜索请求远端） */}
+              <Space.Compact style={{ width: '100%' }}>
+                <Input
+                  allowClear
                   value={query}
                   onChange={(e) => {
                     setQuery(e.target.value)
                     setRemoteSearched(false)
                   }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault()
-                      handleRemoteSearch()
-                    }
+                  onPressEnter={(e) => {
+                    e.preventDefault()
+                    handleRemoteSearch()
                   }}
                   placeholder={t.versionPicker.searchPlaceholder}
-                  style={{
-                    width: '100%',
-                    boxSizing: 'border-box',
-                    padding: '8px 74px 8px 12px',
-                    borderRadius: 10,
-                    border: `1px solid ${token.colorBorder}`,
-                    background: token.colorFillQuaternary,
-                    color: token.colorText,
-                    fontFamily: 'monospace',
-                    fontSize: 12,
-                    outline: 'none',
-                  }}
+                  style={{ fontFamily: token.fontFamilyCode }}
                 />
-                {trimmedQuery && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setQuery('')
-                      setRemoteSearched(false)
-                    }}
-                    style={{
-                      position: 'absolute',
-                      right: 54,
-                      top: '50%',
-                      transform: 'translateY(-50%)',
-                      border: 'none',
-                      background: 'transparent',
-                      color: token.colorTextSecondary,
-                      cursor: 'pointer',
-                      padding: '2px 4px',
-                      fontSize: 12,
-                    }}
-                  >
-                    ✕
-                  </button>
-                )}
-                <button
-                  type="button"
-                  disabled={searchingRemote}
+                <Button
+                  type="primary"
+                  ghost
+                  loading={searchingRemote}
                   onClick={handleRemoteSearch}
-                  style={{
-                    position: 'absolute',
-                    right: 5,
-                    top: '50%',
-                    transform: 'translateY(-50%)',
-                    padding: '4px 10px',
-                    borderRadius: 7,
-                    border: 'none',
-                    background: 'rgba(47, 107, 255, 0.12)',
-                    color: token.colorPrimary,
-                    fontSize: 12,
-                    fontWeight: 500,
-                    cursor: 'pointer',
-                  }}
                 >
-                  {searchingRemote ? '…' : t.versionPicker.searchBtn}
-                </button>
-              </div>
+                  {t.versionPicker.searchBtn}
+                </Button>
+              </Space.Compact>
 
-              <div style={{ fontSize: 12, color: token.colorTextSecondary, paddingInline: 2 }}>
+              <Typography.Text
+                type="secondary"
+                style={{ fontSize: token.fontSizeSM, paddingInline: 2 }}
+              >
                 {trimmedQuery
                   ? t.versionPicker.matchedCaption.replace('{q}', trimmedQuery)
                   : t.versionPicker.recentCaption}
-              </div>
+              </Typography.Text>
 
               {/* 标签列表 */}
               <div
+                role="listbox"
                 style={{
                   flex: 1,
                   maxHeight: 260,
                   minHeight: 180,
                   overflowY: 'auto',
-                  borderRadius: 12,
+                  borderRadius: token.borderRadiusLG,
                   border: `1px solid ${token.colorBorderSecondary}`,
-                  background: token.colorFillQuaternary,
+                  background: token.colorBgContainer,
                 }}
               >
                 {loading || searchingRemote ? (
-                  <div
-                    style={{
-                      height: 180,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: 8,
-                      fontSize: 12,
-                      color: token.colorTextSecondary,
-                    }}
-                  >
+                  <Flex align="center" justify="center" gap={8} style={{ height: 180 }}>
                     <Spin size="small" />
-                    <span>{t.versionPicker.loadingTags}</span>
-                  </div>
+                    <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                      {t.versionPicker.loadingTags}
+                    </Typography.Text>
+                  </Flex>
                 ) : (
                   <>
                     {displayedTags.map((item, idx) => {
                       const active = item.tag === selectedTag
                       const timeStr = formatTagTime(item.updatedAt)
                       return (
-                        <button
+                        <Flex
                           key={item.tag}
-                          type="button"
-                          className="dkstore-tag-row"
+                          role="option"
+                          aria-selected={active}
+                          tabIndex={0}
+                          align="center"
+                          justify="space-between"
+                          gap={8}
                           onClick={() => applyTagSelection(item.tag, highestTag)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault()
+                              applyTagSelection(item.tag, highestTag)
+                            }
+                          }}
                           style={{
-                            width: '100%',
                             padding: '8px 12px',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'space-between',
-                            gap: 8,
-                            border: 'none',
                             borderBottom:
                               idx < displayedTags.length - 1
-                                ? `1px solid ${token.colorBorderSecondary}`
+                                ? `1px solid ${token.colorSplit}`
                                 : 'none',
-                            background: active ? 'rgba(47, 107, 255, 0.10)' : 'transparent',
-                            color: active ? token.colorPrimary : token.colorText,
-                            fontWeight: active ? 600 : 400,
-                            fontSize: 12,
-                            textAlign: 'left',
+                            background: active ? token.colorPrimaryBg : 'transparent',
+                            cursor: 'pointer',
+                            transition: 'background-color 0.15s ease',
                           }}
                         >
-                          <span
-                            style={{
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              gap: 6,
-                              fontFamily: 'monospace',
-                              minWidth: 0,
-                            }}
-                          >
-                            <span
+                          <Flex align="center" gap={8} style={{ minWidth: 0, flex: 1 }}>
+                            <CheckOutlined
                               style={{
-                                width: 14,
-                                display: 'inline-block',
+                                fontSize: 12,
                                 color: token.colorPrimary,
+                                visibility: active ? 'visible' : 'hidden',
                                 flexShrink: 0,
                               }}
-                            >
-                              {active ? '✓' : ''}
-                            </span>
-                            <span
+                            />
+                            <Typography.Text
+                              strong={active}
+                              ellipsis
                               style={{
-                                overflow: 'hidden',
-                                textOverflow: 'ellipsis',
-                                whiteSpace: 'nowrap',
+                                fontFamily: token.fontFamilyCode,
+                                fontSize: token.fontSizeSM,
+                                color: active ? token.colorPrimary : token.colorText,
                               }}
                             >
                               {item.tag}
-                            </span>
-                          </span>
+                            </Typography.Text>
+                          </Flex>
                           {timeStr && (
-                            <span
-                              style={{
-                                fontSize: 11,
-                                color: token.colorTextSecondary,
-                                fontWeight: 400,
-                                flexShrink: 0,
-                              }}
+                            <Typography.Text
+                              type="secondary"
+                              style={{ fontSize: 11, flexShrink: 0 }}
                             >
                               {timeStr}
-                            </span>
+                            </Typography.Text>
                           )}
-                        </button>
+                        </Flex>
                       )
                     })}
 
                     {trimmedQuery && displayedTags.length === 0 && !remoteSearched && (
-                      <button
-                        type="button"
-                        className="dkstore-tag-row"
-                        onClick={handleRemoteSearch}
-                        style={{
-                          width: '100%',
-                          padding: '10px 12px',
-                          border: 'none',
-                          background: 'transparent',
-                          color: token.colorPrimary,
-                          fontSize: 12,
-                          textAlign: 'left',
-                        }}
-                      >
-                        {t.versionPicker.notFoundInRecent.replace('{q}', trimmedQuery)}
-                      </button>
+                      <div style={{ padding: 8 }}>
+                        <Button type="link" block onClick={handleRemoteSearch}>
+                          {t.versionPicker.notFoundInRecent.replace('{q}', trimmedQuery)}
+                        </Button>
+                      </div>
                     )}
 
                     {trimmedQuery &&
                       !exactTagExists &&
                       (remoteSearched || localTags.length === 0) && (
-                        <button
-                          type="button"
-                          className="dkstore-tag-row"
+                        <Flex
+                          role="option"
+                          aria-selected={selectedTag === trimmedQuery}
+                          tabIndex={0}
+                          align="center"
+                          justify="space-between"
+                          gap={8}
                           onClick={() => applyTagSelection(trimmedQuery, highestTag)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault()
+                              applyTagSelection(trimmedQuery, highestTag)
+                            }
+                          }}
                           style={{
-                            width: '100%',
                             padding: '9px 12px',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'space-between',
-                            gap: 8,
-                            border: 'none',
                             borderTop:
-                              displayedTags.length > 0
-                                ? `1px solid ${token.colorBorderSecondary}`
-                                : 'none',
+                              displayedTags.length > 0 ? `1px solid ${token.colorSplit}` : 'none',
                             background:
-                              selectedTag === trimmedQuery
-                                ? 'rgba(47, 107, 255, 0.10)'
-                                : 'transparent',
-                            color: token.colorText,
-                            fontSize: 12,
-                            textAlign: 'left',
+                              selectedTag === trimmedQuery ? token.colorPrimaryBg : 'transparent',
+                            cursor: 'pointer',
                           }}
                         >
-                          <span style={{ fontFamily: 'monospace', fontWeight: 600 }}>
-                            + {trimmedQuery}
-                          </span>
-                          <span style={{ color: token.colorPrimary }}>
+                          <Space size={6}>
+                            <PlusOutlined style={{ fontSize: 11, color: token.colorPrimary }} />
+                            <Typography.Text
+                              strong
+                              style={{
+                                fontFamily: token.fontFamilyCode,
+                                fontSize: token.fontSizeSM,
+                              }}
+                            >
+                              {trimmedQuery}
+                            </Typography.Text>
+                          </Space>
+                          <Typography.Text
+                            style={{ fontSize: token.fontSizeSM, color: token.colorPrimary }}
+                          >
                             {t.versionPicker.useCustomTag}
-                          </span>
-                        </button>
+                          </Typography.Text>
+                        </Flex>
                       )}
 
                     {!trimmedQuery && displayedTags.length === 0 && (
-                      <div
-                        style={{
-                          padding: '24px 12px',
-                          textAlign: 'center',
-                          fontSize: 12,
-                          color: token.colorTextSecondary,
-                        }}
-                      >
-                        {t.versionPicker.emptyTags}
-                      </div>
+                      <Empty
+                        image={Empty.PRESENTED_IMAGE_SIMPLE}
+                        description={t.versionPicker.emptyTags}
+                        style={{ marginBlock: 20 }}
+                      />
                     )}
                   </>
                 )}
@@ -1002,7 +907,7 @@ function VersionPickerModalBody({
               xs={24}
               md={14}
               style={{
-                borderLeft: screens.md ? `1px solid ${token.colorBorderSecondary}` : 'none',
+                borderLeft: screens.md ? `1px solid ${token.colorSplit}` : 'none',
                 paddingLeft: screens.md ? 20 : 10,
                 display: 'flex',
                 flexDirection: 'column',
@@ -1010,10 +915,10 @@ function VersionPickerModalBody({
                 gap: 10,
               }}
             >
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <div style={{ fontSize: 12, color: token.colorTextSecondary }}>
+              <Flex vertical gap={8}>
+                <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                   {t.versionPicker.policyHeader}
-                </div>
+                </Typography.Text>
 
                 {/* 1. 正常提醒所有新版本 */}
                 {renderRadioCard(
@@ -1057,34 +962,29 @@ function VersionPickerModalBody({
 
                 {/* 复弹实时橙色预警 */}
                 {conflictVer && (
-                  <div
-                    style={{
-                      borderRadius: 10,
-                      background: 'rgba(245, 158, 11, 0.10)',
-                      border: '1px solid rgba(245, 158, 11, 0.38)',
-                      padding: '8px 12px',
-                      fontSize: 12,
-                      color: '#d97706',
-                      lineHeight: 1.55,
-                    }}
-                  >
-                    {t.versionPicker.immediateWarnBefore}
-                    <code style={{ fontFamily: 'monospace', fontWeight: 600 }}>{conflictVer}</code>
-                    {t.versionPicker.immediateWarnAfter}
-                  </div>
+                  <Alert
+                    type="warning"
+                    showIcon
+                    title={
+                      <Typography.Text style={{ fontSize: token.fontSizeSM }}>
+                        {t.versionPicker.immediateWarnBefore}
+                        <Typography.Text code>{conflictVer}</Typography.Text>
+                        {t.versionPicker.immediateWarnAfter}
+                      </Typography.Text>
+                    }
+                  />
                 )}
-              </div>
+              </Flex>
             </Col>
           </Row>
 
           {/* 底栏 */}
-          <div
+          <Flex
+            justify="flex-end"
+            gap={8}
             style={{
               paddingTop: 14,
-              borderTop: `1px solid ${token.colorBorderSecondary}`,
-              display: 'flex',
-              justifyContent: 'flex-end',
-              gap: 8,
+              borderTop: `1px solid ${token.colorSplit}`,
             }}
           >
             <Button onClick={onClose}>{t.versionPicker.cancel}</Button>
@@ -1096,101 +996,72 @@ function VersionPickerModalBody({
             >
               {onPickOnly ? t.versionPicker.confirmPickOnly : t.versionPicker.confirmUpdate}
             </Button>
-          </div>
+          </Flex>
         </>
       ) : (
         /* 右页签：按新版配置更新（自动同步 selectedTag） */
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        <Flex vertical gap={14}>
           {loadingConfig ? (
-            <div
-              style={{
-                height: 220,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                gap: 8,
-                fontSize: 12,
-                color: token.colorTextSecondary,
-              }}
-            >
+            <Flex align="center" justify="center" gap={8} style={{ height: 220 }}>
               <Spin size="small" />
-              <span>
+              <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                 {isStandaloneConfigMode
                   ? t.versionPicker.loadingConfig
                   : t.projectUpdate.loadingCompose}
-              </span>
-            </div>
+              </Typography.Text>
+            </Flex>
           ) : !configEditable ? (
-            <div
-              style={{
-                borderRadius: 12,
-                padding: 16,
-                background: token.colorFillQuaternary,
-                border: `1px solid ${token.colorBorderSecondary}`,
-                color: token.colorTextSecondary,
-                fontSize: 12,
-              }}
-            >
-              {configReason ||
+            <Alert
+              type="info"
+              showIcon
+              title={
+                configReason ||
                 (isStandaloneConfigMode
                   ? t.versionPicker.configUneditable
-                  : t.projectUpdate.uneditableReason)}
-            </div>
+                  : t.projectUpdate.uneditableReason)
+              }
+            />
           ) : !isStandaloneConfigMode ? (
             /* Case A：单容器 YAML 项目（完整操作指引 + 清空粘贴 + 恢复原配置 + 防误覆盖保护） */
             <>
-              <div
-                style={{
-                  borderRadius: 12,
-                  background: 'rgba(47, 107, 255, 0.08)',
-                  border: '1px solid rgba(47, 107, 255, 0.25)',
-                  padding: '12px 14px',
-                  fontSize: 12,
-                  lineHeight: 1.6,
-                }}
-              >
-                <div style={{ fontWeight: 600, color: token.colorPrimary, marginBottom: 4 }}>
-                  {t.projectUpdate.yamlGuideTitle}
-                </div>
-                <ul
-                  style={{
-                    margin: 0,
-                    paddingLeft: 18,
-                    color: token.colorTextSecondary,
-                  }}
-                >
-                  <li>
-                    <strong style={{ color: token.colorText }}>
-                      {t.projectUpdate.yamlBullet1Bold}
-                    </strong>
-                    {t.projectUpdate.yamlBullet1Text}
-                  </li>
-                  <li>
-                    <strong style={{ color: token.colorText }}>
-                      {t.projectUpdate.yamlBullet2Bold}
-                    </strong>
-                    {t.projectUpdate.yamlBullet2Before}
-                    <strong style={{ color: token.colorText }}>
-                      {t.projectUpdate.yamlBullet2Strong}
-                    </strong>
-                    {t.projectUpdate.yamlBullet2After}
-                  </li>
-                </ul>
-              </div>
+              <Alert
+                type="info"
+                showIcon
+                title={<strong>{t.projectUpdate.yamlGuideTitle}</strong>}
+                description={
+                  <ul
+                    style={{
+                      margin: '4px 0 0',
+                      paddingLeft: 18,
+                      fontSize: token.fontSizeSM,
+                      color: token.colorTextSecondary,
+                    }}
+                  >
+                    <li>
+                      <strong style={{ color: token.colorText }}>
+                        {t.projectUpdate.yamlBullet1Bold}
+                      </strong>
+                      {t.projectUpdate.yamlBullet1Text}
+                    </li>
+                    <li>
+                      <strong style={{ color: token.colorText }}>
+                        {t.projectUpdate.yamlBullet2Bold}
+                      </strong>
+                      {t.projectUpdate.yamlBullet2Before}
+                      <strong style={{ color: token.colorText }}>
+                        {t.projectUpdate.yamlBullet2Strong}
+                      </strong>
+                      {t.projectUpdate.yamlBullet2After}
+                    </li>
+                  </ul>
+                }
+              />
 
-              <div
-                style={{
-                  display: 'flex',
-                  flexWrap: 'wrap',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 8,
-                }}
-              >
-                <span style={{ fontSize: 12, fontWeight: 600, color: token.colorText }}>
+              <Flex wrap="wrap" align="center" justify="space-between" gap={8}>
+                <Typography.Text strong style={{ fontSize: token.fontSizeSM }}>
                   {t.projectUpdate.yamlContentLabel}
-                </span>
-                <div style={{ display: 'flex', gap: 8 }}>
+                </Typography.Text>
+                <Space size={8}>
                   <Button size="small" type="primary" ghost onClick={handleClearAndPaste}>
                     {t.projectUpdate.clearAndPasteBtn}
                   </Button>
@@ -1201,118 +1072,80 @@ function VersionPickerModalBody({
                   >
                     {t.projectUpdate.restoreOrigBtn}
                   </Button>
-                </div>
-              </div>
+                </Space>
+              </Flex>
 
-              <textarea
+              <Input.TextArea
                 ref={textareaRef}
                 rows={10}
                 spellCheck={false}
                 value={yamlText}
                 onChange={(e) => setYamlText(e.target.value)}
                 style={{
-                  width: '100%',
-                  boxSizing: 'border-box',
-                  padding: 12,
-                  borderRadius: 12,
-                  border: `1px solid ${token.colorBorder}`,
-                  background: token.colorFillQuaternary,
-                  color: token.colorText,
-                  fontFamily: 'monospace',
-                  fontSize: 12,
+                  fontFamily: token.fontFamilyCode,
+                  fontSize: token.fontSizeSM,
                   lineHeight: 1.55,
-                  resize: 'vertical',
-                  outline: 'none',
                 }}
               />
 
               {overwriteRisks.missingPaths.length > 0 && (
-                <div
-                  style={{
-                    borderRadius: 12,
-                    background: 'rgba(245, 158, 11, 0.10)',
-                    border: '1px solid rgba(245, 158, 11, 0.38)',
-                    padding: '10px 12px',
-                    fontSize: 12,
-                    color: '#d97706',
-                    lineHeight: 1.55,
-                  }}
-                >
-                  <strong>{t.projectUpdate.warnTitle}</strong>
-                  {t.projectUpdate.warnMissingPathsBefore}
-                  <code style={{ fontFamily: 'monospace', fontWeight: 600 }}>
-                    {overwriteRisks.missingPaths.join(', ')}
-                  </code>
-                  {t.projectUpdate.warnMissingPathsAfter}
-                </div>
+                <Alert
+                  type="warning"
+                  showIcon
+                  title={
+                    <Typography.Text style={{ fontSize: token.fontSizeSM }}>
+                      <strong>{t.projectUpdate.warnTitle}</strong>
+                      {t.projectUpdate.warnMissingPathsBefore}
+                      <Typography.Text code>
+                        {overwriteRisks.missingPaths.join(', ')}
+                      </Typography.Text>
+                      {t.projectUpdate.warnMissingPathsAfter}
+                    </Typography.Text>
+                  }
+                />
               )}
 
               {overwriteRisks.missingPaths.length === 0 &&
                 overwriteRisks.overwrittenSecrets.length > 0 && (
-                  <div
-                    style={{
-                      borderRadius: 12,
-                      background: 'rgba(245, 158, 11, 0.10)',
-                      border: '1px solid rgba(245, 158, 11, 0.38)',
-                      padding: '10px 12px',
-                      fontSize: 12,
-                      color: '#d97706',
-                      lineHeight: 1.55,
-                    }}
-                  >
-                    <strong>{t.projectUpdate.warnTitle}</strong>
-                    {t.projectUpdate.warnSecretOverwriteBefore}
-                    <code style={{ fontFamily: 'monospace', fontWeight: 600 }}>
-                      {overwriteRisks.overwrittenSecrets.join(', ')}
-                    </code>
-                    {t.projectUpdate.warnSecretOverwriteAfter}
-                  </div>
+                  <Alert
+                    type="warning"
+                    showIcon
+                    title={
+                      <Typography.Text style={{ fontSize: token.fontSizeSM }}>
+                        <strong>{t.projectUpdate.warnTitle}</strong>
+                        {t.projectUpdate.warnSecretOverwriteBefore}
+                        <Typography.Text code>
+                          {overwriteRisks.overwrittenSecrets.join(', ')}
+                        </Typography.Text>
+                        {t.projectUpdate.warnSecretOverwriteAfter}
+                      </Typography.Text>
+                    }
+                  />
                 )}
             </>
           ) : (
             /* Case B：无 YAML 纯独立容器（环境变量 + 端口映射表单） */
             <>
-              <div
-                style={{
-                  borderRadius: 12,
-                  background: 'rgba(47, 107, 255, 0.08)',
-                  border: '1px solid rgba(47, 107, 255, 0.25)',
-                  padding: '10px 14px',
-                  fontSize: 12,
-                  color: token.colorTextSecondary,
-                  lineHeight: 1.6,
-                }}
-              >
-                {t.versionPicker.standaloneGuide}
-              </div>
+              <Alert
+                type="info"
+                showIcon
+                title={
+                  <Typography.Text style={{ fontSize: token.fontSizeSM }}>
+                    {t.versionPicker.standaloneGuide}
+                  </Typography.Text>
+                }
+              />
 
               {/* 环境变量区块 */}
-              <div
-                style={{
-                  borderRadius: 12,
-                  border: `1px solid ${token.colorBorderSecondary}`,
-                  background: token.colorFillQuaternary,
-                  padding: '10px 12px',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 8,
-                }}
-              >
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 8,
-                  }}
-                >
-                  <span style={{ fontSize: 12.5, fontWeight: 600, color: token.colorText }}>
-                    {t.versionPicker.envSectionTitle}
-                  </span>
+              <Card
+                size="small"
+                title={t.versionPicker.envSectionTitle}
+                extra={
                   <Button
                     size="small"
                     type="primary"
                     ghost
+                    icon={<PlusOutlined />}
                     onClick={() =>
                       setEnvRows((prev) => [
                         ...prev,
@@ -1322,38 +1155,22 @@ function VersionPickerModalBody({
                   >
                     {t.versionPicker.addEnvBtn}
                   </Button>
-                </div>
-
+                }
+                styles={{ body: { padding: '10px 12px' } }}
+              >
                 {envRows.length === 0 ? (
-                  <div
-                    style={{
-                      fontSize: 12,
-                      color: token.colorTextSecondary,
-                      padding: '6px 2px',
-                    }}
-                  >
+                  <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                     {t.versionPicker.envEmpty}
-                  </div>
+                  </Typography.Text>
                 ) : (
-                  <div
-                    style={{
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: 6,
-                      maxHeight: 168,
-                      overflowY: 'auto',
-                    }}
-                  >
+                  <Flex vertical gap={6} style={{ maxHeight: 168, overflowY: 'auto' }}>
                     {envRows.map((row) => (
-                      <div
-                        key={row._id}
-                        style={{ display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
+                      <Flex key={row._id} align="center" gap={6}>
                         <Input
                           size="small"
                           value={row.key}
                           placeholder={t.versionPicker.envKeyPlaceholder}
-                          style={{ flex: '0 1 38%', fontFamily: 'monospace', fontSize: 12 }}
+                          style={{ flex: '0 1 38%', fontFamily: token.fontFamilyCode }}
                           onChange={(e) => {
                             const val = e.target.value
                             setEnvRows((prev) =>
@@ -1361,12 +1178,12 @@ function VersionPickerModalBody({
                             )
                           }}
                         />
-                        <span style={{ color: token.colorTextSecondary, fontSize: 12 }}>=</span>
+                        <Typography.Text type="secondary">=</Typography.Text>
                         <Input
                           size="small"
                           value={row.value}
                           placeholder={t.versionPicker.envValPlaceholder}
-                          style={{ flex: 1, fontFamily: 'monospace', fontSize: 12 }}
+                          style={{ flex: 1, fontFamily: token.fontFamilyCode }}
                           onChange={(e) => {
                             const val = e.target.value
                             setEnvRows((prev) =>
@@ -1374,56 +1191,34 @@ function VersionPickerModalBody({
                             )
                           }}
                         />
-                        <button
-                          type="button"
-                          title={t.versionPicker.removeRowTip}
-                          onClick={() =>
-                            setEnvRows((prev) => prev.filter((r) => r._id !== row._id))
-                          }
-                          style={{
-                            border: 'none',
-                            background: 'transparent',
-                            color: token.colorTextSecondary,
-                            cursor: 'pointer',
-                            padding: '2px 6px',
-                            fontSize: 12,
-                          }}
-                        >
-                          ✕
-                        </button>
-                      </div>
+                        <Tooltip title={t.versionPicker.removeRowTip}>
+                          <Button
+                            size="small"
+                            type="text"
+                            danger
+                            icon={<DeleteOutlined />}
+                            aria-label={t.versionPicker.removeRowTip}
+                            onClick={() =>
+                              setEnvRows((prev) => prev.filter((r) => r._id !== row._id))
+                            }
+                          />
+                        </Tooltip>
+                      </Flex>
                     ))}
-                  </div>
+                  </Flex>
                 )}
-              </div>
+              </Card>
 
               {/* 端口映射区块 */}
-              <div
-                style={{
-                  borderRadius: 12,
-                  border: `1px solid ${token.colorBorderSecondary}`,
-                  background: token.colorFillQuaternary,
-                  padding: '10px 12px',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: 8,
-                }}
-              >
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 8,
-                  }}
-                >
-                  <span style={{ fontSize: 12.5, fontWeight: 600, color: token.colorText }}>
-                    {t.versionPicker.portsSectionTitle}
-                  </span>
+              <Card
+                size="small"
+                title={t.versionPicker.portsSectionTitle}
+                extra={
                   <Button
                     size="small"
                     type="primary"
                     ghost
+                    icon={<PlusOutlined />}
                     onClick={() =>
                       setPortRows((prev) => [
                         ...prev,
@@ -1438,38 +1233,22 @@ function VersionPickerModalBody({
                   >
                     {t.versionPicker.addPortBtn}
                   </Button>
-                </div>
-
+                }
+                styles={{ body: { padding: '10px 12px' } }}
+              >
                 {portRows.length === 0 ? (
-                  <div
-                    style={{
-                      fontSize: 12,
-                      color: token.colorTextSecondary,
-                      padding: '6px 2px',
-                    }}
-                  >
+                  <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                     {t.versionPicker.portsEmpty}
-                  </div>
+                  </Typography.Text>
                 ) : (
-                  <div
-                    style={{
-                      display: 'flex',
-                      flexDirection: 'column',
-                      gap: 6,
-                      maxHeight: 148,
-                      overflowY: 'auto',
-                    }}
-                  >
+                  <Flex vertical gap={6} style={{ maxHeight: 148, overflowY: 'auto' }}>
                     {portRows.map((row) => (
-                      <div
-                        key={row._id}
-                        style={{ display: 'flex', alignItems: 'center', gap: 6 }}
-                      >
+                      <Flex key={row._id} align="center" gap={6}>
                         <Input
                           size="small"
                           value={row.hostPort}
                           placeholder={t.versionPicker.hostPortPlaceholder}
-                          style={{ flex: 1, fontFamily: 'monospace', fontSize: 12 }}
+                          style={{ flex: 1, fontFamily: token.fontFamilyCode }}
                           onChange={(e) => {
                             const val = e.target.value
                             setPortRows((prev) =>
@@ -1477,12 +1256,14 @@ function VersionPickerModalBody({
                             )
                           }}
                         />
-                        <span style={{ color: token.colorTextSecondary, fontSize: 12 }}>→</span>
+                        <ArrowRightOutlined
+                          style={{ fontSize: 11, color: token.colorTextTertiary }}
+                        />
                         <Input
                           size="small"
                           value={row.containerPort}
                           placeholder={t.versionPicker.containerPortPlaceholder}
-                          style={{ flex: 1, fontFamily: 'monospace', fontSize: 12 }}
+                          style={{ flex: 1, fontFamily: token.fontFamilyCode }}
                           onChange={(e) => {
                             const val = e.target.value
                             setPortRows((prev) =>
@@ -1495,7 +1276,7 @@ function VersionPickerModalBody({
                         <Select
                           size="small"
                           value={(row.protocol || 'tcp').toLowerCase()}
-                          style={{ width: 78 }}
+                          style={{ width: 82 }}
                           options={[
                             { label: 'TCP', value: 'tcp' },
                             { label: 'UDP', value: 'udp' },
@@ -1506,47 +1287,41 @@ function VersionPickerModalBody({
                             )
                           }
                         />
-                        <button
-                          type="button"
-                          title={t.versionPicker.removeRowTip}
-                          onClick={() =>
-                            setPortRows((prev) => prev.filter((r) => r._id !== row._id))
-                          }
-                          style={{
-                            border: 'none',
-                            background: 'transparent',
-                            color: token.colorTextSecondary,
-                            cursor: 'pointer',
-                            padding: '2px 6px',
-                            fontSize: 12,
-                          }}
-                        >
-                          ✕
-                        </button>
-                      </div>
+                        <Tooltip title={t.versionPicker.removeRowTip}>
+                          <Button
+                            size="small"
+                            type="text"
+                            danger
+                            icon={<DeleteOutlined />}
+                            aria-label={t.versionPicker.removeRowTip}
+                            onClick={() =>
+                              setPortRows((prev) => prev.filter((r) => r._id !== row._id))
+                            }
+                          />
+                        </Tooltip>
+                      </Flex>
                     ))}
-                  </div>
+                  </Flex>
                 )}
-              </div>
+              </Card>
             </>
           )}
 
           {/* 配置页签底栏 */}
-          <div
+          <Flex
+            wrap="wrap"
+            align="center"
+            justify="space-between"
+            gap={8}
             style={{
               paddingTop: 12,
-              borderTop: `1px solid ${token.colorBorderSecondary}`,
-              display: 'flex',
-              flexWrap: 'wrap',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: 8,
+              borderTop: `1px solid ${token.colorSplit}`,
             }}
           >
-            <span style={{ fontSize: 12, color: token.colorTextSecondary }}>
+            <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
               {t.projectUpdate.autoRollbackNote}
-            </span>
-            <div style={{ display: 'flex', gap: 8 }}>
+            </Typography.Text>
+            <Space size={8}>
               <Button onClick={onClose}>{t.versionPicker.cancel}</Button>
               <Button
                 type="primary"
@@ -1560,10 +1335,10 @@ function VersionPickerModalBody({
               >
                 {t.projectUpdate.submitYamlBtn}
               </Button>
-            </div>
-          </div>
-        </div>
+            </Space>
+          </Flex>
+        </Flex>
       )}
-    </div>
+    </Flex>
   )
 }

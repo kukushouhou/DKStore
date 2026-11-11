@@ -1,5 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Button, Modal, Spin, message, theme } from 'antd'
+import {
+  Alert,
+  Button,
+  Checkbox,
+  Flex,
+  Input,
+  Modal,
+  Segmented,
+  Space,
+  Spin,
+  Tag,
+  Tooltip,
+  Typography,
+  message,
+  theme,
+} from 'antd'
+import type { TextAreaRef } from 'antd/es/input/TextArea'
+import { ArrowRightOutlined, DownOutlined } from '@ant-design/icons'
 import { api, type AppCardItem, type ServiceItem } from '../api/client'
 import { useI18n } from '../i18n'
 import { useUIStore } from '../store/ui'
@@ -60,7 +77,7 @@ function ProjectUpdateModalBody({
   const { token } = theme.useToken()
   const { t } = useI18n()
   const upsertUpdateJob = useUIStore((s) => s.upsertUpdateJob)
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+  const textareaRef = useRef<TextAreaRef | null>(null)
 
   const services = useMemo(
     () => (app.allServices && app.allServices.length > 0 ? app.allServices : app.services),
@@ -230,389 +247,277 @@ function ProjectUpdateModalBody({
     }
     if (!label) return null
     return (
-      <span
-        style={{
-          padding: '1px 6px',
-          borderRadius: 5,
-          background: 'rgba(245, 158, 11, 0.15)',
-          color: '#d97706',
-          fontSize: 11,
-          fontWeight: 500,
-        }}
-      >
+      <Tag variant="filled" color="warning" style={{ margin: 0 }}>
         {label}
-      </span>
+      </Tag>
     )
   }
 
   return (
     <>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          {/* 顶栏 */}
-          <div
-            style={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: 12,
-              paddingBottom: 12,
-              borderBottom: `1px solid ${token.colorBorderSecondary}`,
-            }}
-          >
-            <div>
-              <div style={{ fontSize: 16, fontWeight: 700, color: token.colorText }}>
-                {t.projectUpdate.title.replace('{name}', projectTitle)}
-              </div>
-              <div style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 2 }}>
-                {t.projectUpdate.subtitle
-                  .replace('{host}', app.hostName)
-                  .replace('{total}', String(totalCount))}
-              </div>
-            </div>
-
-            {(app.composeEditable || tab === 'yaml') && totalCount >= 2 && (
-              <div
-                style={{
-                  display: 'inline-flex',
-                  padding: 3,
-                  borderRadius: 10,
-                  background: token.colorFillQuaternary,
-                  border: `1px solid ${token.colorBorderSecondary}`,
-                  gap: 2,
-                }}
-              >
-                <button
-                  type="button"
-                  onClick={() => setTab('direct')}
-                  style={{
-                    padding: '5px 12px',
-                    borderRadius: 8,
-                    border: 'none',
-                    fontSize: 12,
-                    fontWeight: 500,
-                    cursor: 'pointer',
-                    background: tab === 'direct' ? token.colorPrimary : 'transparent',
-                    color: tab === 'direct' ? '#ffffff' : token.colorTextSecondary,
-                  }}
-                >
-                  {t.projectUpdate.tabDirect}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setTab('yaml')}
-                  style={{
-                    padding: '5px 12px',
-                    borderRadius: 8,
-                    border: 'none',
-                    fontSize: 12,
-                    fontWeight: 500,
-                    cursor: 'pointer',
-                    background: tab === 'yaml' ? token.colorPrimary : 'transparent',
-                    color: tab === 'yaml' ? '#ffffff' : token.colorTextSecondary,
-                  }}
-                >
-                  {t.projectUpdate.tabYaml}
-                </button>
-              </div>
-            )}
+      <Flex vertical gap={16}>
+        {/* 顶栏 */}
+        <Flex
+          wrap="wrap"
+          align="center"
+          justify="space-between"
+          gap={12}
+          style={{
+            paddingBottom: 12,
+            borderBottom: `1px solid ${token.colorSplit}`,
+          }}
+        >
+          <div>
+            <Typography.Title level={5} style={{ margin: 0 }}>
+              {t.projectUpdate.title.replace('{name}', projectTitle)}
+            </Typography.Title>
+            <Typography.Text
+              type="secondary"
+              style={{ fontSize: token.fontSizeSM, display: 'block', marginTop: 2 }}
+            >
+              {t.projectUpdate.subtitle
+                .replace('{host}', app.hostName)
+                .replace('{total}', String(totalCount))}
+            </Typography.Text>
           </div>
 
-          {tab === 'direct' ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              {/* 顶部自然提示框 */}
-              <div
-                style={{
-                  borderRadius: 12,
-                  background: 'rgba(245, 158, 11, 0.09)',
-                  border: '1px solid rgba(245, 158, 11, 0.28)',
-                  padding: '10px 14px',
-                  fontSize: 12,
-                  color: token.colorTextSecondary,
-                  lineHeight: 1.6,
-                }}
-              >
-                <strong style={{ color: '#d97706' }}>{t.projectUpdate.tipPrefix}</strong>
-                {t.projectUpdate.tipDirectBody}
-                {app.composeEditable ? (
-                  <>
-                    {t.projectUpdate.tipYamlSuffixBefore}
-                    <button
-                      type="button"
-                      onClick={() => setTab('yaml')}
-                      style={{
-                        border: 'none',
-                        background: 'transparent',
-                        color: token.colorPrimary,
-                        fontWeight: 500,
-                        cursor: 'pointer',
-                        padding: '0 2px',
-                        fontSize: 12,
-                      }}
-                    >
-                      {t.projectUpdate.tipYamlLink}
-                    </button>
-                    {t.projectUpdate.tipYamlSuffixAfter}
-                  </>
-                ) : (
-                  t.projectUpdate.tipNoYamlEnd
-                )}
-              </div>
+          {(app.composeEditable || tab === 'yaml') && totalCount >= 2 && (
+            <Segmented
+              value={tab}
+              onChange={(val) => setTab(val as 'direct' | 'yaml')}
+              options={[
+                { label: t.projectUpdate.tabDirect, value: 'direct' },
+                { label: t.projectUpdate.tabYaml, value: 'yaml' },
+              ]}
+            />
+          )}
+        </Flex>
 
-              {/* 项目内全部容器列表 */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {services.map((svc) => {
-                  const updatable = isServiceUpdatable(svc)
-                  const caution = isServiceCaution(svc)
-                  const checked = checkedKeys.has(svc.key)
-                  const ov = overrides[svc.key]
-                  const displayTgt =
-                    ov?.targetTag || svc.targetVersion || t.home.newImageDetected
-                  const displayCur = svc.currentVersion || t.home.unknownCurrent
-                  const extLink = svc.links.releases || svc.links.repo
-
-                  if (!updatable) {
-                    return (
-                      <div
-                        key={svc.key}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'space-between',
-                          gap: 12,
-                          padding: '11px 14px',
-                          borderRadius: 12,
-                          border: `1px solid ${token.colorBorderSecondary}`,
-                          background: token.colorFillQuaternary,
-                          opacity: 0.6,
-                          fontSize: 12,
-                        }}
+        {tab === 'direct' ? (
+          <Flex vertical gap={14}>
+            {/* 顶部自然提示框 */}
+            <Alert
+              type="warning"
+              showIcon
+              title={
+                <Typography.Text style={{ fontSize: token.fontSizeSM }}>
+                  <strong>{t.projectUpdate.tipPrefix}</strong>
+                  {t.projectUpdate.tipDirectBody}
+                  {app.composeEditable ? (
+                    <>
+                      {t.projectUpdate.tipYamlSuffixBefore}
+                      <Typography.Link
+                        onClick={() => setTab('yaml')}
+                        style={{ fontSize: token.fontSizeSM, marginInline: 2 }}
                       >
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                          <input type="checkbox" disabled style={{ width: 15, height: 15 }} />
-                          <div>
-                            <span style={{ fontWeight: 600, color: token.colorText }}>
-                              {svc.name}
-                            </span>
-                            {svc.currentVersion && (
-                              <span
-                                style={{
-                                  fontFamily: 'monospace',
-                                  color: token.colorTextSecondary,
-                                  marginLeft: 8,
-                                }}
-                              >
-                                {svc.currentVersion}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <span style={{ color: '#10b981', fontWeight: 500 }}>
-                          {svc.ignored ? t.home.pausedReminderStatus : t.projectUpdate.upToDate}
-                        </span>
-                      </div>
-                    )
-                  }
+                        {t.projectUpdate.tipYamlLink}
+                      </Typography.Link>
+                      {t.projectUpdate.tipYamlSuffixAfter}
+                    </>
+                  ) : (
+                    t.projectUpdate.tipNoYamlEnd
+                  )}
+                </Typography.Text>
+              }
+            />
 
+            {/* 项目内全部容器列表 */}
+            <Flex vertical gap={10}>
+              {services.map((svc) => {
+                const updatable = isServiceUpdatable(svc)
+                const caution = isServiceCaution(svc)
+                const checked = checkedKeys.has(svc.key)
+                const ov = overrides[svc.key]
+                const displayTgt =
+                  ov?.targetTag || svc.targetVersion || t.home.newImageDetected
+                const displayCur = svc.currentVersion || t.home.unknownCurrent
+                const extLink = svc.links.releases || svc.links.repo
+
+                if (!updatable) {
                   return (
-                    <div
+                    <Flex
                       key={svc.key}
-                      onClick={() => toggleService(svc.key)}
+                      align="center"
+                      justify="space-between"
+                      gap={12}
                       style={{
-                        display: 'flex',
-                        flexWrap: 'wrap',
-                        alignItems: 'center',
-                        justifyContent: 'space-between',
-                        gap: 12,
-                        padding: '11px 14px',
-                        borderRadius: 12,
-                        border: checked
-                          ? caution
-                            ? '1px solid rgba(245, 158, 11, 0.5)'
-                            : `1px solid ${token.colorPrimary}`
-                          : `1px solid ${token.colorBorderSecondary}`,
-                        background: token.colorFillQuaternary,
-                        cursor: 'pointer',
-                        fontSize: 12,
+                        padding: '10px 14px',
+                        borderRadius: token.borderRadiusLG,
+                        border: `1px solid ${token.colorBorderSecondary}`,
+                        background: token.colorFillAlter,
+                        opacity: 0.65,
                       }}
                     >
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => toggleService(svc.key)}
-                          onClick={(e) => e.stopPropagation()}
-                          style={{
-                            width: 15,
-                            height: 15,
-                            accentColor: caution ? '#f59e0b' : token.colorPrimary,
-                            cursor: 'pointer',
-                          }}
-                        />
-                        <div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                            <span
-                              style={{ fontWeight: 600, fontSize: 13, color: token.colorText }}
-                            >
-                              {svc.name}
-                            </span>
-                            {roleBadgeForService(svc)}
-                          </div>
-                          <div
-                            style={{
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: 6,
-                              marginTop: 4,
-                              fontFamily: 'monospace',
-                            }}
-                          >
-                            <span style={{ color: token.colorTextSecondary }}>{displayCur}</span>
-                            <span style={{ color: token.colorTextSecondary }}>→</span>
-                            <button
-                              type="button"
-                              title={t.home.pickOtherVersionTip}
-                              className="dkstore-ver-pill"
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                setPickerSvc(svc)
-                              }}
-                              style={{
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: 4,
-                                padding: '2px 8px',
-                                borderRadius: 6,
-                                fontFamily: 'monospace',
-                                fontSize: 12,
-                                fontWeight: 600,
-                                ...(caution
-                                  ? {
-                                      background: 'rgba(245, 158, 11, 0.12)',
-                                      border: '1px solid rgba(245, 158, 11, 0.4)',
-                                      color: '#d97706',
-                                    }
-                                  : {
-                                      background: 'rgba(47, 107, 255, 0.10)',
-                                      border: '1px solid rgba(47, 107, 255, 0.35)',
-                                      color: token.colorPrimary,
-                                    }),
-                              }}
-                            >
-                              <span>{displayTgt}</span>
-                              <svg
-                                width="12"
-                                height="12"
-                                viewBox="0 0 20 20"
-                                fill="currentColor"
-                                style={{ opacity: 0.75 }}
-                              >
-                                <path
-                                  fillRule="evenodd"
-                                  d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
-                                  clipRule="evenodd"
-                                />
-                              </svg>
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-
-                      {extLink && (
-                        <a
-                          href={extLink}
-                          target="_blank"
-                          rel="noreferrer"
-                          onClick={(e) => e.stopPropagation()}
-                          style={{
-                            color: token.colorPrimary,
-                            fontSize: 12,
-                            textDecoration: 'none',
-                            flexShrink: 0,
-                          }}
-                        >
-                          {svc.links.releases
-                            ? t.projectUpdate.releaseNotesExt
-                            : t.projectUpdate.repoExt}
-                        </a>
-                      )}
-                    </div>
+                      <Space size={10} align="center">
+                        <Checkbox disabled />
+                        <Typography.Text strong>{svc.name}</Typography.Text>
+                        {svc.currentVersion && (
+                          <Tag style={{ margin: 0, fontFamily: token.fontFamilyCode }}>
+                            {svc.currentVersion}
+                          </Tag>
+                        )}
+                      </Space>
+                      <Tag
+                        color={svc.ignored ? 'default' : 'success'}
+                        variant="filled"
+                        style={{ margin: 0 }}
+                      >
+                        {svc.ignored ? t.home.pausedReminderStatus : t.projectUpdate.upToDate}
+                      </Tag>
+                    </Flex>
                   )
-                })}
-              </div>
+                }
 
-              {/* 底栏 */}
-              <div
-                style={{
-                  paddingTop: 12,
-                  borderTop: `1px solid ${token.colorBorderSecondary}`,
-                  display: 'flex',
-                  flexWrap: 'wrap',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 8,
-                }}
-              >
-                {updatableServices.length > 0 ? (
-                  <button
-                    type="button"
-                    onClick={selectAllUpdatable}
+                return (
+                  <Flex
+                    key={svc.key}
+                    wrap="wrap"
+                    align="center"
+                    justify="space-between"
+                    gap={12}
+                    onClick={() => toggleService(svc.key)}
                     style={{
-                      border: 'none',
-                      background: 'transparent',
-                      color: token.colorPrimary,
-                      fontSize: 12,
+                      padding: '11px 14px',
+                      borderRadius: token.borderRadiusLG,
+                      border: `1px solid ${
+                        checked
+                          ? caution
+                            ? token.colorWarning
+                            : token.colorPrimary
+                          : token.colorBorderSecondary
+                      }`,
+                      background: checked
+                        ? caution
+                          ? token.colorWarningBg
+                          : token.colorPrimaryBg
+                        : token.colorBgContainer,
                       cursor: 'pointer',
-                      padding: 0,
+                      transition: 'border-color 0.15s ease, background-color 0.15s ease',
                     }}
                   >
-                    {t.projectUpdate.selectAllUpdatable.replace(
-                      '{count}',
-                      String(updatableServices.length),
-                    )}
-                  </button>
-                ) : (
-                  <span />
-                )}
+                    <Flex align="center" gap={12}>
+                      <Checkbox
+                        checked={checked}
+                        onChange={() => toggleService(svc.key)}
+                        onClick={(e) => e.stopPropagation()}
+                      />
+                      <div>
+                        <Space size={6} align="center" wrap>
+                          <Typography.Text strong>{svc.name}</Typography.Text>
+                          {roleBadgeForService(svc)}
+                        </Space>
+                        <div style={{ marginTop: 4 }}>
+                          <Space size={6} align="center" wrap>
+                            <Tag style={{ margin: 0, fontFamily: token.fontFamilyCode }}>
+                              {displayCur}
+                            </Tag>
+                            <ArrowRightOutlined
+                              style={{ fontSize: 11, color: token.colorTextTertiary }}
+                            />
+                            <Tooltip title={t.home.pickOtherVersionTip}>
+                              <Button
+                                size="small"
+                                type={caution ? 'default' : 'primary'}
+                                ghost={!caution}
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  setPickerSvc(svc)
+                                }}
+                                style={{
+                                  fontFamily: token.fontFamilyCode,
+                                  fontWeight: 600,
+                                  ...(caution
+                                    ? {
+                                        color: token.colorWarningText,
+                                        borderColor: token.colorWarningBorder,
+                                        background: token.colorWarningBg,
+                                      }
+                                    : {}),
+                                }}
+                              >
+                                {displayTgt} <DownOutlined style={{ fontSize: 10 }} />
+                              </Button>
+                            </Tooltip>
+                          </Space>
+                        </div>
+                      </div>
+                    </Flex>
 
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <Button onClick={onClose}>{t.projectUpdate.cancel}</Button>
-                  <Button
-                    type="primary"
-                    disabled={checkedKeys.size === 0}
-                    loading={submittingDirect}
-                    onClick={handleDirectSubmit}
-                  >
-                    {checkedKeys.size > 0
-                      ? t.projectUpdate.submitSelected.replace(
-                          '{count}',
-                          String(checkedKeys.size),
-                        )
-                      : t.projectUpdate.selectAtLeastOne}
-                  </Button>
-                </div>
-              </div>
-            </div>
-          ) : (
-            /* 按官方新版配置更新模式 */
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-              <div
-                style={{
-                  borderRadius: 12,
-                  background: 'rgba(47, 107, 255, 0.08)',
-                  border: '1px solid rgba(47, 107, 255, 0.25)',
-                  padding: '12px 14px',
-                  fontSize: 12,
-                  lineHeight: 1.6,
-                }}
-              >
-                <div style={{ fontWeight: 600, color: token.colorPrimary, marginBottom: 4 }}>
-                  {t.projectUpdate.yamlGuideTitle}
-                </div>
+                    {extLink && (
+                      <Typography.Link
+                        href={extLink}
+                        target="_blank"
+                        onClick={(e) => e.stopPropagation()}
+                        style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}
+                      >
+                        {svc.links.releases
+                          ? t.projectUpdate.releaseNotesExt
+                          : t.projectUpdate.repoExt}
+                      </Typography.Link>
+                    )}
+                  </Flex>
+                )
+              })}
+            </Flex>
+
+            {/* 底栏 */}
+            <Flex
+              wrap="wrap"
+              align="center"
+              justify="space-between"
+              gap={8}
+              style={{
+                paddingTop: 12,
+                borderTop: `1px solid ${token.colorSplit}`,
+              }}
+            >
+              {updatableServices.length > 0 ? (
+                <Button
+                  type="link"
+                  size="small"
+                  onClick={selectAllUpdatable}
+                  style={{ padding: 0 }}
+                >
+                  {t.projectUpdate.selectAllUpdatable.replace(
+                    '{count}',
+                    String(updatableServices.length),
+                  )}
+                </Button>
+              ) : (
+                <span />
+              )}
+
+              <Space size={8}>
+                <Button onClick={onClose}>{t.projectUpdate.cancel}</Button>
+                <Button
+                  type="primary"
+                  disabled={checkedKeys.size === 0}
+                  loading={submittingDirect}
+                  onClick={handleDirectSubmit}
+                >
+                  {checkedKeys.size > 0
+                    ? t.projectUpdate.submitSelected.replace(
+                        '{count}',
+                        String(checkedKeys.size),
+                      )
+                    : t.projectUpdate.selectAtLeastOne}
+                </Button>
+              </Space>
+            </Flex>
+          </Flex>
+        ) : (
+          /* 按官方新版配置更新模式 */
+          <Flex vertical gap={14}>
+            <Alert
+              type="info"
+              showIcon
+              title={<strong>{t.projectUpdate.yamlGuideTitle}</strong>}
+              description={
                 <ul
                   style={{
-                    margin: 0,
+                    margin: '4px 0 0',
                     paddingLeft: 18,
+                    fontSize: token.fontSizeSM,
                     color: token.colorTextSecondary,
                   }}
                 >
@@ -633,166 +538,126 @@ function ProjectUpdateModalBody({
                     {t.projectUpdate.yamlBullet2After}
                   </li>
                 </ul>
-              </div>
+              }
+            />
 
-              {loadingYaml ? (
-                <div
-                  style={{
-                    height: 200,
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    gap: 8,
-                    fontSize: 12,
-                    color: token.colorTextSecondary,
-                  }}
-                >
-                  <Spin size="small" />
-                  <span>{t.projectUpdate.loadingCompose}</span>
-                </div>
-              ) : !yamlEditable ? (
-                <div
-                  style={{
-                    borderRadius: 12,
-                    padding: '16px',
-                    background: token.colorFillQuaternary,
-                    border: `1px solid ${token.colorBorderSecondary}`,
-                    color: token.colorTextSecondary,
-                    fontSize: 12,
-                  }}
-                >
-                  {yamlReason || t.projectUpdate.uneditableReason}
-                </div>
-              ) : (
-                <>
-                  <div
-                    style={{
-                      display: 'flex',
-                      flexWrap: 'wrap',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      gap: 8,
-                    }}
-                  >
-                    <span style={{ fontSize: 12, fontWeight: 600, color: token.colorText }}>
-                      {t.projectUpdate.yamlContentLabel}
-                    </span>
-                    <div style={{ display: 'flex', gap: 8 }}>
-                      <Button size="small" type="primary" ghost onClick={handleClearAndPaste}>
-                        {t.projectUpdate.clearAndPasteBtn}
-                      </Button>
-                      <Button
-                        size="small"
-                        onClick={() => setYamlText(origYaml)}
-                        disabled={yamlText === origYaml}
-                      >
-                        {t.projectUpdate.restoreOrigBtn}
-                      </Button>
-                    </div>
-                  </div>
-
-                  <textarea
-                    ref={textareaRef}
-                    rows={10}
-                    spellCheck={false}
-                    value={yamlText}
-                    onChange={(e) => setYamlText(e.target.value)}
-                    style={{
-                      width: '100%',
-                      boxSizing: 'border-box',
-                      padding: 12,
-                      borderRadius: 12,
-                      border: `1px solid ${token.colorBorder}`,
-                      background: token.colorFillQuaternary,
-                      color: token.colorText,
-                      fontFamily: 'monospace',
-                      fontSize: 12,
-                      lineHeight: 1.55,
-                      resize: 'vertical',
-                      outline: 'none',
-                    }}
-                  />
-
-                  {overwriteRisks.missingPaths.length > 0 && (
-                    <div
-                      style={{
-                        borderRadius: 12,
-                        background: 'rgba(245, 158, 11, 0.10)',
-                        border: '1px solid rgba(245, 158, 11, 0.38)',
-                        padding: '10px 12px',
-                        fontSize: 12,
-                        color: '#d97706',
-                        lineHeight: 1.55,
-                      }}
-                    >
-                      <strong>{t.projectUpdate.warnTitle}</strong>
-                      {t.projectUpdate.warnMissingPathsBefore}
-                      <code style={{ fontFamily: 'monospace', fontWeight: 600 }}>
-                        {overwriteRisks.missingPaths.join(', ')}
-                      </code>
-                      {t.projectUpdate.warnMissingPathsAfter}
-                    </div>
-                  )}
-
-                  {overwriteRisks.missingPaths.length === 0 &&
-                    overwriteRisks.overwrittenSecrets.length > 0 && (
-                      <div
-                        style={{
-                          borderRadius: 12,
-                          background: 'rgba(245, 158, 11, 0.10)',
-                          border: '1px solid rgba(245, 158, 11, 0.38)',
-                          padding: '10px 12px',
-                          fontSize: 12,
-                          color: '#d97706',
-                          lineHeight: 1.55,
-                        }}
-                      >
-                        <strong>{t.projectUpdate.warnTitle}</strong>
-                        {t.projectUpdate.warnSecretOverwriteBefore}
-                        <code style={{ fontFamily: 'monospace', fontWeight: 600 }}>
-                          {overwriteRisks.overwrittenSecrets.join(', ')}
-                        </code>
-                        {t.projectUpdate.warnSecretOverwriteAfter}
-                      </div>
-                    )}
-                </>
-              )}
-
-              <div
-                style={{
-                  paddingTop: 12,
-                  borderTop: `1px solid ${token.colorBorderSecondary}`,
-                  display: 'flex',
-                  flexWrap: 'wrap',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 8,
-                }}
-              >
-                <span style={{ fontSize: 12, color: token.colorTextSecondary }}>
-                  {t.projectUpdate.autoRollbackNote}
-                </span>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  {totalCount >= 2 && initialTab !== 'yaml' ? (
-                    <Button onClick={() => setTab('direct')}>
-                      {t.projectUpdate.backToDirectBtn}
+            {loadingYaml ? (
+              <Flex align="center" justify="center" gap={8} style={{ height: 200 }}>
+                <Spin size="small" />
+                <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                  {t.projectUpdate.loadingCompose}
+                </Typography.Text>
+              </Flex>
+            ) : !yamlEditable ? (
+              <Alert
+                type="info"
+                showIcon
+                title={yamlReason || t.projectUpdate.uneditableReason}
+              />
+            ) : (
+              <>
+                <Flex wrap="wrap" align="center" justify="space-between" gap={8}>
+                  <Typography.Text strong style={{ fontSize: token.fontSizeSM }}>
+                    {t.projectUpdate.yamlContentLabel}
+                  </Typography.Text>
+                  <Space size={8}>
+                    <Button size="small" type="primary" ghost onClick={handleClearAndPaste}>
+                      {t.projectUpdate.clearAndPasteBtn}
                     </Button>
-                  ) : (
-                    <Button onClick={onClose}>{t.projectUpdate.cancel}</Button>
+                    <Button
+                      size="small"
+                      onClick={() => setYamlText(origYaml)}
+                      disabled={yamlText === origYaml}
+                    >
+                      {t.projectUpdate.restoreOrigBtn}
+                    </Button>
+                  </Space>
+                </Flex>
+
+                <Input.TextArea
+                  ref={textareaRef}
+                  rows={10}
+                  spellCheck={false}
+                  value={yamlText}
+                  onChange={(e) => setYamlText(e.target.value)}
+                  style={{
+                    fontFamily: token.fontFamilyCode,
+                    fontSize: token.fontSizeSM,
+                    lineHeight: 1.55,
+                  }}
+                />
+
+                {overwriteRisks.missingPaths.length > 0 && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    title={
+                      <Typography.Text style={{ fontSize: token.fontSizeSM }}>
+                        <strong>{t.projectUpdate.warnTitle}</strong>
+                        {t.projectUpdate.warnMissingPathsBefore}
+                        <Typography.Text code>
+                          {overwriteRisks.missingPaths.join(', ')}
+                        </Typography.Text>
+                        {t.projectUpdate.warnMissingPathsAfter}
+                      </Typography.Text>
+                    }
+                  />
+                )}
+
+                {overwriteRisks.missingPaths.length === 0 &&
+                  overwriteRisks.overwrittenSecrets.length > 0 && (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      title={
+                        <Typography.Text style={{ fontSize: token.fontSizeSM }}>
+                          <strong>{t.projectUpdate.warnTitle}</strong>
+                          {t.projectUpdate.warnSecretOverwriteBefore}
+                          <Typography.Text code>
+                            {overwriteRisks.overwrittenSecrets.join(', ')}
+                          </Typography.Text>
+                          {t.projectUpdate.warnSecretOverwriteAfter}
+                        </Typography.Text>
+                      }
+                    />
                   )}
-                  <Button
-                    type="primary"
-                    disabled={!yamlEditable || loadingYaml || !yamlText.trim()}
-                    loading={submittingYaml}
-                    onClick={handleYamlSubmit}
-                  >
-                    {t.projectUpdate.submitYamlBtn}
+              </>
+            )}
+
+            <Flex
+              wrap="wrap"
+              align="center"
+              justify="space-between"
+              gap={8}
+              style={{
+                paddingTop: 12,
+                borderTop: `1px solid ${token.colorSplit}`,
+              }}
+            >
+              <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                {t.projectUpdate.autoRollbackNote}
+              </Typography.Text>
+              <Space size={8}>
+                {totalCount >= 2 && initialTab !== 'yaml' ? (
+                  <Button onClick={() => setTab('direct')}>
+                    {t.projectUpdate.backToDirectBtn}
                   </Button>
-                </div>
-              </div>
-            </div>
-          )}
-      </div>
+                ) : (
+                  <Button onClick={onClose}>{t.projectUpdate.cancel}</Button>
+                )}
+                <Button
+                  type="primary"
+                  disabled={!yamlEditable || loadingYaml || !yamlText.trim()}
+                  loading={submittingYaml}
+                  onClick={handleYamlSubmit}
+                >
+                  {t.projectUpdate.submitYamlBtn}
+                </Button>
+              </Space>
+            </Flex>
+          </Flex>
+        )}
+      </Flex>
 
       {/* 行内点击版本号胶囊时打开版本选择器，选定后写回该容器行 */}
       <VersionPickerModal

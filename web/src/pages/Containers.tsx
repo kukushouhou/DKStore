@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Badge,
   Button,
@@ -30,21 +30,14 @@ import { useNavigate } from 'react-router'
 import { api, type AppRuntimeTree, type ContainerRuntimeStat } from '../api/client'
 import { useI18n } from '../i18n'
 
-const badgePalette = [
-  { bg: 'rgba(114, 46, 209, 0.14)', fg: '#722ed1' },
-  { bg: 'rgba(47, 107, 255, 0.14)', fg: '#2f6bff' },
-  { bg: 'rgba(19, 194, 194, 0.14)', fg: '#13c2c2' },
-  { bg: 'rgba(235, 47, 150, 0.14)', fg: '#eb2f96' },
-  { bg: 'rgba(250, 140, 22, 0.14)', fg: '#fa8c16' },
-  { bg: 'rgba(82, 196, 26, 0.14)', fg: '#52c41a' },
-]
+const TAG_COLORS = ['purple', 'blue', 'cyan', 'magenta', 'orange', 'green'] as const
 
-function pickBadgeStyle(name: string) {
+function pickTagColor(name: string) {
   let h = 0
   for (let i = 0; i < name.length; i++) {
     h = (h * 31 + name.charCodeAt(i)) | 0
   }
-  return badgePalette[Math.abs(h) % badgePalette.length]
+  return TAG_COLORS[Math.abs(h) % TAG_COLORS.length]
 }
 
 function formatMem(bytes: number): string {
@@ -65,6 +58,12 @@ export default function ContainersPage() {
   const [stateFilter, setStateFilter] = useState<'all' | 'running' | 'stopped'>('all')
   const [keyword, setKeyword] = useState('')
   const [collapsedKeys, setCollapsedKeys] = useState<Record<string, boolean>>({})
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
+
+  useEffect(() => {
+    const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 30000)
+    return () => clearInterval(id)
+  }, [])
 
   const hostsQuery = useQuery({
     queryKey: ['hosts', locale],
@@ -77,7 +76,7 @@ export default function ContainersPage() {
   })
 
   const hosts = hostsQuery.data?.items ?? []
-  const rawTrees = containersQuery.data?.items ?? []
+  const rawTrees = useMemo(() => containersQuery.data?.items ?? [], [containersQuery.data?.items])
 
   const counts = useMemo(() => {
     let all = 0
@@ -170,7 +169,6 @@ export default function ContainersPage() {
       if (cleaned) return cleaned
     }
     if (c.startedAt && c.startedAt > 0) {
-      const nowSec = Math.floor(Date.now() / 1000)
       const diff = Math.max(0, nowSec - c.startedAt)
       const days = Math.floor(diff / 86400)
       const hours = Math.floor((diff % 86400) / 3600)
@@ -192,7 +190,6 @@ export default function ContainersPage() {
   const formatProjectUptime = (app: AppRuntimeTree): string => {
     const runningList = app.containers.filter((c) => c.state === 'running')
     if (runningList.length === 0) return t.containers.stateStopped
-    // 取最早启动的运行中容器计算项目运行时长
     const withStarted = runningList.filter((c) => c.startedAt && c.startedAt > 0)
     if (withStarted.length > 0) {
       const oldest = withStarted.reduce((acc, cur) =>
@@ -209,17 +206,17 @@ export default function ContainersPage() {
         <Space size={6} wrap>
           <Badge status="success" text={t.containers.stateRunning} />
           {c.health === 'healthy' && (
-            <Tag color="success" style={{ margin: 0, fontSize: 11, lineHeight: '16px' }}>
+            <Tag color="success" style={{ margin: 0 }}>
               {t.containers.healthHealthy}
             </Tag>
           )}
           {c.health === 'unhealthy' && (
-            <Tag color="error" style={{ margin: 0, fontSize: 11, lineHeight: '16px' }}>
+            <Tag color="error" style={{ margin: 0 }}>
               {t.containers.healthUnhealthy}
             </Tag>
           )}
           {c.health === 'starting' && (
-            <Tag color="processing" style={{ margin: 0, fontSize: 11, lineHeight: '16px' }}>
+            <Tag color="processing" style={{ margin: 0 }}>
               {t.containers.healthStarting}
             </Tag>
           )}
@@ -235,28 +232,25 @@ export default function ContainersPage() {
     return <Badge status="default" text={t.containers.stateStopped} />
   }
 
-  const renderInitialBadge = (name: string) => {
-    const st = pickBadgeStyle(name)
-    return (
-      <span
-        style={{
-          width: 24,
-          height: 24,
-          borderRadius: 6,
-          background: st.bg,
-          color: st.fg,
-          display: 'inline-flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          fontWeight: 700,
-          fontSize: 11,
-          flexShrink: 0,
-        }}
-      >
-        {name.slice(0, 2).toUpperCase()}
-      </span>
-    )
-  }
+  const renderInitialBadge = (name: string) => (
+    <Tag
+      color={pickTagColor(name)}
+      style={{
+        margin: 0,
+        minWidth: 26,
+        height: 24,
+        paddingInline: 6,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontWeight: 600,
+        fontSize: token.fontSizeSM,
+        flexShrink: 0,
+      }}
+    >
+      {name.slice(0, 2).toUpperCase()}
+    </Tag>
+  )
 
   if (!hostsQuery.isPending && hosts.length === 0) {
     return (
@@ -346,23 +340,16 @@ export default function ContainersPage() {
           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={t.containers.empty} />
         </Card>
       ) : (
-        <div
-          style={{
-            border: `1px solid ${token.colorBorderSecondary}`,
-            borderRadius: 12,
-            overflow: 'hidden',
-            background: token.colorBgContainer,
-          }}
-        >
-          {/* 统一表头（5 列：8 / 4 / 4 / 4 / 4，对应 12 栅格的 4 / 2 / 2 / 2 / 2） */}
+        <Card styles={{ body: { padding: 0 } }} style={{ overflow: 'hidden' }}>
+          {/* 统一表头（5 列：8 / 4 / 4 / 4 / 4） */}
           <Row
             align="middle"
             style={{
-              padding: '10px 16px',
-              background: token.colorFillQuaternary,
+              padding: '12px 16px',
+              background: token.colorFillAlter,
               borderBottom: `1px solid ${token.colorBorderSecondary}`,
-              fontSize: 12,
-              fontWeight: 500,
+              fontSize: token.fontSizeSM,
+              fontWeight: 600,
               color: token.colorTextSecondary,
             }}
           >
@@ -402,13 +389,13 @@ export default function ContainersPage() {
                     borderBottom: isLastApp
                       ? 'none'
                       : `1px solid ${token.colorBorderSecondary}`,
-                    fontSize: 13,
+                    fontSize: token.fontSize,
                   }}
                 >
                   <Col xs={12} md={8}>
                     <Flex align="center" gap={10} style={{ paddingLeft: 22, minWidth: 0 }}>
                       {renderInitialBadge(app.name)}
-                      <Typography.Text strong ellipsis style={{ maxWidth: 180 }}>
+                      <Typography.Text strong ellipsis style={{ maxWidth: 200 }}>
                         {app.name}
                       </Typography.Text>
                       <Tag
@@ -421,11 +408,7 @@ export default function ContainersPage() {
                                 ? 'purple'
                                 : undefined
                         }
-                        style={{
-                          margin: 0,
-                          fontSize: 11,
-                          lineHeight: '18px',
-                        }}
+                        style={{ margin: 0 }}
                       >
                         {app.source === 'dsm_project'
                           ? t.home.tagDSM
@@ -441,12 +424,14 @@ export default function ContainersPage() {
                     {renderStateCell(c)}
                   </Col>
                   <Col xs={0} md={4}>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                       {formatUptime(c)}
                     </Typography.Text>
                   </Col>
                   <Col xs={6} md={4}>
-                    <Typography.Text style={{ fontSize: 12, fontFamily: 'monospace' }}>
+                    <Typography.Text
+                      style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
+                    >
                       {isRunning
                         ? `${c.cpuPercent.toFixed(1)}% · ${formatMem(c.memUsage)}`
                         : '-'}
@@ -457,8 +442,8 @@ export default function ContainersPage() {
                       <Typography.Text
                         type="secondary"
                         style={{
-                          fontSize: 12,
-                          fontFamily: 'monospace',
+                          fontSize: token.fontSizeSM,
+                          fontFamily: token.fontFamilyCode,
                           maxWidth: '100%',
                           display: 'inline-block',
                         }}
@@ -492,34 +477,26 @@ export default function ContainersPage() {
                   style={{
                     padding: '12px 16px',
                     cursor: 'pointer',
-                    background: collapsed ? 'transparent' : token.colorFillQuaternary,
+                    background: collapsed ? 'transparent' : token.colorFillAlter,
                     borderBottom: collapsed
                       ? 'none'
                       : `1px solid ${token.colorBorderSecondary}`,
-                    fontSize: 13,
+                    fontSize: token.fontSize,
                   }}
                 >
                   <Col xs={12} md={8}>
                     <Flex align="center" gap={10} style={{ minWidth: 0 }}>
                       <Typography.Text
                         type="secondary"
-                        style={{ fontSize: 11, width: 12, display: 'inline-block' }}
+                        style={{ fontSize: token.fontSizeSM, width: 12, display: 'inline-block' }}
                       >
                         {collapsed ? <RightOutlined /> : <DownOutlined />}
                       </Typography.Text>
                       {renderInitialBadge(app.name)}
-                      <Typography.Text strong ellipsis style={{ maxWidth: 180 }}>
+                      <Typography.Text strong ellipsis style={{ maxWidth: 200 }}>
                         {app.name}
                       </Typography.Text>
-                      <Tag
-                        color="blue"
-                        style={{
-                          margin: 0,
-                          fontSize: 11,
-                          lineHeight: '18px',
-                          border: 'none',
-                        }}
-                      >
+                      <Tag color="blue" style={{ margin: 0 }}>
                         {t.containers.projectTag.replace('{count}', String(app.totalCount))}
                       </Tag>
                     </Flex>
@@ -528,9 +505,9 @@ export default function ContainersPage() {
                     <Badge
                       status={allRunning ? 'success' : someRunning ? 'warning' : 'default'}
                       text={
-                        <span
+                        <Typography.Text
                           style={{
-                            fontSize: 12,
+                            fontSize: token.fontSizeSM,
                             fontWeight: 500,
                             color: allRunning
                               ? token.colorSuccess
@@ -542,24 +519,31 @@ export default function ContainersPage() {
                           {t.containers.runningBadge
                             .replace('{running}', String(app.runningCount))
                             .replace('{total}', String(app.totalCount))}
-                        </span>
+                        </Typography.Text>
                       }
                     />
                   </Col>
                   <Col xs={0} md={4}>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                    <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                       {formatProjectUptime(app)}
                     </Typography.Text>
                   </Col>
                   <Col xs={6} md={4}>
-                    <Typography.Text strong style={{ fontSize: 12, fontFamily: 'monospace' }}>
+                    <Typography.Text
+                      strong
+                      style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
+                    >
                       {app.runningCount > 0
                         ? `${app.cpuPercent.toFixed(1)}% · ${formatMem(app.memUsage)}`
                         : '-'}
                     </Typography.Text>
                   </Col>
                   <Col xs={0} md={4} style={{ textAlign: 'right' }}>
-                    <Typography.Text type="secondary" style={{ fontSize: 12 }} ellipsis>
+                    <Typography.Text
+                      type="secondary"
+                      style={{ fontSize: token.fontSizeSM }}
+                      ellipsis
+                    >
                       {app.hostName}
                     </Typography.Text>
                   </Col>
@@ -575,32 +559,30 @@ export default function ContainersPage() {
                         key={c.id || c.name}
                         align="middle"
                         style={{
-                          padding: '9px 16px',
-                          background: token.colorBgLayout,
+                          padding: '10px 16px',
+                          background: token.colorFillQuaternary,
                           borderBottom: isLastChild
                             ? 'none'
                             : `1px solid ${token.colorBorderSecondary}`,
-                          fontSize: 12,
+                          fontSize: token.fontSizeSM,
                         }}
                       >
                         <Col xs={12} md={8}>
                           <Flex align="center" gap={8} style={{ paddingLeft: 28, minWidth: 0 }}>
                             <Typography.Text
                               type="secondary"
-                              style={{ fontFamily: 'monospace', userSelect: 'none' }}
+                              style={{ fontFamily: token.fontFamilyCode, userSelect: 'none' }}
                             >
                               {isLastChild ? '└─' : '├─'}
                             </Typography.Text>
                             <Typography.Text
-                              style={{ fontWeight: 500, fontSize: 12 }}
+                              style={{ fontWeight: 500, fontSize: token.fontSizeSM }}
                               ellipsis={{ tooltip: c.name }}
                             >
                               {c.name}
                             </Typography.Text>
                             {c.service && c.service !== c.name && (
-                              <Tag style={{ margin: 0, fontSize: 11, lineHeight: '16px' }}>
-                                {c.service}
-                              </Tag>
+                              <Tag style={{ margin: 0 }}>{c.service}</Tag>
                             )}
                           </Flex>
                         </Col>
@@ -608,12 +590,14 @@ export default function ContainersPage() {
                           {renderStateCell(c)}
                         </Col>
                         <Col xs={0} md={4}>
-                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                          <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                             {formatUptime(c)}
                           </Typography.Text>
                         </Col>
                         <Col xs={6} md={4}>
-                          <Typography.Text style={{ fontSize: 12, fontFamily: 'monospace' }}>
+                          <Typography.Text
+                            style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
+                          >
                             {isRunning
                               ? `${c.cpuPercent.toFixed(1)}% · ${formatMem(c.memUsage)}`
                               : '-'}
@@ -624,8 +608,8 @@ export default function ContainersPage() {
                             <Typography.Text
                               type="secondary"
                               style={{
-                                fontSize: 12,
-                                fontFamily: 'monospace',
+                                fontSize: token.fontSizeSM,
+                                fontFamily: token.fontFamilyCode,
                                 maxWidth: '100%',
                                 display: 'inline-block',
                               }}
@@ -641,7 +625,7 @@ export default function ContainersPage() {
               </div>
             )
           })}
-        </div>
+        </Card>
       )}
     </Space>
   )

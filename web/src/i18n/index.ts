@@ -102,7 +102,7 @@ const zhCN = {
     ignoredThisVersion: '已忽略当前版本',
     ignoredForever: '已永久忽略',
     servicesCount: '{count} 个容器',
-    updateByNewConfigMenu: '按新版配置更新…',
+    updateByNewConfigMenu: '按新版配置更新',
     viewLogs: '查看日志',
   },
   queue: {
@@ -611,7 +611,7 @@ const enUS: Dict = {
     ignoredThisVersion: 'Ignored this version',
     ignoredForever: 'Ignored permanently',
     servicesCount: '{count} containers',
-    updateByNewConfigMenu: 'Update with New Config…',
+    updateByNewConfigMenu: 'Update with New Config',
     viewLogs: 'View Logs',
   },
   queue: {

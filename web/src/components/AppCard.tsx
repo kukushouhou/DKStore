@@ -1,5 +1,21 @@
 import { useMemo, useState } from 'react'
-import { Alert, Dropdown, Modal, Progress, Space, Typography, message, theme } from 'antd'
+import {
+  Alert,
+  Avatar,
+  Button,
+  Card,
+  Dropdown,
+  Flex,
+  Modal,
+  Progress,
+  Space,
+  Tag,
+  Tooltip,
+  Typography,
+  message,
+  theme,
+} from 'antd'
+import { ArrowRightOutlined, DownOutlined, SyncOutlined } from '@ant-design/icons'
 import {
   api,
   resolveIconUrl,
@@ -26,7 +42,7 @@ function formatBytes(bytes: number): string {
   return `${val.toFixed(idx > 1 ? 1 : 0)} ${units[idx]}`
 }
 
-const avatarColors = ['#2563eb', '#0d9488', '#7c3aed', '#e11d48', '#d97706', '#059669']
+const avatarColors = ['#1677ff', '#13c2c2', '#722ed1', '#eb2f96', '#fa8c16', '#52c41a']
 
 function pickColor(name: string): string {
   let h = 0
@@ -241,19 +257,9 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
     }
     if (!text) return null
     return (
-      <span
-        style={{
-          padding: '1px 6px',
-          borderRadius: 5,
-          background: 'rgba(245, 158, 11, 0.15)',
-          color: '#d97706',
-          fontSize: 11,
-          fontWeight: 500,
-          flexShrink: 0,
-        }}
-      >
+      <Tag variant="filled" color="warning" style={{ margin: 0, flexShrink: 0 }}>
         {text}
-      </span>
+      </Tag>
     )
   }
 
@@ -262,19 +268,9 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
     if (!isNoUpdate || !isIgnored) return null
     if (effIgnoreMode === 'prefix' && effIgnorePrefix) {
       return (
-        <span
-          style={{
-            padding: '1px 6px',
-            borderRadius: 5,
-            background: 'rgba(47, 107, 255, 0.14)',
-            color: token.colorPrimary,
-            fontSize: 11,
-            fontWeight: 500,
-            flexShrink: 0,
-          }}
-        >
+        <Tag variant="filled" color="processing" style={{ margin: 0, flexShrink: 0 }}>
           {t.home.badgeLockedPrefix.replace('{prefix}', effIgnorePrefix)}
-        </span>
+        </Tag>
       )
     }
     if (effIgnoreMode === 'this_version') {
@@ -283,35 +279,15 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
           ? t.home.badgeSkippedTag.replace('{tag}', effIgnoreTargetTag)
           : t.home.badgeSkippedGeneric
       return (
-        <span
-          style={{
-            padding: '1px 6px',
-            borderRadius: 5,
-            background: 'rgba(245, 158, 11, 0.15)',
-            color: '#d97706',
-            fontSize: 11,
-            fontWeight: 500,
-            flexShrink: 0,
-          }}
-        >
+        <Tag variant="filled" color="warning" style={{ margin: 0, flexShrink: 0 }}>
           {label}
-        </span>
+        </Tag>
       )
     }
     return (
-      <span
-        style={{
-          padding: '1px 6px',
-          borderRadius: 5,
-          background: token.colorFillSecondary,
-          color: token.colorTextSecondary,
-          fontSize: 11,
-          fontWeight: 500,
-          flexShrink: 0,
-        }}
-      >
+      <Tag variant="filled" style={{ margin: 0, flexShrink: 0 }}>
         {t.home.badgeMuted}
-      </span>
+      </Tag>
     )
   }
 
@@ -325,337 +301,233 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
     : app.services.map((s) => s.key)
 
   const updatingNow = activeJobsForApp.length > 0 || Boolean(updatingSvcKey)
+  const hasValidIcon = Boolean(iconSrc && !imgErr)
 
   return (
     <>
-      <div
+      <Card
+        size="small"
+        styles={{
+          body: {
+            padding: '16px 18px',
+            height: '100%',
+            display: 'flex',
+            flexDirection: 'column',
+            justifyContent: 'space-between',
+          },
+        }}
         style={{
           height: '100%',
-          boxSizing: 'border-box',
-          display: 'flex',
-          flexDirection: 'column',
-          justifyContent: 'space-between',
-          borderRadius: 14,
-          padding: 16,
-          background: token.colorBgContainer,
-          border:
-            isCaution && !isChecking
-              ? '1px solid rgba(245, 158, 11, 0.38)'
-              : `1px solid ${token.colorBorderSecondary}`,
-          transition: 'border-color 0.18s ease, box-shadow 0.18s ease',
+          borderColor: isCaution && !isChecking ? token.colorWarningBorder : undefined,
         }}
       >
         {/* 上半区：图标名称副标题 + 单行版本状态 */}
         <div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            {iconSrc && !imgErr ? (
-              <div
-                style={{
-                  width: 40,
-                  height: 40,
-                  borderRadius: 12,
-                  background: '#ffffff',
-                  border: `1px solid ${token.colorBorderSecondary}`,
-                  padding: 6,
-                  boxSizing: 'border-box',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  flexShrink: 0,
-                }}
-              >
-                <img
-                  src={iconSrc}
-                  alt={app.name}
-                  onError={() => setFailedIconSrc(iconSrc)}
-                  style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-                />
-              </div>
-            ) : (
-              <div
-                style={{
-                  width: 40,
-                  height: 40,
-                  borderRadius: 12,
-                  background: pickColor(app.name),
-                  color: '#ffffff',
-                  fontWeight: 600,
-                  fontSize: 14,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  flexShrink: 0,
-                  opacity: isChecking ? 0.85 : 1,
-                }}
-              >
-                {getInitials(app.name)}
-              </div>
-            )}
+          <Flex align="center" gap={12}>
+            <Avatar
+              shape="square"
+              size={42}
+              src={
+                hasValidIcon ? (
+                  <img
+                    src={iconSrc!}
+                    alt={app.name}
+                    onError={() => setFailedIconSrc(iconSrc ?? null)}
+                    style={{ objectFit: 'contain' }}
+                  />
+                ) : undefined
+              }
+              onError={() => {
+                setFailedIconSrc(iconSrc ?? null)
+                return false
+              }}
+              style={{
+                borderRadius: token.borderRadius,
+                backgroundColor: hasValidIcon ? token.colorBgContainer : pickColor(app.name),
+                border: hasValidIcon ? `1px solid ${token.colorBorderSecondary}` : 'none',
+                padding: hasValidIcon ? 5 : 0,
+                flexShrink: 0,
+                fontWeight: 600,
+                opacity: isChecking ? 0.85 : 1,
+              }}
+            >
+              {getInitials(app.name)}
+            </Avatar>
 
             <div style={{ minWidth: 0, flex: 1 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
-                <span
-                  title={app.name}
-                  style={{
-                    fontWeight: 600,
-                    fontSize: 14,
-                    color: token.colorText,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
+              <Flex align="center" gap={6} style={{ minWidth: 0 }}>
+                <Typography.Text strong ellipsis={{ tooltip: app.name }} style={{ fontSize: 15 }}>
                   {app.name}
-                </span>
+                </Typography.Text>
                 {!isChecking && renderRoleBadge()}
                 {!isChecking && renderIgnoredBadge()}
                 {app.hostStatus === 'offline' && (
-                  <span
-                    style={{
-                      padding: '1px 6px',
-                      borderRadius: 5,
-                      background: 'rgba(239, 68, 68, 0.14)',
-                      color: '#ef4444',
-                      fontSize: 11,
-                      flexShrink: 0,
-                    }}
-                  >
+                  <Tag variant="filled" color="error" style={{ margin: 0, flexShrink: 0 }}>
                     {t.home.tagOffline}
-                  </span>
+                  </Tag>
                 )}
-              </div>
+              </Flex>
 
-              <div
-                title={subtitle}
-                style={{
-                  fontSize: 12,
-                  color: token.colorTextSecondary,
-                  marginTop: 2,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                }}
+              <Typography.Text
+                type="secondary"
+                ellipsis={{ tooltip: subtitle }}
+                style={{ fontSize: token.fontSizeSM, display: 'block', marginTop: 2 }}
               >
                 {subtitle}
-              </div>
+              </Typography.Text>
             </div>
-          </div>
+          </Flex>
 
           {/* 中部单行版本区 */}
           <div style={{ marginTop: 14 }}>
             {isChecking ? (
-              <div
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  padding: '5px 12px',
-                  borderRadius: 8,
-                  background: token.colorFillQuaternary,
-                  border: `1px solid ${token.colorBorderSecondary}`,
-                  fontSize: 12,
-                  color: token.colorPrimary,
-                }}
+              <Tag
+                icon={<SyncOutlined spin />}
+                color="processing"
+                variant="filled"
+                style={{ margin: 0, padding: '3px 10px', fontSize: token.fontSizeSM }}
               >
-                <svg
-                  className="dkstore-spin"
-                  width="14"
-                  height="14"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  style={{ flexShrink: 0 }}
-                >
-                  <circle
-                    cx="12"
-                    cy="12"
-                    r="9"
-                    stroke="currentColor"
-                    strokeOpacity="0.25"
-                    strokeWidth="3"
-                  />
-                  <path
-                    d="M21 12a9 9 0 00-9-9"
-                    stroke="currentColor"
-                    strokeWidth="3"
-                    strokeLinecap="round"
-                  />
-                </svg>
-                <span>{t.home.checkingCard}</span>
-              </div>
+                {t.home.checkingCard}
+              </Tag>
             ) : isNoUpdate ? (
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 8,
-                  fontSize: 12,
-                }}
-              >
-                <span
+              <Flex align="center" justify="space-between" gap={8}>
+                <Tag
                   style={{
-                    padding: '4px 10px',
-                    borderRadius: 8,
-                    background: token.colorFillQuaternary,
-                    border: `1px solid ${token.colorBorderSecondary}`,
-                    fontFamily: 'monospace',
-                    color: token.colorTextSecondary,
+                    margin: 0,
+                    fontFamily: token.fontFamilyCode,
+                    fontSize: token.fontSizeSM,
+                    padding: '2px 8px',
+                    maxWidth: '65%',
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
                   }}
                 >
                   {curVer}
-                </span>
+                </Tag>
 
                 {!isIgnored ? (
                   app.source === 'vendor_managed' ? (
-                    <span style={{ color: token.colorTextSecondary, flexShrink: 0 }}>
+                    <Typography.Text
+                      type="secondary"
+                      style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}
+                    >
                       {t.home.tagVendor}
-                    </span>
+                    </Typography.Text>
                   ) : primaryService?.kind === 'check_failed' ? (
-                    <span style={{ color: '#d97706', fontWeight: 500, flexShrink: 0 }}>
+                    <Typography.Text
+                      type="warning"
+                      strong
+                      style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}
+                    >
                       {t.home.checkFailedStatus}
-                    </span>
+                    </Typography.Text>
                   ) : primaryService?.kind === 'uncomparable' ? (
-                    <span style={{ color: token.colorTextSecondary, flexShrink: 0 }}>
+                    <Typography.Text
+                      type="secondary"
+                      style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}
+                    >
                       {t.home.localImageStatus}
-                    </span>
+                    </Typography.Text>
                   ) : (
-                    <span style={{ color: '#10b981', fontWeight: 500, flexShrink: 0 }}>
+                    <Typography.Text
+                      type="success"
+                      strong
+                      style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}
+                    >
                       {t.home.upToDateStatus}
-                    </span>
+                    </Typography.Text>
                   )
                 ) : effIgnoreMode === 'prefix' && effIgnorePrefix ? (
-                  <span style={{ color: token.colorTextSecondary, flexShrink: 0 }}>
+                  <Typography.Text
+                    type="secondary"
+                    style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}
+                  >
                     {t.home.latestInPrefix.replace('{prefix}', effIgnorePrefix)}
-                  </span>
+                  </Typography.Text>
                 ) : (
-                  <span style={{ color: token.colorTextSecondary, flexShrink: 0 }}>
+                  <Typography.Text
+                    type="secondary"
+                    style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}
+                  >
                     {t.home.pausedReminderStatus}
-                  </span>
+                  </Typography.Text>
                 )}
-              </div>
+              </Flex>
             ) : (
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 8,
-                  fontSize: 12,
-                  fontFamily: 'monospace',
-                  flexWrap: 'wrap',
-                }}
-              >
-                <span
+              <Space size={6} wrap align="center">
+                <Tag
                   style={{
-                    padding: '4px 10px',
-                    borderRadius: 8,
-                    background: token.colorFillQuaternary,
-                    border: `1px solid ${token.colorBorderSecondary}`,
-                    color: token.colorTextSecondary,
+                    margin: 0,
+                    fontFamily: token.fontFamilyCode,
+                    fontSize: token.fontSizeSM,
+                    padding: '2px 8px',
                   }}
                 >
                   {curVer}
-                </span>
+                </Tag>
 
-                <span style={{ color: token.colorTextSecondary }}>→</span>
+                <ArrowRightOutlined style={{ fontSize: 11, color: token.colorTextTertiary }} />
 
-                <button
-                  type="button"
-                  title={t.home.pickOtherVersionTip}
-                  className="dkstore-ver-pill"
-                  onClick={() => {
-                    if (primaryService) {
-                      setPickerInitialTab('version')
-                      setPickerSvc(primaryService)
-                    }
-                  }}
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: 5,
-                    padding: '4px 10px',
-                    borderRadius: 8,
-                    fontFamily: 'monospace',
-                    fontSize: 12,
-                    fontWeight: 600,
-                    ...(isCaution
-                      ? {
-                          background: 'rgba(245, 158, 11, 0.12)',
-                          border: '1px solid rgba(245, 158, 11, 0.38)',
-                          color: '#d97706',
-                        }
-                      : {
-                          background: 'rgba(47, 107, 255, 0.10)',
-                          border: '1px solid rgba(47, 107, 255, 0.32)',
-                          color: token.colorPrimary,
-                        }),
-                  }}
-                >
-                  <span>{tgtVer}</span>
-                  <svg
-                    width="12"
-                    height="12"
-                    viewBox="0 0 20 20"
-                    fill="currentColor"
-                    style={{ opacity: 0.72 }}
+                <Tooltip title={t.home.pickOtherVersionTip}>
+                  <Button
+                    size="small"
+                    type={isCaution ? 'default' : 'primary'}
+                    ghost={!isCaution}
+                    onClick={() => {
+                      if (primaryService) {
+                        setPickerInitialTab('version')
+                        setPickerSvc(primaryService)
+                      }
+                    }}
+                    style={{
+                      fontFamily: token.fontFamilyCode,
+                      fontWeight: 600,
+                      ...(isCaution
+                        ? {
+                            color: token.colorWarningText,
+                            borderColor: token.colorWarningBorder,
+                            background: token.colorWarningBg,
+                          }
+                        : {}),
+                    }}
                   >
-                    <path
-                      fillRule="evenodd"
-                      d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
-                      clipRule="evenodd"
-                    />
-                  </svg>
-                </button>
-              </div>
+                    {tgtVer} <DownOutlined style={{ fontSize: 10 }} />
+                  </Button>
+                </Tooltip>
+              </Space>
             )}
           </div>
 
           {/* 活跃升级进度条 + 实时查看日志入口 */}
           {activeJobsForApp.map((job) => (
             <div key={job.id} style={{ marginTop: 10 }}>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                  gap: 6,
-                  fontSize: 11,
-                  color: token.colorTextSecondary,
-                }}
-              >
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <Flex justify="space-between" align="center" gap={6}>
+                <Typography.Text
+                  type="secondary"
+                  ellipsis
+                  style={{ fontSize: token.fontSizeSM, flex: 1, minWidth: 0 }}
+                >
                   {formatPhaseText(job)}
-                </span>
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                </Typography.Text>
+                <Space size={6} style={{ flexShrink: 0 }}>
                   {(job.progress?.totalLayers ?? 0) > 0 && (
-                    <span>
+                    <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                       {t.home.layerStat
                         .replace('{done}', String(job.progress?.completedLayers ?? 0))
                         .replace('{total}', String(job.progress?.totalLayers ?? 0))}
                       {(job.progress?.totalBytes ?? 0) > 0
                         ? ` (${formatBytes(job.progress?.downloadedBytes ?? 0)} / ${formatBytes(job.progress?.totalBytes ?? 0)})`
                         : ''}
-                    </span>
+                    </Typography.Text>
                   )}
-                  <button
-                    type="button"
+                  <Typography.Link
                     onClick={() => setActiveLogJobId(job.id)}
-                    style={{
-                      border: 'none',
-                      background: 'transparent',
-                      color: token.colorPrimary,
-                      fontSize: 11,
-                      fontWeight: 500,
-                      padding: 0,
-                      cursor: 'pointer',
-                    }}
+                    style={{ fontSize: token.fontSizeSM }}
                   >
                     {t.home.viewLogs}
-                  </button>
-                </span>
-              </div>
+                  </Typography.Link>
+                </Space>
+              </Flex>
               <Progress percent={job.progress?.percent ?? 0} size="small" status="active" />
             </div>
           ))}
@@ -665,249 +537,150 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
               key={job.id}
               type="error"
               showIcon
-              title={
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: 8,
-                    fontSize: 12,
-                  }}
+              action={
+                <Typography.Link
+                  onClick={() => setActiveLogJobId(job.id)}
+                  style={{ fontSize: token.fontSizeSM, whiteSpace: 'nowrap' }}
                 >
-                  <span style={{ minWidth: 0, wordBreak: 'break-word' }}>
-                    {t.home.updateFailed}
-                    {job.errorMsg || job.errorCode}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setActiveLogJobId(job.id)}
-                    style={{
-                      border: 'none',
-                      background: 'transparent',
-                      color: token.colorPrimary,
-                      fontSize: 11.5,
-                      fontWeight: 500,
-                      padding: 0,
-                      cursor: 'pointer',
-                      flexShrink: 0,
-                    }}
-                  >
-                    {t.home.viewLogs}
-                  </button>
-                </div>
+                  {t.home.viewLogs}
+                </Typography.Link>
               }
-              style={{ marginTop: 10, padding: '5px 10px' }}
+              title={
+                <Typography.Text style={{ fontSize: token.fontSizeSM, wordBreak: 'break-word' }}>
+                  {t.home.updateFailed}
+                  {job.errorMsg || job.errorCode}
+                </Typography.Text>
+              }
+              style={{ marginTop: 10, padding: '6px 10px' }}
             />
           ))}
         </div>
 
         {/* 底部对齐操作栏 */}
-        <div
+        <Flex
+          align="center"
+          justify="space-between"
+          gap={8}
           style={{
             marginTop: 14,
             paddingTop: 12,
-            borderTop: `1px solid ${token.colorBorderSecondary}`,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 8,
-            fontSize: 12,
+            borderTop: `1px solid ${token.colorSplit}`,
             opacity: isChecking ? 0.45 : 1,
             pointerEvents: isChecking ? 'none' : 'auto',
           }}
         >
           {/* 底栏左侧：更新说明/官方仓库 · 详情 */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
+          <Space
+            size={6}
+            align="center"
+            separator={<Typography.Text type="secondary">·</Typography.Text>}
+            style={{ minWidth: 0 }}
+          >
             {releaseUrl && (
-              <>
-                <a
-                  href={releaseUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  style={{
-                    color: token.colorPrimary,
-                    textDecoration: 'none',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {app.links.releases ? t.home.viewReleaseNotes : t.home.viewRepo}
-                </a>
-                <span style={{ color: token.colorBorder }}>·</span>
-              </>
+              <Typography.Link
+                href={releaseUrl}
+                target="_blank"
+                style={{ fontSize: token.fontSize, whiteSpace: 'nowrap' }}
+              >
+                {app.links.releases ? t.home.viewReleaseNotes : t.home.viewRepo}
+              </Typography.Link>
             )}
-            <button
-              type="button"
+            <Typography.Link
+              type="secondary"
               onClick={() => setDetailOpen(true)}
-              style={{
-                border: 'none',
-                background: 'transparent',
-                color: token.colorTextSecondary,
-                padding: 0,
-                fontSize: 12,
-                cursor: 'pointer',
-                whiteSpace: 'nowrap',
-              }}
+              style={{ fontSize: token.fontSize, whiteSpace: 'nowrap' }}
             >
               {t.home.detailsBtn}
-            </button>
-          </div>
+            </Typography.Link>
+          </Space>
 
           {/* 底栏右侧：按分组渲染操作按钮 */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-            {isNoUpdate ? (
-              <>
-                {app.source !== 'vendor_managed' &&
-                  primaryService &&
-                  primaryService.kind !== 'uncomparable' && (
-                  <button
-                    type="button"
+          {isNoUpdate ? (
+            <Space size={8} style={{ flexShrink: 0 }}>
+              {app.source !== 'vendor_managed' &&
+                primaryService &&
+                primaryService.kind !== 'uncomparable' && (
+                  <Button
+                    size="small"
                     onClick={() => {
                       setPickerInitialTab('version')
                       setPickerSvc(primaryService)
                     }}
-                    style={{
-                      padding: '4px 10px',
-                      borderRadius: 8,
-                      border: `1px solid ${token.colorBorder}`,
-                      background: token.colorFillQuaternary,
-                      color: token.colorText,
-                      fontSize: 12,
-                      cursor: 'pointer',
-                    }}
                   >
                     {t.home.switchVersion}
-                  </button>
+                  </Button>
                 )}
-                {isIgnored && (
-                  <button
-                    type="button"
-                    disabled={restoring}
-                    onClick={handleRestoreReminder}
-                    style={{
-                      padding: '4px 10px',
-                      borderRadius: 8,
-                      border: '1px solid rgba(47, 107, 255, 0.35)',
-                      background: 'rgba(47, 107, 255, 0.10)',
-                      color: token.colorPrimary,
-                      fontSize: 12,
-                      fontWeight: 500,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    {t.home.restoreReminder}
-                  </button>
-                )}
-              </>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  onClick={() => setIgnoreOpen(true)}
-                  style={{
-                    padding: '4px 10px',
-                    borderRadius: 8,
-                    border: `1px solid ${token.colorBorder}`,
-                    background: token.colorFillQuaternary,
-                    color: token.colorText,
-                    fontSize: 12,
-                    cursor: 'pointer',
-                  }}
+              {isIgnored && (
+                <Button
+                  size="small"
+                  type="primary"
+                  ghost
+                  loading={restoring}
+                  onClick={handleRestoreReminder}
                 >
-                  {t.home.ignore}
-                </button>
+                  {t.home.restoreReminder}
+                </Button>
+              )}
+            </Space>
+          ) : (
+            <Space size={8} style={{ flexShrink: 0 }}>
+              <Button size="small" onClick={() => setIgnoreOpen(true)}>
+                {t.home.ignore}
+              </Button>
 
-                {app.source === 'vendor_managed' ? (
-                  <span
-                    title={t.home.vendorReadonlyTip}
-                    style={{
-                      padding: '4px 8px',
-                      borderRadius: 8,
-                      background: token.colorFillSecondary,
-                      color: token.colorTextSecondary,
-                      fontSize: 11,
-                    }}
-                  >
+              {app.source === 'vendor_managed' ? (
+                <Tooltip title={t.home.vendorReadonlyTip}>
+                  <Tag variant="filled" style={{ margin: 0 }}>
                     {t.home.tagVendor}
-                  </span>
-                ) : (
-                  /* 统一组合主按钮 [ 更新 | ▾ ] */
-                  <div
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'stretch',
-                      borderRadius: 8,
-                      overflow: 'hidden',
-                      opacity: updatingNow ? 0.75 : 1,
+                  </Tag>
+                </Tooltip>
+              ) : (
+                /* 统一组合主按钮 [ 更新 | ▾ ] */
+                <Space.Compact size="small">
+                  <Button
+                    type="primary"
+                    loading={updatingNow}
+                    onClick={handleUpdateClick}
+                    style={
+                      isCaution
+                        ? { background: token.colorWarning, borderColor: token.colorWarning }
+                        : undefined
+                    }
+                  >
+                    {updatingNow ? t.home.updating : t.home.updateBtn}
+                  </Button>
+                  <Dropdown
+                    trigger={['click']}
+                    placement="bottomRight"
+                    disabled={updatingNow}
+                    menu={{
+                      items: [
+                        {
+                          key: 'by-config',
+                          label: t.home.updateByNewConfigMenu,
+                          onClick: handleUpdateByConfigClick,
+                        },
+                      ],
                     }}
                   >
-                    <button
-                      type="button"
+                    <Button
+                      type="primary"
                       disabled={updatingNow}
-                      onClick={handleUpdateClick}
-                      style={{
-                        padding: '4px 11px',
-                        border: 'none',
-                        background: isCaution ? '#f59e0b' : token.colorPrimary,
-                        color: '#ffffff',
-                        fontSize: 12,
-                        fontWeight: 500,
-                        cursor: updatingNow ? 'not-allowed' : 'pointer',
-                      }}
-                    >
-                      {updatingNow ? t.home.updating : t.home.updateBtn}
-                    </button>
-                    <span
-                      style={{
-                        width: 1,
-                        background: 'rgba(255, 255, 255, 0.28)',
-                      }}
+                      aria-label={t.home.updateByNewConfigMenu}
+                      icon={<DownOutlined />}
+                      style={
+                        isCaution
+                          ? { background: token.colorWarning, borderColor: token.colorWarning }
+                          : undefined
+                      }
                     />
-                    <Dropdown
-                      trigger={['click']}
-                      placement="bottomRight"
-                      disabled={updatingNow}
-                      menu={{
-                        items: [
-                          {
-                            key: 'by-config',
-                            label: t.home.updateByNewConfigMenu,
-                            onClick: handleUpdateByConfigClick,
-                          },
-                        ],
-                      }}
-                    >
-                      <button
-                        type="button"
-                        disabled={updatingNow}
-                        aria-label={t.home.updateByNewConfigMenu}
-                        style={{
-                          padding: '4px 7px',
-                          border: 'none',
-                          background: isCaution ? '#f59e0b' : token.colorPrimary,
-                          color: '#ffffff',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          cursor: updatingNow ? 'not-allowed' : 'pointer',
-                        }}
-                      >
-                        <svg width="11" height="11" viewBox="0 0 20 20" fill="currentColor">
-                          <path
-                            fillRule="evenodd"
-                            d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
-                            clipRule="evenodd"
-                          />
-                        </svg>
-                      </button>
-                    </Dropdown>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        </div>
-      </div>
+                  </Dropdown>
+                </Space.Compact>
+              )}
+            </Space>
+          )}
+        </Flex>
+      </Card>
 
       {/* 单容器谨慎更新确认弹窗 */}
       <Modal
@@ -919,14 +692,14 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
         onOk={() => cautionTargetSvc && triggerSingleServiceUpdate(cautionTargetSvc)}
         onCancel={() => setCautionTargetSvc(null)}
       >
-        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+        <Flex vertical gap="middle">
           <Alert
             type="warning"
             showIcon
             title={cautionTargetSvc?.reasonText || app.reasonText || t.home.cautionConfirmTitle}
           />
           <Typography.Text>{t.home.cautionConfirmDesc}</Typography.Text>
-        </Space>
+        </Flex>
       </Modal>
 
       {/* 双栏版本选择与按新版配置更新一体化弹窗 */}

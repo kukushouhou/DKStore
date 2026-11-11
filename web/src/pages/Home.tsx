@@ -1,5 +1,25 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Button, Card, Col, Empty, Input, Modal, Row, Segmented, Spin, message, theme } from 'antd'
+import {
+  Alert,
+  Badge,
+  Button,
+  Card,
+  Col,
+  Collapse,
+  Empty,
+  Flex,
+  Form,
+  Input,
+  Modal,
+  Row,
+  Segmented,
+  Space,
+  Spin,
+  Tag,
+  Typography,
+  message,
+  theme,
+} from 'antd'
 import { PlusOutlined, SyncOutlined } from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router'
@@ -31,8 +51,7 @@ export default function HomePage() {
 
   // Docker Hub 快捷登录弹窗状态
   const [hubModalOpen, setHubModalOpen] = useState(false)
-  const [hubUser, setHubUser] = useState('')
-  const [hubSecret, setHubSecret] = useState('')
+  const [hubForm] = Form.useForm<{ username: string; secret: string }>()
   const [hubSubmitting, setHubSubmitting] = useState(false)
 
   // 其他错误提示条展开状态
@@ -93,8 +112,9 @@ export default function HomePage() {
   }
 
   const handleSaveHubAndRecheck = async () => {
-    const username = hubUser.trim()
-    const secret = hubSecret.trim()
+    const raw = hubForm.getFieldsValue()
+    const username = (raw.username || '').trim()
+    const secret = (raw.secret || '').trim()
     if (!username || !secret) {
       message.warning(t.home.hubRequiredMsg)
       return
@@ -104,7 +124,7 @@ export default function HomePage() {
       await api.saveRegCred({ registry: 'docker.io', username, secret })
       qc.invalidateQueries({ queryKey: ['regCreds'] })
       setHubModalOpen(false)
-      setHubSecret('')
+      hubForm.setFieldValue('secret', '')
       message.success(t.home.hubSavedRechecking)
       const p = await api.triggerCheck(hostFilter || undefined, true)
       setLiveProgress(p)
@@ -177,7 +197,7 @@ export default function HomePage() {
     if (f.errorKind === 'auth_required') {
       return (
         <span>
-          <strong>{displayName}</strong>
+          <Typography.Text strong>{displayName}</Typography.Text>
           {hostPart}
           {t.home.failedAuthReason}
         </span>
@@ -185,7 +205,7 @@ export default function HomePage() {
     }
     return (
       <span>
-        <strong>{displayName}</strong>
+        <Typography.Text strong>{displayName}</Typography.Text>
         {hostPart}— {f.errorMsg}
       </span>
     )
@@ -194,22 +214,22 @@ export default function HomePage() {
   const renderGrid = (items: AppCardItem[], emptyText: string) => {
     if (items.length === 0) {
       return (
-        <div
+        <Card
+          size="small"
           style={{
-            borderRadius: 14,
-            border: `1px dashed ${token.colorBorderSecondary}`,
-            padding: '20px 16px',
+            borderStyle: 'dashed',
             textAlign: 'center',
-            fontSize: 12,
-            color: token.colorTextSecondary,
+            background: 'transparent',
           }}
         >
-          {isRunning ? t.home.checkingGroupEmpty : emptyText}
-        </div>
+          <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+            {isRunning ? t.home.checkingGroupEmpty : emptyText}
+          </Typography.Text>
+        </Card>
       )
     }
     return (
-      <Row gutter={[14, 14]} align="stretch">
+      <Row gutter={[16, 16]} align="stretch">
         {items.map((item) => (
           <Col
             key={`${item.group}-${item.key}`}
@@ -231,49 +251,6 @@ export default function HomePage() {
     )
   }
 
-  const renderGroupSection = (
-    title: string,
-    count: number,
-    badgeBg: string,
-    badgeFg: string,
-    expanded: boolean,
-    onToggle: () => void,
-    content: React.ReactNode,
-  ) => (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-      <div
-        onClick={onToggle}
-        style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: 8,
-          cursor: 'pointer',
-          userSelect: 'none',
-          alignSelf: 'flex-start',
-          paddingTop: 4,
-        }}
-      >
-        <span style={{ fontSize: 12, color: token.colorTextSecondary, width: 10 }}>
-          {expanded ? '▾' : '▸'}
-        </span>
-        <span style={{ fontWeight: 600, fontSize: 15, color: token.colorText }}>{title}</span>
-        <span
-          style={{
-            padding: '1px 8px',
-            borderRadius: 999,
-            background: badgeBg,
-            color: badgeFg,
-            fontSize: 12,
-            fontWeight: 600,
-          }}
-        >
-          {count}
-        </span>
-      </div>
-      {expanded && content}
-    </div>
-  )
-
   if (!overview.isPending && hosts.length === 0) {
     return (
       <Card style={{ textAlign: 'center', padding: '48px 16px' }}>
@@ -288,39 +265,84 @@ export default function HomePage() {
 
   const totalLoadedCards = normalList.length + cautionList.length + noUpdateList.length
   const isInitialScanning = isRunning && totalLoadedCards === 0
+  const showCautionGroup = cautionList.length > 0 || !isRunning
+
+  const activeGroupKeys: string[] = []
+  if (normalExpanded) activeGroupKeys.push('normal')
+  if (showCautionGroup && cautionExpanded) activeGroupKeys.push('caution')
+  if (noUpdateExpanded) activeGroupKeys.push('noUpdate')
+
+  const handleCollapseChange = (keys: string | string[]) => {
+    const keySet = new Set(Array.isArray(keys) ? keys : [keys])
+    setNormalExpanded(keySet.has('normal'))
+    if (showCautionGroup) {
+      setCautionToggled(keySet.has('caution'))
+    }
+    setNoUpdateExpanded(keySet.has('noUpdate'))
+  }
+
+  const collapseItems = [
+    {
+      key: 'normal',
+      label: (
+        <Space size={8} align="center">
+          <Typography.Text strong style={{ fontSize: token.fontSizeLG }}>
+            {t.home.groupNormal}
+          </Typography.Text>
+          <Badge count={normalList.length} showZero color={token.colorPrimary} />
+        </Space>
+      ),
+      children: renderGrid(normalList, t.home.emptyNormal),
+    },
+    ...(showCautionGroup
+      ? [
+          {
+            key: 'caution',
+            label: (
+              <Space size={8} align="center">
+                <Typography.Text strong style={{ fontSize: token.fontSizeLG }}>
+                  {t.home.groupCaution}
+                </Typography.Text>
+                <Badge count={cautionList.length} showZero color={token.colorWarning} />
+              </Space>
+            ),
+            children: renderGrid(cautionList, t.home.emptyCaution),
+          },
+        ]
+      : []),
+    {
+      key: 'noUpdate',
+      label: (
+        <Space size={8} align="center">
+          <Typography.Text strong style={{ fontSize: token.fontSizeLG }}>
+            {t.home.groupNoUpdate}
+          </Typography.Text>
+          <Badge
+            count={noUpdateList.length}
+            showZero
+            style={{
+              backgroundColor: token.colorFillSecondary,
+              color: token.colorText,
+              boxShadow: 'none',
+            }}
+          />
+        </Space>
+      ),
+      children: renderGrid(noUpdateList, t.home.emptyNoUpdate),
+    },
+  ]
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 18, width: '100%' }}>
+    <Space direction="vertical" size="middle" style={{ width: '100%' }}>
       {/* 顶栏标题与检查按钮 */}
-      <div
-        style={{
-          display: 'flex',
-          flexWrap: 'wrap',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 12,
-        }}
-      >
+      <Flex justify="space-between" align="center" wrap gap={12}>
         <div>
-          <h2
-            style={{
-              margin: 0,
-              fontSize: 20,
-              fontWeight: 700,
-              color: token.colorText,
-            }}
-          >
+          <Typography.Title level={3} style={{ margin: 0 }}>
             {t.home.title}
-          </h2>
-          <p
-            style={{
-              margin: '4px 0 0',
-              fontSize: 12,
-              color: token.colorTextSecondary,
-            }}
-          >
+          </Typography.Title>
+          <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
             {renderHeaderSubtitle()}
-          </p>
+          </Typography.Text>
         </div>
 
         <Button
@@ -328,13 +350,12 @@ export default function HomePage() {
           icon={<SyncOutlined spin={isRunning} />}
           disabled={isRunning}
           onClick={handleCheck}
-          style={{ borderRadius: 10, height: 36, paddingInline: 16, fontWeight: 500 }}
         >
           {isRunning ? t.home.checking : t.home.checkNow}
         </Button>
-      </div>
+      </Flex>
 
-      {/* 中小屏（< 1840px）全宽内嵌更新任务队列：紧接标题栏下方，0 横向挤压、0 遮挡卡片 */}
+      {/* 中小屏（< 1980px）全宽内嵌更新任务队列：紧接标题栏下方，0 横向挤压、0 遮挡卡片 */}
       {!isUltrawide && queueJobs.length > 0 && !queueCollapsed && (
         <UpdateQueuePanel mode="inline" />
       )}
@@ -355,222 +376,85 @@ export default function HomePage() {
 
       {/* 情况 A：Docker Hub 100 次/6小时未登录限流专用提醒条 */}
       {rateLimitedItems.length > 0 && (
-        <div
-          style={{
-            borderRadius: 12,
-            background: 'rgba(245, 158, 11, 0.10)',
-            border: '1px solid rgba(245, 158, 11, 0.38)',
-            padding: '12px 16px',
-            display: 'flex',
-            flexWrap: 'wrap',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 12,
-            fontSize: 12,
-          }}
-        >
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
-              <span
-                style={{
-                  padding: '2px 6px',
-                  borderRadius: 5,
-                  background: '#f59e0b',
-                  color: '#ffffff',
-                  fontWeight: 600,
-                  fontSize: 11,
-                }}
-              >
+        <Alert
+          type="warning"
+          showIcon
+          title={
+            <Space size={8} wrap>
+              <Tag color="warning" style={{ margin: 0 }}>
                 {t.home.rateLimitBadge}
-              </span>
-              <span style={{ fontWeight: 600, fontSize: 13, color: token.colorText }}>
-                {t.home.rateLimitTitle}
-              </span>
-            </div>
-            <div style={{ color: token.colorTextSecondary, marginTop: 4 }}>
-              {t.home.rateLimitDesc}
-            </div>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => setHubModalOpen(true)}
-            style={{
-              padding: '7px 14px',
-              borderRadius: 10,
-              border: 'none',
-              background: '#f59e0b',
-              color: '#ffffff',
-              fontSize: 12,
-              fontWeight: 600,
-              cursor: 'pointer',
-              flexShrink: 0,
-            }}
-          >
-            {t.home.rateLimitBtn}
-          </button>
-        </div>
+              </Tag>
+              <Typography.Text strong>{t.home.rateLimitTitle}</Typography.Text>
+            </Space>
+          }
+          description={t.home.rateLimitDesc}
+          action={
+            <Button type="primary" size="small" onClick={() => setHubModalOpen(true)}>
+              {t.home.rateLimitBtn}
+            </Button>
+          }
+        />
       )}
 
-      {/* 情况 B：私有仓库未授权或其他单行紧凑提示条 */}
+      {/* 情况 B：私有仓库未授权或其他异常提示条 */}
       {otherFailedItems.length > 0 && (
-        <div
-          style={{
-            borderRadius: 12,
-            background: token.colorBgContainer,
-            border: `1px solid ${token.colorBorderSecondary}`,
-            padding: '10px 14px',
-            fontSize: 12,
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 6,
-          }}
-        >
-          <div
-            style={{
-              display: 'flex',
-              flexWrap: 'wrap',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: 8,
-            }}
-          >
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 6,
-                minWidth: 0,
-                flex: 1,
-                flexWrap: 'wrap',
-              }}
-            >
-              <span style={{ color: '#f59e0b', fontWeight: 600, flexShrink: 0 }}>
-                ⚠{' '}
+        <Alert
+          type="warning"
+          showIcon
+          title={
+            <Space size={8} wrap>
+              <Typography.Text strong>
                 {otherFailedItems.length === 1
                   ? t.home.failedBannerSingle
                   : t.home.failedBannerMulti.replace('{count}', String(otherFailedItems.length))}
-              </span>
-              <span
-                style={{
-                  color: token.colorText,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                }}
-              >
-                {formatFailedItemLine(otherFailedItems[0])}
-              </span>
+              </Typography.Text>
+              <Typography.Text>{formatFailedItemLine(otherFailedItems[0])}</Typography.Text>
               {otherFailedItems.length > 1 && (
-                <button
-                  type="button"
+                <Button
+                  type="link"
+                  size="small"
+                  style={{ padding: 0, height: 'auto' }}
                   onClick={() => setFailedExpanded((v) => !v)}
-                  style={{
-                    border: 'none',
-                    background: 'transparent',
-                    color: token.colorPrimary,
-                    fontSize: 12,
-                    cursor: 'pointer',
-                    padding: '0 4px',
-                  }}
                 >
                   {failedExpanded ? t.home.failedCollapse : t.home.failedExpandAll}
-                </button>
+                </Button>
               )}
-            </div>
-
-            <button
-              type="button"
-              onClick={() => navigate('/settings')}
-              style={{
-                border: 'none',
-                background: 'transparent',
-                color: token.colorPrimary,
-                fontWeight: 500,
-                fontSize: 12,
-                cursor: 'pointer',
-                padding: 0,
-                flexShrink: 0,
-              }}
-            >
+            </Space>
+          }
+          description={
+            failedExpanded && otherFailedItems.length > 1 ? (
+              <Space direction="vertical" size={2} style={{ marginTop: 4 }}>
+                {otherFailedItems.slice(1).map((f) => (
+                  <Typography.Text key={f.serviceKey} style={{ fontSize: token.fontSizeSM }}>
+                    • {formatFailedItemLine(f)}
+                  </Typography.Text>
+                ))}
+              </Space>
+            ) : undefined
+          }
+          action={
+            <Button type="link" size="small" onClick={() => navigate('/settings')}>
               {t.home.failedGoCreds}
-            </button>
-          </div>
-
-          {failedExpanded && otherFailedItems.length > 1 && (
-            <ul
-              style={{
-                margin: '4px 0 0',
-                paddingLeft: 20,
-                color: token.colorTextSecondary,
-                lineHeight: 1.65,
-              }}
-            >
-              {otherFailedItems.slice(1).map((f) => (
-                <li key={f.serviceKey} style={{ color: token.colorText }}>
-                  {formatFailedItemLine(f)}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
+            </Button>
+          }
+        />
       )}
 
       {/* 首次尚无应用数据且正在扫描时，不渲染虚假 0 空结论 */}
       {isInitialScanning ? (
-        <div
-          style={{
-            borderRadius: 14,
-            background: token.colorBgContainer,
-            border: `1px solid ${token.colorBorderSecondary}`,
-            padding: '48px 16px',
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: 12,
-            color: token.colorTextSecondary,
-            fontSize: 13,
-          }}
-        >
-          <Spin />
-          <span>{renderHeaderSubtitle()}</span>
-        </div>
+        <Card style={{ textAlign: 'center', padding: '36px 16px' }}>
+          <Space direction="vertical" size="middle" align="center">
+            <Spin />
+            <Typography.Text type="secondary">{renderHeaderSubtitle()}</Typography.Text>
+          </Space>
+        </Card>
       ) : (
-        <>
-          {/* 分组 1：可更新 */}
-          {renderGroupSection(
-            t.home.groupNormal,
-            normalList.length,
-            token.colorPrimary,
-            '#ffffff',
-            normalExpanded,
-            () => setNormalExpanded((v) => !v),
-            renderGrid(normalList, t.home.emptyNormal),
-          )}
-
-          {/* 分组 2：需谨慎更新 */}
-          {(cautionList.length > 0 || !isRunning) &&
-            renderGroupSection(
-              t.home.groupCaution,
-              cautionList.length,
-              '#f59e0b',
-              '#ffffff',
-              cautionExpanded,
-              () => setCautionToggled(!cautionExpanded),
-              renderGrid(cautionList, t.home.emptyCaution),
-            )}
-
-          {/* 分组 3：无需更新（合并已是最新与已忽略/锁定） */}
-          {renderGroupSection(
-            t.home.groupNoUpdate,
-            noUpdateList.length,
-            token.colorFillSecondary,
-            token.colorText,
-            noUpdateExpanded,
-            () => setNoUpdateExpanded((v) => !v),
-            renderGrid(noUpdateList, t.home.emptyNoUpdate),
-          )}
-        </>
+        <Collapse
+          ghost
+          activeKey={activeGroupKeys}
+          onChange={handleCollapseChange}
+          items={collapseItems}
+        />
       )}
 
       {/* 一键登录 Docker Hub 账号弹窗 */}
@@ -585,38 +469,23 @@ export default function HomePage() {
         width={440}
         destroyOnHidden
       >
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))',
-            gap: 12,
-            paddingTop: 8,
-          }}
-        >
-          <div>
-            <div style={{ fontSize: 12, color: token.colorTextSecondary, marginBottom: 4 }}>
-              {t.home.hubUserLabel}
-            </div>
-            <Input
-              value={hubUser}
-              onChange={(e) => setHubUser(e.target.value)}
-              placeholder={t.home.hubUserPlaceholder}
-              autoFocus
-            />
-          </div>
-          <div>
-            <div style={{ fontSize: 12, color: token.colorTextSecondary, marginBottom: 4 }}>
-              {t.home.hubSecretLabel}
-            </div>
+        <Form form={hubForm} layout="vertical" style={{ paddingTop: 8 }}>
+          <Form.Item name="username" label={t.home.hubUserLabel} required>
+            <Input placeholder={t.home.hubUserPlaceholder} autoFocus />
+          </Form.Item>
+          <Form.Item
+            name="secret"
+            label={t.home.hubSecretLabel}
+            required
+            style={{ marginBottom: 0 }}
+          >
             <Input.Password
-              value={hubSecret}
-              onChange={(e) => setHubSecret(e.target.value)}
               placeholder={t.home.hubSecretPlaceholder}
               onPressEnter={handleSaveHubAndRecheck}
             />
-          </div>
-        </div>
+          </Form.Item>
+        </Form>
       </Modal>
-    </div>
+    </Space>
   )
 }

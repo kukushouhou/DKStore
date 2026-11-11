@@ -1,5 +1,20 @@
 import { useMemo, useState } from 'react'
-import { Alert, Button, Collapse, Drawer, Grid, Segmented, Typography, message, theme } from 'antd'
+import {
+  Alert,
+  Button,
+  Card,
+  Collapse,
+  Descriptions,
+  Drawer,
+  Flex,
+  Grid,
+  Segmented,
+  Space,
+  Tag,
+  Typography,
+  message,
+  theme,
+} from 'antd'
 import { CopyOutlined } from '@ant-design/icons'
 import type { AppCardItem, ServiceItem } from '../api/client'
 import { useI18n } from '../i18n'
@@ -82,11 +97,11 @@ export default function DetailDrawer({
       if (igMode === 'prefix') {
         const pfx = targetSvc.ignorePrefix || app.ignorePrefix || ''
         return (
-          <span>
+          <Typography.Text>
             {t.detail.ruleLockedPrefixBefore}
-            <code style={{ fontFamily: 'monospace', fontWeight: 600 }}>{pfx}</code>
+            <Typography.Text code>{pfx}</Typography.Text>
             {t.detail.ruleLockedPrefixAfter}
-          </span>
+          </Typography.Text>
         )
       }
       if (igMode === 'this_version') {
@@ -96,10 +111,10 @@ export default function DetailDrawer({
           targetSvc.targetVersion ||
           app.summaryTarget ||
           ''
-        return <span>{t.detail.ruleSkippedTag.replace('{tag}', skipped)}</span>
+        return <Typography.Text>{t.detail.ruleSkippedTag.replace('{tag}', skipped)}</Typography.Text>
       }
       if (igMode === 'forever') {
-        return <span>{t.detail.ruleMuted}</span>
+        return <Typography.Text>{t.detail.ruleMuted}</Typography.Text>
       }
     }
 
@@ -109,27 +124,17 @@ export default function DetailDrawer({
     )
     if (autoScope) {
       return (
-        <span>
+        <Typography.Text>
           {t.detail.ruleAutoFromTagBefore}
-          <code style={{ fontFamily: 'monospace', fontWeight: 600 }}>{autoScope.cleanPrefix}</code>
+          <Typography.Text code>{autoScope.cleanPrefix}</Typography.Text>
           {t.detail.ruleAutoFromTagMiddle}
-          {autoScope.rawTag}
+          <Typography.Text code>{autoScope.rawTag}</Typography.Text>
           {t.detail.ruleAutoFromTagAfter}
-        </span>
+        </Typography.Text>
       )
     }
 
-    return <span>{t.detail.ruleNormal}</span>
-  }
-
-  const rowStyle: React.CSSProperties = {
-    padding: '10px 14px',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-    fontSize: 12,
-    borderBottom: `1px solid ${token.colorBorderSecondary}`,
+    return <Typography.Text>{t.detail.ruleNormal}</Typography.Text>
   }
 
   const hasUpdate = svc
@@ -147,6 +152,90 @@ export default function DetailDrawer({
       : `docker pull ${svc.targetRef || svc.imageRef}`
     : ''
 
+  const descriptionItems = svc
+    ? [
+        {
+          key: 'device',
+          label: t.detail.deviceLabel,
+          children: <Typography.Text>{app.hostName}</Typography.Text>,
+        },
+        ...(totalCount > 1 || Boolean(projectName)
+          ? [
+              {
+                key: 'project',
+                label: t.detail.projectLabel,
+                children: (
+                  <Typography.Text>
+                    {t.detail.projectValue
+                      .replace('{name}', projectName || app.name)
+                      .replace('{count}', String(totalCount))}
+                  </Typography.Text>
+                ),
+              },
+            ]
+          : []),
+        {
+          key: 'image',
+          label: t.detail.currentImageLabel,
+          children: (
+            <Typography.Text
+              style={{
+                fontFamily: token.fontFamilyCode,
+                fontSize: token.fontSizeSM,
+                wordBreak: 'break-all',
+              }}
+            >
+              {svc.imageRef}
+            </Typography.Text>
+          ),
+        },
+        {
+          key: 'rule',
+          label: t.detail.ruleLabel,
+          children: renderRuleContent(svc),
+        },
+        {
+          key: 'runningVer',
+          label: t.detail.runningVerLabel,
+          children: (
+            <Space size={6} wrap>
+              <Tag style={{ margin: 0, fontFamily: token.fontFamilyCode }}>{curVer}</Tag>
+              {curTime && (
+                <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                  ({curTime})
+                </Typography.Text>
+              )}
+            </Space>
+          ),
+        },
+        {
+          key: 'availableVer',
+          label: t.detail.availableVerLabel,
+          children: hasUpdate ? (
+            <Space size={6} wrap>
+              <Tag
+                color={isCaution ? 'warning' : 'processing'}
+                style={{ margin: 0, fontFamily: token.fontFamilyCode, fontWeight: 600 }}
+              >
+                {tgtVer}
+              </Tag>
+              {tgtTime && (
+                <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                  ({tgtTime})
+                </Typography.Text>
+              )}
+            </Space>
+          ) : svc.kind === 'uncomparable' ? (
+            <Typography.Text type="secondary">{t.detail.uncomparable}</Typography.Text>
+          ) : (
+            <Tag color="success" variant="filled" style={{ margin: 0 }}>
+              {t.detail.upToDate}
+            </Tag>
+          ),
+        },
+      ]
+    : []
+
   return (
     <Drawer
       open={open}
@@ -158,30 +247,32 @@ export default function DetailDrawer({
       title={null}
       styles={{ body: { padding: 20 } }}
     >
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      <Flex vertical gap={16}>
         {/* 顶栏 */}
-        <div
+        <Flex
+          wrap="wrap"
+          align="center"
+          justify="space-between"
+          gap={12}
           style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: 12,
             paddingBottom: 12,
-            borderBottom: `1px solid ${token.colorBorderSecondary}`,
+            borderBottom: `1px solid ${token.colorSplit}`,
           }}
         >
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: token.colorText }}>
+            <Typography.Title level={5} style={{ margin: 0 }}>
               {t.detail.drawerTitle.replace('{name}', svc?.name || app.name)}
-            </div>
-            <div style={{ fontSize: 12, color: token.colorTextSecondary, marginTop: 2 }}>
+            </Typography.Title>
+            <Typography.Text
+              type="secondary"
+              style={{ fontSize: token.fontSizeSM, display: 'block', marginTop: 2 }}
+            >
               {subtitle}
-            </div>
+            </Typography.Text>
           </div>
 
           {app.source !== 'vendor_managed' && (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            <Space size={8} wrap>
               {(app.composeEditable || (totalCount <= 1 && app.source === 'standalone')) && (
                 <Button size="small" onClick={onOpenComposeYaml}>
                   {t.detail.updateByConfigBtn}
@@ -197,9 +288,9 @@ export default function DetailDrawer({
                   {t.detail.specifyVersionBtn}
                 </Button>
               )}
-            </div>
+            </Space>
           )}
-        </div>
+        </Flex>
 
         {/* 多容器卡片切换查看 */}
         {servicePool.length > 1 && (
@@ -211,117 +302,36 @@ export default function DetailDrawer({
           />
         )}
 
-        {/* 次要信息收纳表（对齐设计稿第 6 页） */}
+        {/* 次要信息收纳表 */}
         {svc && (
           <>
-            <div
-              style={{
-                borderRadius: 12,
-                background: token.colorFillQuaternary,
-                border: `1px solid ${token.colorBorderSecondary}`,
-                overflow: 'hidden',
-              }}
-            >
-              <div style={rowStyle}>
-                <span style={{ color: token.colorTextSecondary, flexShrink: 0 }}>
-                  {t.detail.deviceLabel}
-                </span>
-                <span style={{ color: token.colorText, textAlign: 'right' }}>{app.hostName}</span>
-              </div>
-
-              {(totalCount > 1 || Boolean(projectName)) && (
-                <div style={rowStyle}>
-                  <span style={{ color: token.colorTextSecondary, flexShrink: 0 }}>
-                    {t.detail.projectLabel}
-                  </span>
-                  <span style={{ color: token.colorText, textAlign: 'right' }}>
-                    {t.detail.projectValue
-                      .replace('{name}', projectName || app.name)
-                      .replace('{count}', String(totalCount))}
-                  </span>
-                </div>
-              )}
-
-              <div style={rowStyle}>
-                <span style={{ color: token.colorTextSecondary, flexShrink: 0 }}>
-                  {t.detail.currentImageLabel}
-                </span>
-                <span
-                  style={{
-                    fontFamily: 'monospace',
-                    color: token.colorText,
-                    textAlign: 'right',
-                    wordBreak: 'break-all',
-                  }}
-                >
-                  {svc.imageRef}
-                </span>
-              </div>
-
-              <div style={rowStyle}>
-                <span style={{ color: token.colorTextSecondary, flexShrink: 0 }}>
-                  {t.detail.ruleLabel}
-                </span>
-                <span style={{ color: token.colorText, textAlign: 'right' }}>
-                  {renderRuleContent(svc)}
-                </span>
-              </div>
-
-              <div style={rowStyle}>
-                <span style={{ color: token.colorTextSecondary, flexShrink: 0 }}>
-                  {t.detail.runningVerLabel}
-                </span>
-                <span
-                  style={{
-                    fontFamily: 'monospace',
-                    color: token.colorText,
-                    textAlign: 'right',
-                  }}
-                >
-                  {curVer}
-                  {curTime ? ` (${curTime})` : ''}
-                </span>
-              </div>
-
-              <div style={{ ...rowStyle, borderBottom: 'none' }}>
-                <span style={{ color: token.colorTextSecondary, flexShrink: 0 }}>
-                  {t.detail.availableVerLabel}
-                </span>
-                {hasUpdate ? (
-                  <span
-                    style={{
-                      fontFamily: 'monospace',
-                      fontWeight: 600,
-                      color: isCaution ? '#d97706' : token.colorPrimary,
-                      textAlign: 'right',
-                    }}
-                  >
-                    {tgtVer}
-                    {tgtTime ? ` (${tgtTime})` : ''}
-                  </span>
-                ) : svc.kind === 'uncomparable' ? (
-                  <span style={{ color: token.colorTextSecondary }}>{t.detail.uncomparable}</span>
-                ) : (
-                  <span style={{ color: '#10b981', fontWeight: 500 }}>{t.detail.upToDate}</span>
-                )}
-              </div>
-            </div>
+            <Descriptions
+              column={1}
+              bordered
+              size="small"
+              styles={{ label: { width: 112, whiteSpace: 'nowrap' } }}
+              items={descriptionItems}
+            />
 
             {svc.reasonText && (
               <Alert
                 type={isCaution ? 'warning' : 'info'}
                 showIcon
-                title={<span style={{ fontSize: 12 }}>{svc.reasonText}</span>}
+                title={<Typography.Text style={{ fontSize: token.fontSizeSM }}>{svc.reasonText}</Typography.Text>}
               />
             )}
             {svc.hint && (
-              <Alert type="info" showIcon title={<span style={{ fontSize: 12 }}>{svc.hint}</span>} />
+              <Alert
+                type="info"
+                showIcon
+                title={<Typography.Text style={{ fontSize: token.fontSizeSM }}>{svc.hint}</Typography.Text>}
+              />
             )}
             {svc.errorMsg && (
               <Alert
                 type="error"
                 showIcon
-                title={<span style={{ fontSize: 12 }}>{svc.errorMsg}</span>}
+                title={<Typography.Text style={{ fontSize: token.fontSizeSM }}>{svc.errorMsg}</Typography.Text>}
               />
             )}
 
@@ -333,17 +343,20 @@ export default function DetailDrawer({
                 {
                   key: 'tech',
                   label: (
-                    <span style={{ fontSize: 12, color: token.colorTextSecondary }}>
+                    <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                       {t.detail.techCollapseTitle}
-                    </span>
+                    </Typography.Text>
                   ),
                   children: (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 12 }}>
+                    <Flex vertical gap={10}>
                       {svc.repoDigest && (
                         <div>
-                          <div style={{ color: token.colorTextSecondary, marginBottom: 2 }}>
+                          <Typography.Text
+                            type="secondary"
+                            style={{ fontSize: token.fontSizeSM, display: 'block', marginBottom: 2 }}
+                          >
                             {t.detail.localDigest}
-                          </div>
+                          </Typography.Text>
                           <Typography.Text code style={{ fontSize: 11, wordBreak: 'break-all' }}>
                             {svc.repoDigest}
                           </Typography.Text>
@@ -351,9 +364,12 @@ export default function DetailDrawer({
                       )}
                       {svc.targetDigest && (
                         <div>
-                          <div style={{ color: token.colorTextSecondary, marginBottom: 2 }}>
+                          <Typography.Text
+                            type="secondary"
+                            style={{ fontSize: token.fontSizeSM, display: 'block', marginBottom: 2 }}
+                          >
                             {t.detail.targetDigest}
-                          </div>
+                          </Typography.Text>
                           <Typography.Text code style={{ fontSize: 11, wordBreak: 'break-all' }}>
                             {svc.targetDigest}
                           </Typography.Text>
@@ -361,32 +377,34 @@ export default function DetailDrawer({
                       )}
                       {(svc.targetTags?.length ?? 0) > 0 && (
                         <div>
-                          <div style={{ color: token.colorTextSecondary, marginBottom: 2 }}>
+                          <Typography.Text
+                            type="secondary"
+                            style={{ fontSize: token.fontSizeSM, display: 'block', marginBottom: 4 }}
+                          >
                             {t.detail.matchedTags}
-                          </div>
-                          <Typography.Text style={{ fontFamily: 'monospace', fontSize: 12 }}>
-                            {svc.targetTags?.join(', ')}
                           </Typography.Text>
+                          <Space size={[4, 4]} wrap>
+                            {svc.targetTags?.map((tg) => (
+                              <Tag
+                                key={tg}
+                                style={{ margin: 0, fontFamily: token.fontFamilyCode }}
+                              >
+                                {tg}
+                              </Tag>
+                            ))}
+                          </Space>
                         </div>
                       )}
                       {cliCmd && (
-                        <div
-                          style={{
-                            borderRadius: 10,
-                            padding: '10px 12px',
-                            background: token.colorFillQuaternary,
-                            border: `1px solid ${token.colorBorderSecondary}`,
-                          }}
+                        <Card
+                          size="small"
+                          styles={{ body: { padding: '10px 12px' } }}
+                          style={{ background: token.colorFillAlter }}
                         >
-                          <div
-                            style={{
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'space-between',
-                              marginBottom: 4,
-                            }}
-                          >
-                            <span style={{ fontWeight: 500 }}>{t.detail.howToUpdateTitle}</span>
+                          <Flex align="center" justify="space-between" style={{ marginBottom: 4 }}>
+                            <Typography.Text strong style={{ fontSize: token.fontSizeSM }}>
+                              {t.detail.howToUpdateTitle}
+                            </Typography.Text>
                             <Button
                               size="small"
                               type="text"
@@ -398,13 +416,13 @@ export default function DetailDrawer({
                             >
                               {t.detail.copyCmd}
                             </Button>
-                          </div>
+                          </Flex>
                           <Typography.Text code style={{ fontSize: 11, wordBreak: 'break-all' }}>
                             {cliCmd}
                           </Typography.Text>
-                        </div>
+                        </Card>
                       )}
-                    </div>
+                    </Flex>
                   ),
                 },
               ]}
@@ -412,10 +430,10 @@ export default function DetailDrawer({
           </>
         )}
 
-        <div style={{ display: 'flex', justifyContent: 'flex-end', paddingTop: 4 }}>
+        <Flex justify="flex-end" style={{ paddingTop: 4 }}>
           <Button onClick={onClose}>{t.detail.closeBtn}</Button>
-        </div>
-      </div>
+        </Flex>
+      </Flex>
     </Drawer>
   )
 }

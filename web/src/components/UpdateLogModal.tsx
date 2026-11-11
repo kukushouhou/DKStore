@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
-import { Button, Grid, Modal, message, theme } from 'antd'
-import { CopyOutlined } from '@ant-design/icons'
+import { Button, Flex, Grid, Modal, Space, Tag, Typography, message, theme } from 'antd'
+import {
+  CheckCircleOutlined,
+  CloseCircleOutlined,
+  CopyOutlined,
+  SyncOutlined,
+} from '@ant-design/icons'
 import '@xterm/xterm/css/xterm.css'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
@@ -42,6 +47,7 @@ function UpdateLogModalBody({ jobId, onClose }: { jobId: string; onClose: () => 
   const writtenOffsetRef = useRef<number>(0)
   const endedWithCRRef = useRef<boolean>(false)
   const rawFallbackRef = useRef<string>('')
+  const initialCodeFontRef = useRef<string>(token.fontFamilyCode)
 
   const job = liveJob ?? fetchedJob
   const status = job?.status ?? 'running'
@@ -76,7 +82,7 @@ function UpdateLogModalBody({ jobId, onClose }: { jobId: string; onClose: () => 
       cursorBlink: false,
       cursorInactiveStyle: 'none',
       convertEol: false,
-      fontFamily: 'JetBrains Mono, Consolas, "Courier New", monospace',
+      fontFamily: initialCodeFontRef.current,
       fontSize: 12.5,
       lineHeight: 1.38,
       scrollback: 6000,
@@ -212,6 +218,12 @@ function UpdateLogModalBody({ jobId, onClose }: { jobId: string; onClose: () => 
     }
   }, [jobId])
 
+  useEffect(() => {
+    if (termRef.current) {
+      termRef.current.options.fontFamily = token.fontFamilyCode
+    }
+  }, [token.fontFamilyCode])
+
   // 任务刚结束时补拉一次最终落盘日志（防止尾行在状态切换瞬间未走增量流）
   useEffect(() => {
     if (status !== 'succeeded' && status !== 'failed') return
@@ -300,120 +312,73 @@ function UpdateLogModalBody({ jobId, onClose }: { jobId: string; onClose: () => 
   const renderStatusBadge = () => {
     if (status === 'succeeded') {
       return (
-        <span
-          style={{
-            padding: '2px 9px',
-            borderRadius: 999,
-            background: 'rgba(16, 185, 129, 0.14)',
-            color: '#10b981',
-            fontSize: 12,
-            fontWeight: 600,
-          }}
-        >
+        <Tag color="success" icon={<CheckCircleOutlined />} style={{ margin: 0 }}>
           {t.logModal.badgeSucceeded}
-        </span>
+        </Tag>
       )
     }
     if (status === 'failed') {
       return (
-        <span
-          style={{
-            padding: '2px 9px',
-            borderRadius: 999,
-            background: 'rgba(239, 68, 68, 0.14)',
-            color: '#ef4444',
-            fontSize: 12,
-            fontWeight: 600,
-          }}
-        >
+        <Tag color="error" icon={<CloseCircleOutlined />} style={{ margin: 0 }}>
           {t.logModal.badgeFailed}
-        </span>
+        </Tag>
       )
     }
     return (
-      <span
-        style={{
-          display: 'inline-flex',
-          alignItems: 'center',
-          gap: 6,
-          padding: '2px 10px',
-          borderRadius: 999,
-          background: 'rgba(37, 99, 235, 0.12)',
-          color: token.colorPrimary,
-          fontSize: 12,
-          fontWeight: 600,
-        }}
-      >
-        <span
-          style={{
-            width: 7,
-            height: 7,
-            borderRadius: '50%',
-            background: token.colorPrimary,
-          }}
-        />
+      <Tag color="processing" icon={<SyncOutlined spin />} style={{ margin: 0 }}>
         {t.logModal.badgeRunning}
-      </span>
+      </Tag>
     )
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+    <Flex vertical gap={12}>
       {/* 顶栏 */}
-      <div
+      <Flex
+        wrap="wrap"
+        align="center"
+        justify="space-between"
+        gap={12}
         style={{
-          display: 'flex',
-          flexWrap: 'wrap',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 12,
           paddingBottom: 12,
-          borderBottom: `1px solid ${token.colorBorderSecondary}`,
+          borderBottom: `1px solid ${token.colorSplit}`,
         }}
       >
         <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontSize: 16, fontWeight: 700, color: token.colorText }}>
+          <Space size={8} wrap align="center">
+            <Typography.Title level={5} style={{ margin: 0 }}>
               {t.logModal.title.replace('{name}', displayName)}
-            </span>
+            </Typography.Title>
             {renderStatusBadge()}
-          </div>
+          </Space>
           {job && (
-            <div
-              style={{
-                fontSize: 12,
-                color: token.colorTextSecondary,
-                marginTop: 3,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
+            <Typography.Text
+              type="secondary"
+              ellipsis={{ tooltip: `${job.hostName} · ${job.targetImageRef}` }}
+              style={{ fontSize: token.fontSizeSM, display: 'block', marginTop: 4 }}
             >
-              {job.hostName} ·{' '}
-              <code style={{ fontFamily: 'monospace', color: token.colorText }}>
-                {job.targetImageRef}
-              </code>
-            </div>
+              {job.hostName} · <Typography.Text code>{job.targetImageRef}</Typography.Text>
+            </Typography.Text>
           )}
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+        <Space size={8} style={{ flexShrink: 0 }}>
           <Button size="small" icon={<CopyOutlined />} onClick={handleCopyLogs}>
             {t.logModal.copyBtn}
           </Button>
           <Button size="small" type="primary" onClick={onClose}>
             {t.logModal.closeBtn}
           </Button>
-        </div>
-      </div>
+        </Space>
+      </Flex>
 
       {/* 只读 xterm.js 终端视口 */}
       <div
         style={{
           position: 'relative',
-          borderRadius: 12,
+          borderRadius: token.borderRadiusLG,
           background: '#0a0a0a',
-          border: '1px solid #262626',
+          border: `1px solid ${token.colorBorderSecondary}`,
           padding: '10px 8px 10px 12px',
           overflow: 'hidden',
         }}
@@ -424,8 +389,8 @@ function UpdateLogModalBody({ jobId, onClose }: { jobId: string; onClose: () => 
               position: 'absolute',
               top: 14,
               left: 16,
-              fontSize: 12,
-              fontFamily: 'JetBrains Mono, Consolas, monospace',
+              fontSize: token.fontSizeSM,
+              fontFamily: token.fontFamilyCode,
               color: '#9ca3af',
               pointerEvents: 'none',
               zIndex: 2,
@@ -442,6 +407,6 @@ function UpdateLogModalBody({ jobId, onClose }: { jobId: string; onClose: () => 
           }}
         />
       </div>
-    </div>
+    </Flex>
   )
 }

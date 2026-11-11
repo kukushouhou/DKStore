@@ -1,5 +1,17 @@
-import { Tooltip, theme } from 'antd'
-import { SyncOutlined } from '@ant-design/icons'
+import {
+  Badge,
+  Button,
+  Card,
+  Flex,
+  Progress,
+  Segmented,
+  Space,
+  Tag,
+  Tooltip,
+  Typography,
+  theme,
+} from 'antd'
+import { CloseOutlined, SyncOutlined } from '@ant-design/icons'
 import { useQueryClient } from '@tanstack/react-query'
 import { api, type LayerProgress, type UpdateJobItem } from '../api/client'
 import { useOrderedQueueJobs } from '../hooks/useUpdateQueue'
@@ -112,148 +124,84 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
   const isCompactWidth = mode === 'docked' || mode === 'popover'
 
   return (
-    <div
+    <Card
+      size="small"
+      variant={mode === 'popover' ? 'borderless' : 'outlined'}
+      styles={{
+        body: {
+          padding: mode === 'popover' ? '4px 2px' : '12px 14px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 10,
+        },
+      }}
       style={{
-        borderRadius: 14,
-        background: token.colorBgContainer,
-        border:
-          mode === 'popover'
-            ? 'none'
-            : `1px solid ${anyRunning ? 'rgba(37, 99, 235, 0.32)' : token.colorBorderSecondary}`,
+        borderColor: mode !== 'popover' && anyRunning ? token.colorPrimaryBorder : undefined,
         boxShadow:
           mode === 'docked'
-            ? '0 10px 28px rgba(0, 0, 0, 0.08)'
-            : mode === 'inline'
-              ? '0 2px 10px rgba(0, 0, 0, 0.03)'
-              : 'none',
-        padding: mode === 'popover' ? '4px 2px' : '12px 14px',
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 10,
+            ? token.boxShadowSecondary
+            : mode === 'popover'
+              ? 'none'
+              : undefined,
+        background: mode === 'popover' ? 'transparent' : token.colorBgContainer,
       }}
     >
       {/* 队列标题栏 */}
-      <div
-        style={{
-          display: 'flex',
-          flexWrap: 'wrap',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: 8,
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 7, minWidth: 0 }}>
+      <Flex wrap="wrap" align="center" justify="space-between" gap={8}>
+        <Space size={8} align="center" style={{ minWidth: 0 }}>
           {anyRunning ? (
-            <SyncOutlined spin style={{ color: token.colorPrimary, fontSize: 13 }} />
+            <SyncOutlined spin style={{ color: token.colorPrimary }} />
           ) : (
-            <span
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: '50%',
-                background: jobs.some((j) => j.status === 'failed') ? '#ef4444' : '#10b981',
-                flexShrink: 0,
-              }}
-            />
+            <Badge status={jobs.some((j) => j.status === 'failed') ? 'error' : 'success'} />
           )}
-          <span style={{ fontWeight: 600, fontSize: 13, color: token.colorText }}>
+          <Typography.Text strong>
             {t.queue.panelTitle.replace('{count}', String(jobs.length))}
-          </span>
-        </div>
+          </Typography.Text>
+        </Space>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+        <Space size={6} align="center" style={{ flexShrink: 0 }}>
           {/* 整体 | 分层 切换（悬停满 2 秒弹出解释气泡） */}
-          <div
-            style={{
-              display: 'inline-flex',
-              padding: 2,
-              borderRadius: 7,
-              background: token.colorFillQuaternary,
-              border: `1px solid ${token.colorBorderSecondary}`,
-              gap: 1,
-            }}
-          >
-            <Tooltip mouseEnterDelay={2} title={t.queue.unifiedTip}>
-              <button
-                type="button"
-                onClick={() => handleSwitchStyle('unified')}
-                style={{
-                  padding: '2px 7px',
-                  borderRadius: 5,
-                  border: 'none',
-                  fontSize: 11,
-                  fontWeight: progressStyle === 'unified' ? 600 : 400,
-                  cursor: 'pointer',
-                  background: progressStyle === 'unified' ? token.colorPrimary : 'transparent',
-                  color: progressStyle === 'unified' ? '#ffffff' : token.colorTextSecondary,
-                  lineHeight: 1.45,
-                }}
-              >
-                {t.queue.modeUnified}
-              </button>
-            </Tooltip>
-            <Tooltip mouseEnterDelay={2} title={t.queue.layeredTip}>
-              <button
-                type="button"
-                onClick={() => handleSwitchStyle('layered')}
-                style={{
-                  padding: '2px 7px',
-                  borderRadius: 5,
-                  border: 'none',
-                  fontSize: 11,
-                  fontWeight: progressStyle === 'layered' ? 600 : 400,
-                  cursor: 'pointer',
-                  background: progressStyle === 'layered' ? token.colorPrimary : 'transparent',
-                  color: progressStyle === 'layered' ? '#ffffff' : token.colorTextSecondary,
-                  lineHeight: 1.45,
-                }}
-              >
-                {t.queue.modeLayered}
-              </button>
-            </Tooltip>
-          </div>
+          <Segmented
+            size="small"
+            value={progressStyle}
+            onChange={(val) => handleSwitchStyle(val as ProgressStyle)}
+            options={[
+              {
+                value: 'unified',
+                label: (
+                  <Tooltip mouseEnterDelay={2} title={t.queue.unifiedTip}>
+                    <span>{t.queue.modeUnified}</span>
+                  </Tooltip>
+                ),
+              },
+              {
+                value: 'layered',
+                label: (
+                  <Tooltip mouseEnterDelay={2} title={t.queue.layeredTip}>
+                    <span>{t.queue.modeLayered}</span>
+                  </Tooltip>
+                ),
+              },
+            ]}
+          />
 
           {hasFinished && (
-            <button
-              type="button"
-              onClick={clearFinishedQueueJobs}
-              style={{
-                padding: '2px 6px',
-                border: 'none',
-                background: 'transparent',
-                color: token.colorTextSecondary,
-                fontSize: 11,
-                cursor: 'pointer',
-              }}
-            >
+            <Button size="small" type="text" onClick={clearFinishedQueueJobs}>
               {t.queue.clearFinished}
-            </button>
+            </Button>
           )}
 
-          <button
-            type="button"
-            onClick={handleCollapse}
-            style={{
-              padding: '2px 6px',
-              borderRadius: 6,
-              border: 'none',
-              background: token.colorFillQuaternary,
-              color: token.colorTextSecondary,
-              fontSize: 11,
-              cursor: 'pointer',
-            }}
-          >
+          <Button size="small" onClick={handleCollapse}>
             {t.queue.collapseBtn}
-          </button>
-        </div>
-      </div>
+          </Button>
+        </Space>
+      </Flex>
 
       {/* 任务行列表 */}
-      <div
+      <Flex
+        vertical
+        gap={8}
         style={{
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 8,
           maxHeight: isCompactWidth ? 'calc(100vh - 180px)' : 320,
           overflowY: 'auto',
         }}
@@ -284,164 +232,109 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
             job.status === 'running' && (job.progress?.totalBytes ?? 0) > 0
 
           return (
-            <div
+            <Card
               key={job.id}
+              size="small"
+              styles={{
+                body: {
+                  padding: '10px 12px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 6,
+                },
+              }}
               style={{
-                padding: '9px 11px',
-                borderRadius: 10,
-                background: token.colorFillQuaternary,
-                border:
-                  job.status === 'failed'
-                    ? '1px solid rgba(239, 68, 68, 0.32)'
-                    : `1px solid ${token.colorBorderSecondary}`,
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 6,
+                background: token.colorFillAlter,
+                borderColor:
+                  job.status === 'failed' ? token.colorErrorBorder : token.colorBorderSecondary,
               }}
             >
               {/* 第一行：应用名 + 版本号变化 + 右侧独立「详情」按钮 */}
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 8,
-                }}
-              >
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 6,
-                    minWidth: 0,
-                    flex: 1,
-                    flexWrap: isCompactWidth ? 'nowrap' : 'wrap',
-                  }}
+              <Flex align="center" justify="space-between" gap={8}>
+                <Flex
+                  align="center"
+                  gap={6}
+                  wrap={isCompactWidth ? 'nowrap' : 'wrap'}
+                  style={{ minWidth: 0, flex: 1 }}
                 >
-                  <span
-                    title={`${displayName} (${job.hostName})`}
-                    style={{
-                      fontWeight: 600,
-                      fontSize: 12.5,
-                      color: token.colorText,
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                    }}
+                  <Typography.Text
+                    strong
+                    ellipsis={{ tooltip: `${displayName} (${job.hostName})` }}
+                    style={{ fontSize: token.fontSizeSM }}
                   >
                     {displayName}
-                  </span>
+                  </Typography.Text>
                   {(oldVer || tgtVer) && (
-                    <span
+                    <Tag
+                      variant="filled"
                       style={{
-                        fontFamily: 'monospace',
+                        margin: 0,
+                        fontFamily: token.fontFamilyCode,
                         fontSize: 11,
-                        color: token.colorTextSecondary,
+                        maxWidth: '100%',
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
                         flexShrink: isCompactWidth ? 1 : 0,
                       }}
                     >
                       {oldVer ? `${oldVer} → ${tgtVer}` : tgtVer}
-                    </span>
+                    </Tag>
                   )}
-                </div>
+                </Flex>
 
-                <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
-                  <button
-                    type="button"
-                    onClick={() => setActiveLogJobId(job.id)}
-                    style={{
-                      padding: '2px 8px',
-                      borderRadius: 6,
-                      border: `1px solid ${token.colorBorder}`,
-                      background: token.colorBgContainer,
-                      color: token.colorPrimary,
-                      fontSize: 11.5,
-                      fontWeight: 500,
-                      cursor: 'pointer',
-                      lineHeight: 1.4,
-                    }}
-                  >
+                <Space size={4} style={{ flexShrink: 0 }}>
+                  <Button size="small" onClick={() => setActiveLogJobId(job.id)}>
                     {t.queue.detailBtn}
-                  </button>
+                  </Button>
                   {isFinished && (
-                    <button
-                      type="button"
-                      title={t.queue.dismissTip}
-                      onClick={() => dismissQueueJob(job.id)}
-                      style={{
-                        padding: '2px 5px',
-                        border: 'none',
-                        background: 'transparent',
-                        color: token.colorTextSecondary,
-                        fontSize: 11,
-                        cursor: 'pointer',
-                        lineHeight: 1,
-                      }}
-                    >
-                      ✕
-                    </button>
+                    <Tooltip title={t.queue.dismissTip}>
+                      <Button
+                        size="small"
+                        type="text"
+                        icon={<CloseOutlined />}
+                        aria-label={t.queue.dismissTip}
+                        onClick={() => dismissQueueJob(job.id)}
+                      />
+                    </Tooltip>
                   )}
-                </div>
-              </div>
+                </Space>
+              </Flex>
 
               {/* 第二行：阶段文案 / 字节进度 / 失败摘要 */}
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  gap: 8,
-                  fontSize: 11,
-                }}
-              >
-                <span
-                  title={phaseText}
-                  style={{
-                    color:
-                      job.status === 'failed'
-                        ? '#ef4444'
-                        : job.status === 'succeeded'
-                          ? '#10b981'
-                          : token.colorTextSecondary,
-                    fontWeight: job.status === 'succeeded' || job.status === 'failed' ? 500 : 400,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                    minWidth: 0,
-                    flex: 1,
-                  }}
+              <Flex align="center" justify="space-between" gap={8}>
+                <Typography.Text
+                  type={
+                    job.status === 'failed'
+                      ? 'danger'
+                      : job.status === 'succeeded'
+                        ? 'success'
+                        : 'secondary'
+                  }
+                  strong={job.status === 'succeeded' || job.status === 'failed'}
+                  ellipsis={{ tooltip: phaseText }}
+                  style={{ fontSize: token.fontSizeSM, minWidth: 0, flex: 1 }}
                 >
                   {phaseText}
-                </span>
+                </Typography.Text>
                 {hasBytes && (
-                  <span
+                  <Typography.Text
+                    type="secondary"
                     style={{
-                      fontFamily: 'monospace',
-                      color: token.colorTextSecondary,
+                      fontFamily: token.fontFamilyCode,
+                      fontSize: 11,
                       flexShrink: 0,
                     }}
                   >
                     {formatBytes(job.progress.downloadedBytes)} /{' '}
                     {formatBytes(job.progress.totalBytes)}
-                  </span>
+                  </Typography.Text>
                 )}
-              </div>
+              </Flex>
 
               {/* 第三行：分层细条（默认）或 整体单条 */}
               {showLayered ? (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <div
-                    style={{
-                      flex: 1,
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: 3,
-                      minWidth: 0,
-                    }}
-                  >
+                <Flex align="center" gap={8}>
+                  <Flex align="center" gap={3} style={{ flex: 1, minWidth: 0 }}>
                     {layers.map((layer, idx) => {
                       const isDone =
                         job.status === 'succeeded' ||
@@ -452,10 +345,10 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
                         : Math.max(0, Math.min(100, layer.percent ?? 0))
                       const fillBg =
                         job.status === 'failed' && !isDone
-                          ? '#ef4444'
+                          ? token.colorError
                           : isDone
-                            ? '#10b981'
-                            : '#2563eb'
+                            ? token.colorSuccess
+                            : token.colorPrimary
                       const sizeInfo =
                         layer.total > 0
                           ? ` · ${formatBytes(layer.current)} / ${formatBytes(layer.total)} (${Math.round(pct)}%)`
@@ -472,7 +365,7 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
                               flex: 1,
                               minWidth: 3,
                               height: 8,
-                              borderRadius: 3,
+                              borderRadius: token.borderRadiusXS,
                               background: token.colorFillSecondary,
                               overflow: 'hidden',
                             }}
@@ -481,7 +374,7 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
                               style={{
                                 width: `${pct}%`,
                                 height: '100%',
-                                borderRadius: 3,
+                                borderRadius: token.borderRadiusXS,
                                 background: fillBg,
                                 transition: 'width 0.22s ease, background-color 0.2s ease',
                               }}
@@ -490,60 +383,38 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
                         </Tooltip>
                       )
                     })}
-                  </div>
-                  <span
+                  </Flex>
+                  <Typography.Text
+                    type="secondary"
                     style={{
-                      fontFamily: 'monospace',
+                      fontFamily: token.fontFamilyCode,
                       fontSize: 11,
-                      color: token.colorTextSecondary,
                       flexShrink: 0,
                     }}
                   >
                     {doneLayers}/{layers.length}
-                  </span>
-                </div>
+                  </Typography.Text>
+                </Flex>
               ) : (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <div
-                    style={{
-                      flex: 1,
-                      height: 8,
-                      borderRadius: 4,
-                      background: token.colorFillSecondary,
-                      overflow: 'hidden',
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: `${unifiedPct}%`,
-                        height: '100%',
-                        borderRadius: 4,
-                        background:
-                          job.status === 'failed'
-                            ? '#ef4444'
-                            : job.status === 'succeeded'
-                              ? '#10b981'
-                              : '#2563eb',
-                        transition: 'width 0.25s ease, background-color 0.2s ease',
-                      }}
-                    />
-                  </div>
-                  <span
-                    style={{
-                      fontFamily: 'monospace',
-                      fontSize: 11,
-                      color: token.colorTextSecondary,
-                      flexShrink: 0,
-                    }}
-                  >
-                    {Math.round(unifiedPct)}%
-                  </span>
-                </div>
+                <Progress
+                  size="small"
+                  percent={Math.round(unifiedPct)}
+                  status={
+                    job.status === 'failed'
+                      ? 'exception'
+                      : job.status === 'succeeded'
+                        ? 'success'
+                        : job.status === 'running'
+                          ? 'active'
+                          : 'normal'
+                  }
+                  style={{ margin: 0 }}
+                />
               )}
-            </div>
+            </Card>
           )
         })}
-      </div>
-    </div>
+      </Flex>
+    </Card>
   )
 }
