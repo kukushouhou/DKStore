@@ -93,17 +93,60 @@ function formatTagTime(ts?: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-function cleanInitialTag(svc: ServiceItem, explicit?: string): string {
-  if (explicit && explicit.trim()) return explicit.trim()
-  if (svc.rawTargetVersion && !svc.rawTargetVersion.includes(' ')) return svc.rawTargetVersion
-  if (svc.targetVersion && !svc.targetVersion.includes(' ')) return svc.targetVersion
-  if (svc.currentVersion && !svc.currentVersion.includes(' ')) return svc.currentVersion
-  const colonIdx = svc.imageRef.lastIndexOf(':')
-  const slashIdx = svc.imageRef.lastIndexOf('/')
+function stripDisplayHash(raw?: string): string {
+  if (!raw) return ''
+  return raw.trim().split(' (')[0].trim()
+}
+
+function extractTagFromRef(imageRef?: string): string {
+  if (!imageRef) return ''
+  const withoutDigest = imageRef.trim().split('@')[0]
+  const colonIdx = withoutDigest.lastIndexOf(':')
+  const slashIdx = withoutDigest.lastIndexOf('/')
   if (colonIdx > slashIdx) {
-    return svc.imageRef.slice(colonIdx + 1).split('@')[0]
+    return withoutDigest.slice(colonIdx + 1).trim()
   }
+  return ''
+}
+
+function cleanInitialTag(svc: ServiceItem, explicit?: string): string {
+  const expClean = stripDisplayHash(explicit)
+  if (expClean) return expClean
+  const targetRefTag = extractTagFromRef(svc.targetRef)
+  if (targetRefTag) return targetRefTag
+  if (svc.rawTargetVersion && !svc.rawTargetVersion.includes(' ')) {
+    return svc.rawTargetVersion.trim()
+  }
+  if (svc.targetVersion && !svc.targetVersion.includes(' ')) {
+    return svc.targetVersion.trim()
+  }
+  const curRefTag = extractTagFromRef(svc.imageRef)
+  if (curRefTag) return curRefTag
+  const curClean = stripDisplayHash(svc.currentVersion)
+  if (curClean) return curClean
   return 'latest'
+}
+
+function parseAnyNumericSegs(tag?: string): number[] {
+  if (!tag) return []
+  const clean = tag.trim().replace(/^v/i, '').split(/[-+_]/)[0]
+  if (!/^\d+(\.\d+)*$/.test(clean)) return []
+  const nums = clean.split('.').map((p) => Number(p))
+  if (nums.length === 1 && nums[0] > 1000) return []
+  return nums
+}
+
+function compareAnyNumericSegs(tagA?: string, tagB?: string): number | null {
+  const a = parseAnyNumericSegs(tagA)
+  const b = parseAnyNumericSegs(tagB)
+  if (a.length === 0 || b.length === 0) return null
+  const len = Math.max(a.length, b.length)
+  for (let i = 0; i < len; i++) {
+    const va = a[i] ?? 0
+    const vb = b[i] ?? 0
+    if (va !== vb) return va - vb
+  }
+  return 0
 }
 
 function isValidPortStr(val: string): boolean {
@@ -195,26 +238,55 @@ function VersionPickerModalBody({
 
   const [submittingConfig, setSubmittingConfig] = useState(false)
 
-  // 计算当前已知最高版本标签
+  const defaultTrackTag = useMemo(
+    () => extractTagFromRef(service.targetRef) || extractTagFromRef(service.imageRef) || 'latest',
+    [service.imageRef, service.targetRef],
+  )
+
+  // 计算当前作用域内已知最高版本标签
   const highestTag = useMemo(() => {
     if (highestApiTag) return highestApiTag
-    const pool = remoteTags.length > 0 ? remoteTags : localTags
-    const firstVer = pool.find((item) => item.tag !== 'latest')
-    if (firstVer) return firstVer.tag
     if (service.rawTargetVersion && !service.rawTargetVersion.includes(' ')) {
       return service.rawTargetVersion
     }
     if (service.targetVersion && !service.targetVersion.includes(' ')) {
       return service.targetVersion
     }
+    const pool = remoteTags.length > 0 ? remoteTags : localTags
+    const firstVer = pool.find((item) => item.tag !== 'latest')
+    if (firstVer) return firstVer.tag
     return pool[0]?.tag || ''
   }, [highestApiTag, localTags, remoteTags, service])
+
+  const checkIsAtOrAboveLatest = (
+    tag: string,
+    knownHighest: string,
+    pool: ServiceTagItem[],
+  ): boolean => {
+    if (!knownHighest || tag === knownHighest || tag === 'latest') return true
+    if (
+      tag === defaultTrackTag &&
+      (service.kind === 'digest_update' || service.kind === 'none')
+    ) {
+      return true
+    }
+    const tagEntry = pool.find((item) => item.tag === tag)
+    const hiEntry = pool.find((item) => item.tag === knownHighest)
+    if (tagEntry?.digest && hiEntry?.digest && tagEntry.digest === hiEntry.digest) {
+      return true
+    }
+    const cmp = compareAnyNumericSegs(tag, knownHighest)
+    if (cmp !== null && cmp >= 0) {
+      return true
+    }
+    return false
+  }
 
   const applyTagSelection = (tag: string, knownHighest: string) => {
     setSelectedTag(tag)
     setLockDepth(1)
-    const isLatest = !knownHighest || tag === knownHighest || tag === 'latest'
-    setPolicy(isLatest ? 'all' : 'skip_latest')
+    const atLatest = checkIsAtOrAboveLatest(tag, knownHighest, allCombinedTags)
+    setPolicy(atLatest ? 'all' : 'skip_latest')
   }
 
   useEffect(() => {
@@ -232,21 +304,16 @@ function VersionPickerModalBody({
         setLocalTags(items)
         const hi =
           res.highestTag ||
-          items.find((i) => i.tag !== 'latest')?.tag ||
           (service.rawTargetVersion && !service.rawTargetVersion.includes(' ')
             ? service.rawTargetVersion
-            : '')
-        setHighestApiTag(hi)
-        const pick =
-          initialSelectedTag ||
-          (service.targetVersion && !service.targetVersion.includes(' ')
-            ? service.targetVersion
             : '') ||
-          items[0]?.tag ||
-          initTag
-        const isLatest = !hi || pick === hi || pick === 'latest'
-        setSelectedTag(pick)
-        setPolicy(isLatest ? 'all' : 'skip_latest')
+          items.find((i) => i.tag !== 'latest')?.tag ||
+          ''
+        setHighestApiTag(hi)
+        // 严格保持当前推荐/配置的目标标签 initTag，绝不自动跌落到 items[0] 造成跨版本误降级
+        const atLatest = checkIsAtOrAboveLatest(initTag, hi, items)
+        setSelectedTag(initTag)
+        setPolicy(atLatest ? 'all' : 'skip_latest')
       } catch {
         if (!cancelled) {
           setLocalTags([])
@@ -259,6 +326,7 @@ function VersionPickerModalBody({
     return () => {
       cancelled = true
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [service, initialSelectedTag])
 
   // 加载单容器 YAML 配置（Case A）
@@ -360,11 +428,18 @@ function VersionPickerModalBody({
   const trimmedQuery = query.trim()
   const activePool = remoteSearched ? remoteTags : localTags
   const displayedTags = useMemo(() => {
-    const base = trimmedQuery
-      ? activePool.filter((item) => item.tag.toLowerCase().includes(trimmedQuery.toLowerCase()))
-      : localTags
-    return base.slice(0, 10)
-  }, [activePool, localTags, trimmedQuery])
+    if (trimmedQuery) {
+      return activePool
+        .filter((item) => item.tag.toLowerCase().includes(trimmedQuery.toLowerCase()))
+        .slice(0, 20)
+    }
+    const base = localTags.slice(0, 20)
+    const initTag = cleanInitialTag(service, initialSelectedTag)
+    if (initTag && !base.some((item) => item.tag === initTag)) {
+      return [{ tag: initTag, updatedAt: service.targetUpdatedAt || service.currentUpdatedAt }, ...base].slice(0, 20)
+    }
+    return base
+  }, [activePool, initialSelectedTag, localTags, service, trimmedQuery])
 
   const allCombinedTags = useMemo(() => {
     const seen = new Set<string>()
@@ -378,7 +453,7 @@ function VersionPickerModalBody({
     return merged
   }, [localTags, remoteTags])
 
-  const isLatest = !highestTag || selectedTag === highestTag || selectedTag === 'latest'
+  const isLatest = checkIsAtOrAboveLatest(selectedTag, highestTag, allCombinedTags)
   const numericSegs = useMemo(() => parseNumericSegs(selectedTag), [selectedTag])
   const safeLockDepth = Math.min(Math.max(1, lockDepth), Math.max(1, numericSegs.length - 1))
   const lockedPrefix = numericSegs.length >= 2 ? numericSegs.slice(0, safeLockDepth).join('.') : ''
@@ -390,15 +465,12 @@ function VersionPickerModalBody({
       return highestTag
     }
     if (policy === 'prefix' && lockedPrefix) {
-      const selectedIdx = allCombinedTags.findIndex((r) => r.tag === selectedTag)
-      const hit = allCombinedTags.find((r, idx) => {
+      const hit = allCombinedTags.find((r) => {
         if (r.tag === selectedTag) return false
         const clean = r.tag.replace(/^v/i, '')
         const matchesPrefix = clean === lockedPrefix || clean.startsWith(`${lockedPrefix}.`)
         if (!matchesPrefix) return false
-        const cmp = compareNumericSegs(r.tag, selectedTag)
-        if (cmp !== 0) return cmp > 0
-        return selectedIdx >= 0 && idx < selectedIdx
+        return compareNumericSegs(r.tag, selectedTag) > 0
       })
       if (hit) return hit.tag
     }

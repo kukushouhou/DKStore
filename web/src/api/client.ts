@@ -282,6 +282,7 @@ export interface OverviewResponse {
 export interface ServiceTagItem {
   tag: string
   updatedAt?: number
+  digest?: string
 }
 
 export interface ServiceTagsResponse {

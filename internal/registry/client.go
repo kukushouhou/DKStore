@@ -264,8 +264,11 @@ func (c *Client) CheckManifestEx(ctx context.Context, ref version.ParsedRef, opt
 // FetchRecentTags 按实施文档 §5.4 的有限策略获取候选标签列表（含可用 Digest 与更新时间）。
 // Docker Hub 最多拉取 maxPages（默认 3，每页 100）按更新时间倒序的标签。
 func (c *Client) FetchRecentTags(ctx context.Context, ref version.ParsedRef, maxPages int, bypassCache bool) ([]TagDigestEntry, error) {
-	if maxPages <= 0 || maxPages > 3 {
+	if maxPages <= 0 {
 		maxPages = 3
+	}
+	if maxPages > 5 {
+		maxPages = 5
 	}
 	cacheKey := fmt.Sprintf("tags:%s/%s", ref.Registry, ref.Repository)
 	if !bypassCache {
@@ -295,70 +298,503 @@ func (c *Client) FetchRecentTags(ctx context.Context, ref version.ParsedRef, max
 	return entries, nil
 }
 
-// SearchTags 支持弹窗内本地即时筛选（remote=false 或 query=""）与按需远端检索（remote=true && query!=""），
-// 返回最多 20 条匹配标签与当前仓库最高可用版本标签 highestTag（附录 D.3）。
+func mergeUniqueTagEntries(groups ...[]TagDigestEntry) []TagDigestEntry {
+	total := 0
+	for _, g := range groups {
+		total += len(g)
+	}
+	seen := make(map[string]int, total)
+	out := make([]TagDigestEntry, 0, total)
+	for _, g := range groups {
+		for _, e := range g {
+			if e.Name == "" {
+				continue
+			}
+			if idx, exists := seen[e.Name]; exists {
+				if out[idx].RepoDigest == "" && e.RepoDigest != "" {
+					out[idx].RepoDigest = e.RepoDigest
+				}
+				if out[idx].UpdatedAt == 0 && e.UpdatedAt > 0 {
+					out[idx].UpdatedAt = e.UpdatedAt
+				}
+				continue
+			}
+			seen[e.Name] = len(out)
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// SearchTags 支持弹窗内版本展示（query=""）与按需检索（query!=""），
+// 默认按「当前标签系列优先 + 语义化版本号从高到低 + 同变体过滤」输出最多 20 条干净版本，并返回作用域内最高版本标签 highestTag。
 func (c *Client) SearchTags(ctx context.Context, ref version.ParsedRef, query string, remote bool) ([]TagDigestEntry, string, error) {
 	q := strings.TrimSpace(query)
 	qLower := strings.ToLower(q)
 
-	recent, err := c.FetchRecentTags(ctx, ref, 3, false)
+	recent, err := c.FetchRecentTags(ctx, ref, 5, false)
 	if err != nil && (!remote || q == "" || ref.Registry != "docker.io") {
 		return nil, "", err
 	}
 
 	combined := recent
-	if remote && q != "" {
-		if ref.Registry == "docker.io" {
-			remoteHits, rErr := c.searchDockerHubTagsByName(ctx, ref.Repository, q)
+	curTag := version.ParseTag(ref.Tag)
+	scopePrefix := computeServiceScopePrefix(ref)
+
+	if ref.Registry == "docker.io" {
+		if remote && q != "" {
+			remoteHits, rErr := c.searchDockerHubTagsByNameWithSize(ctx, ref.Repository, q, 50)
 			if rErr != nil && len(recent) == 0 {
 				return nil, "", rErr
 			}
 			if len(remoteHits) > 0 {
-				seen := make(map[string]bool, len(remoteHits)+len(recent))
-				merged := make([]TagDigestEntry, 0, len(remoteHits)+len(recent))
-				for _, e := range remoteHits {
-					if e.Name != "" && !seen[e.Name] {
-						seen[e.Name] = true
-						merged = append(merged, e)
-					}
-				}
-				for _, e := range recent {
-					if e.Name != "" && !seen[e.Name] {
-						seen[e.Name] = true
-						merged = append(merged, e)
-					}
-				}
-				combined = merged
+				combined = mergeUniqueTagEntries(remoteHits, combined)
 			}
-		} else if len(combined) == 0 {
-			list, lErr := c.fetchOCITagsList(ctx, ref.Registry, ref.Repository, 5)
-			if lErr != nil {
-				return nil, "", lErr
+		} else if q == "" && curTag.Scheme != version.SchemeUnknown {
+			// 对 mysql:8.4 / postgres:17 / registry:2 等多变体或长周期大仓库，补充拉取本系列标签缓存，防止正式版本被海量变体挤出前几页
+			seriesQuery := scopePrefix
+			if seriesQuery == "" {
+				seriesQuery = strconv.Itoa(curTag.Major)
 			}
-			combined = list
+			if curTag.Precision == 1 {
+				seriesQuery = curTag.CoreVersion() + "."
+			}
+			if seriesQuery != "" {
+				if seriesHits, sErr := c.fetchCachedHubTagsByName(ctx, ref.Repository, seriesQuery, 100); sErr == nil && len(seriesHits) > 0 {
+					combined = mergeUniqueTagEntries(combined, seriesHits)
+				}
+			}
+			if ref.Tag != "" && !containsTagEntry(combined, ref.Tag) {
+				if single, tErr := c.fetchCachedHubSingleTagEntry(ctx, ref.Repository, ref.Tag); tErr == nil && single.Name != "" && single.UpdatedAt > 0 {
+					combined = mergeUniqueTagEntries([]TagDigestEntry{single}, combined)
+				}
+			}
 		}
+	} else if remote && q != "" && len(combined) == 0 {
+		list, lErr := c.fetchOCITagsList(ctx, ref.Registry, ref.Repository, 5)
+		if lErr != nil {
+			return nil, "", lErr
+		}
+		combined = list
 	}
 
-	highest := pickHighestRepoTag(recent)
-	if highest == "" {
-		highest = pickHighestRepoTag(combined)
+	cleanedDefault := buildCleanDefaultTags(combined, ref, scopePrefix)
+	highest := pickScopedHighestTag(cleanedDefault, combined, ref, scopePrefix)
+
+	if qLower != "" {
+		matched := make([]TagDigestEntry, 0, len(combined))
+		for _, e := range combined {
+			if e.Name != "" && strings.Contains(strings.ToLower(e.Name), qLower) {
+				matched = append(matched, e)
+			}
+		}
+		sortSearchedTags(matched, qLower)
+		if len(matched) > 20 {
+			matched = matched[:20]
+		}
+		return matched, highest, nil
 	}
 
-	ordered := orderTagsForDisplay(combined, ref.Registry == "docker.io")
-	out := make([]TagDigestEntry, 0, 20)
-	for _, e := range ordered {
-		if e.Name == "" {
+	if len(cleanedDefault) > 20 {
+		cleanedDefault = cleanedDefault[:20]
+	}
+	return cleanedDefault, highest, nil
+}
+
+func containsTagEntry(entries []TagDigestEntry, name string) bool {
+	for _, e := range entries {
+		if e.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func computeServiceScopePrefix(ref version.ParsedRef) string {
+	curTag := version.ParseTag(ref.Tag)
+	if curTag.Scheme == version.SchemeUnknown {
+		return ""
+	}
+	if curTag.Precision == 1 || curTag.Precision == 2 {
+		return curTag.CoreVersion()
+	}
+	if dbRule, _ := rules.Default().MatchDatabase(ref.Registry, ref.Repository); dbRule != nil {
+		if dbRule.Series == "minor" && curTag.Precision >= 2 {
+			return fmt.Sprintf("%d.%d", curTag.Major, curTag.Minor)
+		}
+		return strconv.Itoa(curTag.Major)
+	}
+	return ""
+}
+
+func classifyTagVariant(variant string) (flavor string, isArchOrWin bool) {
+	v := strings.TrimSpace(strings.ToLower(variant))
+	if v == "" || v == "ls" {
+		return "", false
+	}
+	tokens := strings.FieldsFunc(v, func(r rune) bool {
+		return r == '-' || r == '_'
+	})
+	flavorSet := make(map[string]bool)
+	for _, tok := range tokens {
+		if tok == "" {
 			continue
 		}
-		if qLower != "" && !strings.Contains(strings.ToLower(e.Name), qLower) {
-			continue
+		switch {
+		case tok == "amd64" || tok == "x86_64" || tok == "x64" ||
+			tok == "arm64" || tok == "arm64v8" || tok == "aarch64" ||
+			tok == "arm" || tok == "armv6" || tok == "armv7" || tok == "arm32v7" || tok == "arm32v6" || tok == "armhf" ||
+			tok == "386" || tok == "i386" || tok == "ppc64le" || tok == "s390x" || tok == "riscv64" || tok == "mips64le" || tok == "loong64" ||
+			strings.HasPrefix(tok, "windowsservercore") || strings.HasPrefix(tok, "nanoserver") ||
+			strings.HasPrefix(tok, "ltsc20") || tok == "windows" || tok == "win":
+			isArchOrWin = true
+		case strings.HasPrefix(tok, "alpine"):
+			flavorSet["alpine"] = true
+		case strings.HasPrefix(tok, "slim"):
+			flavorSet["slim"] = true
+		case tok == "bookworm" || tok == "bullseye" || tok == "buster" || tok == "trixie" || tok == "stretch" || tok == "jessie" || strings.HasPrefix(tok, "debian"):
+			flavorSet["debian"] = true
+		case tok == "noble" || tok == "jammy" || tok == "focal" || tok == "bionic" || strings.HasPrefix(tok, "ubuntu"):
+			flavorSet["ubuntu"] = true
+		case strings.HasPrefix(tok, "oracle"):
+			flavorSet["oracle"] = true
+		case strings.HasPrefix(tok, "ubi") || strings.HasPrefix(tok, "centos") || strings.HasPrefix(tok, "rocky") || strings.HasPrefix(tok, "alma") || strings.HasPrefix(tok, "fedora"):
+			flavorSet["rhel"] = true
+		case strings.HasPrefix(tok, "openssl"):
+			flavorSet["openssl"] = true
+		case strings.HasPrefix(tok, "distroless"):
+			flavorSet["distroless"] = true
+		case strings.HasPrefix(tok, "busybox"):
+			flavorSet["busybox"] = true
+		case strings.HasPrefix(tok, "fips"):
+			flavorSet["fips"] = true
+		case strings.HasPrefix(tok, "jmx"):
+			flavorSet["jmx"] = true
+		case strings.HasPrefix(tok, "management"):
+			flavorSet["management"] = true
 		}
-		out = append(out, e)
-		if len(out) >= 20 {
+	}
+	if len(flavorSet) == 0 {
+		return "", isArchOrWin
+	}
+	flavors := make([]string, 0, len(flavorSet))
+	for k := range flavorSet {
+		flavors = append(flavors, k)
+	}
+	sort.Strings(flavors)
+	return strings.Join(flavors, "+"), isArchOrWin
+}
+
+func buildCleanDefaultTags(entries []TagDigestEntry, ref version.ParsedRef, scopePrefix string) []TagDigestEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	curTagName := strings.TrimSpace(ref.Tag)
+	curParsed := version.ParseTag(curTagName)
+	curFlavor, _ := classifyTagVariant(curParsed.Variant)
+	if curParsed.Scheme == version.SchemeUnknown {
+		curFlavor, _ = classifyTagVariant(curTagName)
+	}
+	allowedFlavors := map[string]bool{curFlavor: true}
+
+	// 若当前标签（或 latest）指向的镜像 Digest 没有无后缀标准版本，而是官方将某个变体（如 mosquitto:2 -> 2.1.2-alpine）作为默认主线，则自动纳入该同 Digest 变体
+	var anchorDigest string
+	for _, e := range entries {
+		if e.Name == curTagName && e.RepoDigest != "" {
+			anchorDigest = e.RepoDigest
 			break
 		}
 	}
-	return out, highest, nil
+	if anchorDigest == "" {
+		for _, e := range entries {
+			if e.Name == "latest" && e.RepoDigest != "" {
+				anchorDigest = e.RepoDigest
+				break
+			}
+		}
+	}
+	if anchorDigest != "" && curFlavor == "" {
+		hasPlainMate := false
+		mateFlavors := make(map[string]bool)
+		for _, e := range entries {
+			if e.RepoDigest != anchorDigest {
+				continue
+			}
+			pt := version.ParseTag(e.Name)
+			if pt.Scheme == version.SchemeUnknown || pt.Prerelease || pt.Precision < 2 {
+				continue
+			}
+			fl, isArch := classifyTagVariant(pt.Variant)
+			if isArch {
+				continue
+			}
+			if fl == "" {
+				hasPlainMate = true
+			} else {
+				mateFlavors[fl] = true
+			}
+		}
+		if !hasPlainMate {
+			for fl := range mateFlavors {
+				allowedFlavors[fl] = true
+			}
+		}
+	}
+
+	anyRepoSemVer := false
+	for _, e := range entries {
+		pt := version.ParseTag(e.Name)
+		if pt.Scheme != version.SchemeUnknown && !pt.Prerelease {
+			if _, isArch := classifyTagVariant(pt.Variant); !isArch {
+				anyRepoSemVer = true
+				break
+			}
+		}
+	}
+
+	// 非语义版本仓库（如 gcli2api:master-ecc207f / gewechat:latest）：保持原仓库顺序，仅将当前运行标签置顶、剔除异构单架构后缀
+	if !anyRepoSemVer {
+		out := make([]TagDigestEntry, 0, len(entries))
+		for _, e := range entries {
+			if e.Name == curTagName && curTagName != "" {
+				out = append(out, e)
+				break
+			}
+		}
+		for _, e := range entries {
+			if e.Name == "" || e.Name == curTagName {
+				continue
+			}
+			if _, isArch := classifyTagVariant(e.Name); isArch {
+				continue
+			}
+			out = append(out, e)
+		}
+		return out
+	}
+
+	filterSemVer := func(strictFlavor bool) ([]TagDigestEntry, *TagDigestEntry, *TagDigestEntry) {
+		var semverItems []TagDigestEntry
+		var curEntry *TagDigestEntry
+		var latestEntry *TagDigestEntry
+		for i := range entries {
+			e := entries[i]
+			if e.Name == "" {
+				continue
+			}
+			if e.Name == curTagName {
+				cp := e
+				curEntry = &cp
+			}
+			if e.Name == "latest" {
+				cp := e
+				latestEntry = &cp
+			}
+			pt := version.ParseTag(e.Name)
+			if pt.Scheme == version.SchemeUnknown {
+				continue
+			}
+			if pt.Prerelease && !curParsed.Prerelease {
+				continue
+			}
+			fl, isArch := classifyTagVariant(pt.Variant)
+			if isArch {
+				continue
+			}
+			if strictFlavor && !allowedFlavors[fl] {
+				continue
+			}
+			semverItems = append(semverItems, e)
+		}
+		return semverItems, curEntry, latestEntry
+	}
+
+	semverItems, curEntry, latestEntry := filterSemVer(true)
+	if len(semverItems) == 0 {
+		semverItems, curEntry, latestEntry = filterSemVer(false)
+	}
+
+	// 计算每个主版本系列的具体版本号精度（如 mysql 为 3 段 8.4.13，postgres 为 2 段 17.11），剔除同系列内冗余的浮动短别名（始终保留当前标签本身）
+	maxPrecByMajor := make(map[int]int)
+	globalMaxPrec := 0
+	for _, e := range semverItems {
+		pt := version.ParseTag(e.Name)
+		if pt.Precision > maxPrecByMajor[pt.Major] {
+			maxPrecByMajor[pt.Major] = pt.Precision
+		}
+		if pt.Precision > globalMaxPrec {
+			globalMaxPrec = pt.Precision
+		}
+	}
+
+	deduped := make([]TagDigestEntry, 0, len(semverItems))
+	for _, e := range semverItems {
+		if e.Name == curTagName {
+			deduped = append(deduped, e)
+			continue
+		}
+		pt := version.ParseTag(e.Name)
+		targetPrec := maxPrecByMajor[pt.Major]
+		if targetPrec > 3 {
+			targetPrec = 3
+		}
+		if pt.Precision < targetPrec {
+			prefix := pt.CoreVersion()
+			hasConcrete := false
+			for _, other := range semverItems {
+				if other.Name == e.Name {
+					continue
+				}
+				po := version.ParseTag(other.Name)
+				if po.Precision >= targetPrec && version.MatchesPrefix(po, prefix) {
+					hasConcrete = true
+					break
+				}
+			}
+			if hasConcrete {
+				continue
+			}
+		}
+		deduped = append(deduped, e)
+	}
+
+	isCurFloating := curTagName != "" && (curParsed.Scheme == version.SchemeUnknown ||
+		(globalMaxPrec >= 2 && curParsed.Precision < minInt(globalMaxPrec, 3)))
+
+	sort.SliceStable(deduped, func(i, j int) bool {
+		ni, nj := deduped[i].Name, deduped[j].Name
+		if isCurFloating && (ni == curTagName) != (nj == curTagName) {
+			return ni == curTagName
+		}
+		pi := version.ParseTag(ni)
+		pj := version.ParseTag(nj)
+		if scopePrefix != "" {
+			iInScope := version.MatchesPrefix(pi, scopePrefix)
+			jInScope := version.MatchesPrefix(pj, scopePrefix)
+			if iInScope != jInScope {
+				return iInScope
+			}
+		}
+		if cmp := version.Compare(pi, pj); cmp != 0 {
+			return cmp > 0
+		}
+		if pi.Precision != pj.Precision {
+			return pi.Precision > pj.Precision
+		}
+		if (pi.Variant == "") != (pj.Variant == "") {
+			return pi.Variant == ""
+		}
+		if deduped[i].UpdatedAt != deduped[j].UpdatedAt {
+			return deduped[i].UpdatedAt > deduped[j].UpdatedAt
+		}
+		return ni > nj
+	})
+
+	out := make([]TagDigestEntry, 0, len(deduped)+2)
+	if isCurFloating && curEntry != nil && !containsTagEntry(deduped, curTagName) {
+		out = append(out, *curEntry)
+	}
+	out = append(out, deduped...)
+	if latestEntry != nil && !containsTagEntry(out, "latest") {
+		if len(out) >= 20 {
+			out = append(out[:19], *latestEntry)
+		} else {
+			out = append(out, *latestEntry)
+		}
+	}
+	return out
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func pickScopedHighestTag(cleaned []TagDigestEntry, raw []TagDigestEntry, ref version.ParsedRef, scopePrefix string) string {
+	pickFrom := func(pool []TagDigestEntry, prefix string) string {
+		var best version.ParsedTag
+		hasBest := false
+		for _, e := range pool {
+			pt := version.ParseTag(e.Name)
+			if pt.Scheme == version.SchemeUnknown || pt.Prerelease {
+				continue
+			}
+			if _, isArch := classifyTagVariant(pt.Variant); isArch {
+				continue
+			}
+			if prefix != "" && !version.MatchesPrefix(pt, prefix) {
+				continue
+			}
+			if !hasBest || version.Compare(pt, best) > 0 || (version.Compare(pt, best) == 0 && pt.Precision > best.Precision) {
+				best = pt
+				hasBest = true
+			}
+		}
+		if hasBest {
+			return best.Raw
+		}
+		return ""
+	}
+
+	if scopePrefix != "" {
+		if h := pickFrom(cleaned, scopePrefix); h != "" {
+			return h
+		}
+		if h := pickFrom(raw, scopePrefix); h != "" {
+			return h
+		}
+	}
+	if h := pickFrom(cleaned, ""); h != "" {
+		return h
+	}
+	if h := pickHighestRepoTag(raw); h != "" {
+		pt := version.ParseTag(h)
+		if pt.Scheme != version.SchemeUnknown {
+			return h
+		}
+	}
+	// 非语义版本仓库（如 gcli2api:master-ecc207f）不返回按字母排第一的无关标签作为“最高版”，避免误触发跳过提醒
+	if ref.Tag != "" {
+		return ref.Tag
+	}
+	if len(cleaned) > 0 {
+		return cleaned[0].Name
+	}
+	return ""
+}
+
+func sortSearchedTags(entries []TagDigestEntry, qLower string) {
+	sort.SliceStable(entries, func(i, j int) bool {
+		li := strings.ToLower(entries[i].Name)
+		lj := strings.ToLower(entries[j].Name)
+		if (li == qLower) != (lj == qLower) {
+			return li == qLower
+		}
+		pi := version.ParseTag(entries[i].Name)
+		pj := version.ParseTag(entries[j].Name)
+		iStd := pi.Scheme != version.SchemeUnknown && !pi.Prerelease
+		jStd := pj.Scheme != version.SchemeUnknown && !pj.Prerelease
+		if iStd != jStd {
+			return iStd
+		}
+		if iStd && jStd {
+			if cmp := version.Compare(pi, pj); cmp != 0 {
+				return cmp > 0
+			}
+			if pi.Precision != pj.Precision {
+				return pi.Precision > pj.Precision
+			}
+			if (pi.Variant == "") != (pj.Variant == "") {
+				return pi.Variant == ""
+			}
+		}
+		if entries[i].UpdatedAt != entries[j].UpdatedAt {
+			return entries[i].UpdatedAt > entries[j].UpdatedAt
+		}
+		return entries[i].Name > entries[j].Name
+	})
 }
 
 func pickHighestRepoTag(entries []TagDigestEntry) string {
@@ -369,8 +805,7 @@ func pickHighestRepoTag(entries []TagDigestEntry) string {
 		if pt.Scheme == version.SchemeUnknown || pt.Prerelease {
 			continue
 		}
-		// 优先选择无特殊系统变体（或 ls）的标准最高版本
-		if pt.Variant != "" && pt.Variant != "ls" {
+		if fl, isArch := classifyTagVariant(pt.Variant); isArch || fl != "" {
 			continue
 		}
 		if !hasBest || version.Compare(pt, best) > 0 || (version.Compare(pt, best) == 0 && pt.Precision > best.Precision) {
@@ -384,9 +819,11 @@ func pickHighestRepoTag(entries []TagDigestEntry) string {
 	for _, e := range entries {
 		pt := version.ParseTag(e.Name)
 		if pt.Scheme != version.SchemeUnknown && !pt.Prerelease {
-			if !hasBest || version.Compare(pt, best) > 0 {
-				best = pt
-				hasBest = true
+			if _, isArch := classifyTagVariant(pt.Variant); !isArch {
+				if !hasBest || version.Compare(pt, best) > 0 {
+					best = pt
+					hasBest = true
+				}
 			}
 		}
 	}
@@ -402,36 +839,6 @@ func pickHighestRepoTag(entries []TagDigestEntry) string {
 		return entries[0].Name
 	}
 	return ""
-}
-
-func orderTagsForDisplay(entries []TagDigestEntry, alreadyOrderedByTime bool) []TagDigestEntry {
-	if alreadyOrderedByTime || len(entries) <= 1 {
-		return entries
-	}
-	cp := make([]TagDigestEntry, len(entries))
-	copy(cp, entries)
-	sort.SliceStable(cp, func(i, j int) bool {
-		if cp[i].UpdatedAt != cp[j].UpdatedAt {
-			return cp[i].UpdatedAt > cp[j].UpdatedAt
-		}
-		pi := version.ParseTag(cp[i].Name)
-		pj := version.ParseTag(cp[j].Name)
-		iStd := pi.Scheme != version.SchemeUnknown && !pi.Prerelease
-		jStd := pj.Scheme != version.SchemeUnknown && !pj.Prerelease
-		if iStd != jStd {
-			return iStd
-		}
-		if iStd && jStd {
-			if cmp := version.Compare(pi, pj); cmp != 0 {
-				return cmp > 0
-			}
-			if pi.Precision != pj.Precision {
-				return pi.Precision > pj.Precision
-			}
-		}
-		return cp[i].Name > cp[j].Name
-	})
-	return cp
 }
 
 // LookupTagsByDigest 在有限窗口标签集内反查与 targetDigest（或 targetPlatformDigest）匹配的标签列表，并缓存结果（实施文档 §5.5）。
@@ -733,9 +1140,12 @@ func (c *Client) fetchDockerHubTags(ctx context.Context, repository string, maxP
 	return out, nil
 }
 
-func (c *Client) searchDockerHubTagsByName(ctx context.Context, repository, query string) ([]TagDigestEntry, error) {
-	u := fmt.Sprintf("%s/v2/repositories/%s/tags?page_size=20&ordering=last_updated&name=%s",
-		c.hubAPIBase(), repository, url.QueryEscape(query))
+func (c *Client) searchDockerHubTagsByNameWithSize(ctx context.Context, repository, query string, pageSize int) ([]TagDigestEntry, error) {
+	if pageSize <= 0 || pageSize > 100 {
+		pageSize = 50
+	}
+	u := fmt.Sprintf("%s/v2/repositories/%s/tags?page_size=%d&ordering=last_updated&name=%s",
+		c.hubAPIBase(), repository, pageSize, url.QueryEscape(query))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, &RegistryError{Kind: ErrNetwork, Message: i18n.EngineDetail(i18n.MsgRegistryNetwork, "Docker Hub", err.Error())}
@@ -744,7 +1154,7 @@ func (c *Client) searchDockerHubTagsByName(ctx context.Context, repository, quer
 	if err != nil {
 		return nil, &RegistryError{Kind: ErrNetwork, Message: i18n.EngineDetail(i18n.MsgRegistryNetwork, "Docker Hub", err.Error())}
 	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		return nil, classifyHTTPStatus("Docker Hub", resp.StatusCode)
@@ -754,6 +1164,82 @@ func (c *Client) searchDockerHubTagsByName(ctx context.Context, repository, quer
 		return nil, &RegistryError{Kind: ErrRegistry, Message: i18n.EngineDetail(i18n.MsgRegistryParse, "Docker Hub")}
 	}
 	return items, nil
+}
+
+func (c *Client) fetchCachedHubTagsByName(ctx context.Context, repository, query string, pageSize int) ([]TagDigestEntry, error) {
+	cacheKey := fmt.Sprintf("hub_q:%s:%s:%d", repository, query, pageSize)
+	if b, ok := c.getCache(ctx, cacheKey); ok {
+		var list []TagDigestEntry
+		if json.Unmarshal(b, &list) == nil {
+			return list, nil
+		}
+	}
+	items, err := c.searchDockerHubTagsByNameWithSize(ctx, repository, query, pageSize)
+	if err != nil {
+		return nil, err
+	}
+	if b, err := json.Marshal(items); err == nil {
+		c.putCache(ctx, cacheKey, b, 2*time.Hour)
+	}
+	return items, nil
+}
+
+func (c *Client) fetchCachedHubSingleTagEntry(ctx context.Context, repository, tag string) (TagDigestEntry, error) {
+	cacheKey := fmt.Sprintf("hub_tag:%s:%s", repository, tag)
+	if b, ok := c.getCache(ctx, cacheKey); ok {
+		var e TagDigestEntry
+		if json.Unmarshal(b, &e) == nil && e.Name != "" {
+			return e, nil
+		}
+	}
+	u := fmt.Sprintf("%s/v2/repositories/%s/tags/%s", c.hubAPIBase(), repository, url.PathEscape(tag))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return TagDigestEntry{}, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return TagDigestEntry{}, err
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return TagDigestEntry{}, classifyHTTPStatus("Docker Hub", resp.StatusCode)
+	}
+	var payload struct {
+		Name        string `json:"name"`
+		Digest      string `json:"digest"`
+		LastUpdated string `json:"last_updated"`
+		Images      []struct {
+			OS      string `json:"os"`
+			Arch    string `json:"architecture"`
+			Variant string `json:"variant"`
+			Digest  string `json:"digest"`
+		} `json:"images"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return TagDigestEntry{}, err
+	}
+	pMap := make(map[string]string, len(payload.Images))
+	for _, im := range payload.Images {
+		if im.Digest != "" {
+			pMap[formatPlatform(im.OS, im.Arch, im.Variant)] = NormalizeDigest(im.Digest)
+		}
+	}
+	name := payload.Name
+	if name == "" {
+		name = tag
+	}
+	entry := TagDigestEntry{
+		Name:            name,
+		RepoDigest:      NormalizeDigest(payload.Digest),
+		PlatformDigests: pMap,
+		UpdatedAt:       parseHubTimestamp(payload.LastUpdated),
+	}
+	if b, err := json.Marshal(entry); err == nil {
+		c.putCache(ctx, cacheKey, b, 2*time.Hour)
+	}
+	return entry, nil
 }
 
 func (c *Client) fetchOCITagsList(ctx context.Context, reg, repo string, maxPages int) ([]TagDigestEntry, error) {

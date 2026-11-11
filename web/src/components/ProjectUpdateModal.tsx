@@ -663,9 +663,7 @@ function ProjectUpdateModalBody({
         appName={pickerSvc?.name || app.name}
         subtitle={`${app.hostName}${projectTitle ? ` · ${t.home.projectSubPrefix}${projectTitle}` : ''}`}
         service={pickerSvc}
-        initialSelectedTag={
-          pickerSvc ? overrides[pickerSvc.key]?.targetTag || pickerSvc.targetVersion : undefined
-        }
+        initialSelectedTag={pickerSvc ? overrides[pickerSvc.key]?.targetTag : undefined}
         onPickOnly={(sel) => {
           if (!pickerSvc) return
           setOverrides((prev) => ({ ...prev, [pickerSvc.key]: sel }))

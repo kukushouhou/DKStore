@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/kukushouhou/DKStore/internal/secret"
@@ -182,5 +183,123 @@ func TestZeroQuotaHubManifestAndSearchTagsAndOCILookup(t *testing.T) {
 	matchedOCI := cli.LookupTagsByDigest(ctx, refOCI, "sha256:ocidate333", "", "linux/amd64", ociRecent)
 	if len(matchedOCI) != 1 || matchedOCI[0] != "20261110-3" || ociHeadCalls == 0 {
 		t.Fatalf("expected OCI date alias 20261110-3 via HEAD, got matched=%v headCalls=%d", matchedOCI, ociHeadCalls)
+	}
+}
+
+func TestSearchTagsVersionOrderingAndVariantFiltering(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	box, _ := secret.LoadOrCreate(dir)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/v2/repositories/library/eclipse-mosquitto/tags"):
+			_, _ = w.Write([]byte(`{
+				"next": "",
+				"results": [
+					{"name":"1.6.15-openssl","digest":"sha256:oldsec","last_updated":"2026-11-07T16:52:00Z","images":[]},
+					{"name":"1.6-openssl","digest":"sha256:oldsec","last_updated":"2026-11-07T16:52:00Z","images":[]},
+					{"name":"latest","digest":"sha256:mosq212","last_updated":"2026-11-07T01:52:00Z","images":[]},
+					{"name":"alpine","digest":"sha256:mosq212","last_updated":"2026-11-07T01:52:00Z","images":[]},
+					{"name":"2.1.2-alpine","digest":"sha256:mosq212","last_updated":"2026-11-07T01:52:00Z","images":[]},
+					{"name":"2.1-alpine","digest":"sha256:mosq212","last_updated":"2026-11-07T01:52:00Z","images":[]},
+					{"name":"2","digest":"sha256:mosq212","last_updated":"2026-11-07T01:52:00Z","images":[]},
+					{"name":"2.0.22-openssl","digest":"sha256:mosq2022ssl","last_updated":"2026-11-06T01:00:00Z","images":[]},
+					{"name":"2.0.22","digest":"sha256:mosq2022","last_updated":"2026-11-06T01:00:00Z","images":[]},
+					{"name":"2.1.1-alpine","digest":"sha256:mosq211","last_updated":"2026-10-01T01:00:00Z","images":[]},
+					{"name":"2.0.21","digest":"sha256:mosq2021","last_updated":"2026-09-01T01:00:00Z","images":[]}
+				]
+			}`))
+		case strings.HasPrefix(r.URL.Path, "/v2/repositories/library/mysql/tags"):
+			_, _ = w.Write([]byte(`{
+				"next": "",
+				"results": [
+					{"name":"oraclelinux9","digest":"sha256:m26","last_updated":"2026-11-10T10:00:00Z","images":[]},
+					{"name":"26.10.0","digest":"sha256:m26","last_updated":"2026-11-10T10:00:00Z","images":[]},
+					{"name":"8.4.13-oracle","digest":"sha256:m8413","last_updated":"2026-11-09T10:00:00Z","images":[]},
+					{"name":"8.4.13","digest":"sha256:m8413","last_updated":"2026-11-09T10:00:00Z","images":[]},
+					{"name":"8.4","digest":"sha256:m8413","last_updated":"2026-11-09T10:00:00Z","images":[]},
+					{"name":"8.4.12","digest":"sha256:m8412","last_updated":"2026-10-09T10:00:00Z","images":[]}
+				]
+			}`))
+		case strings.HasPrefix(r.URL.Path, "/v2/repositories/lejianwen/rustdesk-server-s6/tags"):
+			_, _ = w.Write([]byte(`{
+				"next": "",
+				"results": [
+					{"name":"v0.1.2-armv7","digest":"sha256:arm","last_updated":"2026-11-10T10:00:00Z","images":[]},
+					{"name":"v0.1.2","digest":"sha256:rd012","last_updated":"2026-11-10T09:00:00Z","images":[]},
+					{"name":"v0.0.9-f3","digest":"sha256:rd009","last_updated":"2026-10-10T09:00:00Z","images":[]}
+				]
+			}`))
+		case r.URL.Path == "/v2/su-kaka/gcli2api/tags/list":
+			_, _ = w.Write([]byte(`{"tags":["sha-faead14","master-dd1f3fc","master-ecc207f","sha-1111111"]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	cli := New(st, box)
+	cli.BaseURLOverride = map[string]string{
+		"docker.io":      srv.URL,
+		"hub.docker.com": srv.URL,
+		"ghcr.io":        srv.URL,
+	}
+
+	// Case 1: mosquitto:2 must NOT surface 1.6.15-openssl at #1; must keep 2, 2.1.2-alpine, 2.1.1-alpine, 2.0.22, 2.0.21
+	refMosq, _ := version.ParseImageRef("eclipse-mosquitto:2")
+	mosqItems, mosqHi, err := cli.SearchTags(ctx, refMosq, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mosqHi != "2.1.2-alpine" {
+		t.Fatalf("expected mosquitto highestTag=2.1.2-alpine, got %q", mosqHi)
+	}
+	if len(mosqItems) < 5 || mosqItems[0].Name != "2" || mosqItems[1].Name != "2.1.2-alpine" || mosqItems[2].Name != "2.1.1-alpine" || mosqItems[3].Name != "2.0.22" {
+		t.Fatalf("unexpected mosquitto order: %+v", mosqItems)
+	}
+	for _, it := range mosqItems {
+		if strings.Contains(it.Name, "openssl") {
+			t.Fatalf("unexpected openssl variant leaked into default list: %q", it.Name)
+		}
+	}
+
+	// Case 2: mysql:8.4 must scope highestTag to 8.4.13 (not 26.10.0) and list 8.4, 8.4.13, 8.4.12 first
+	refMysql, _ := version.ParseImageRef("mysql:8.4")
+	mysqlItems, mysqlHi, err := cli.SearchTags(ctx, refMysql, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mysqlHi != "8.4.13" {
+		t.Fatalf("expected mysql:8.4 scoped highestTag=8.4.13, got %q", mysqlHi)
+	}
+	if len(mysqlItems) < 3 || mysqlItems[0].Name != "8.4" || mysqlItems[1].Name != "8.4.13" || mysqlItems[2].Name != "8.4.12" {
+		t.Fatalf("unexpected mysql:8.4 order: %+v", mysqlItems)
+	}
+
+	// Case 3: rustdesk v0.0.9-f3 revision suffix must NOT hide v0.1.2, and -armv7 must be filtered
+	refRd, _ := version.ParseImageRef("lejianwen/rustdesk-server-s6:v0.0.9-f3")
+	rdItems, rdHi, err := cli.SearchTags(ctx, refRd, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rdHi != "v0.1.2" || len(rdItems) != 2 || rdItems[0].Name != "v0.1.2" {
+		t.Fatalf("unexpected rustdesk items: hi=%q items=%+v", rdHi, rdItems)
+	}
+
+	// Case 4: non-SemVer repo gcli2api:master-ecc207f pins current tag first and sets highestTag to current tag
+	refGcli, _ := version.ParseImageRef("ghcr.io/su-kaka/gcli2api:master-ecc207f")
+	gcliItems, gcliHi, err := cli.SearchTags(ctx, refGcli, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gcliHi != "master-ecc207f" || len(gcliItems) != 4 || gcliItems[0].Name != "master-ecc207f" || gcliItems[1].Name != "sha-faead14" {
+		t.Fatalf("unexpected non-semver items: hi=%q items=%+v", gcliHi, gcliItems)
 	}
 }
