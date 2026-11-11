@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { UpdateJobItem } from '../api/client'
 import { useUIStore } from '../store/ui'
 
-export const ULTRAWIDE_MIN_WIDTH = 1980
+export const ULTRAWIDE_MIN_WIDTH = 2020
 
 export function useIsUltrawide(): boolean {
   const [isUltrawide, setIsUltrawide] = useState(

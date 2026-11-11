@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Alert,
-  Badge,
   Button,
   Card,
   Flex,
@@ -19,6 +18,8 @@ import {
 } from 'antd'
 import {
   AppstoreOutlined,
+  CheckCircleFilled,
+  CloseCircleFilled,
   CloudServerOutlined,
   ContainerOutlined,
   HistoryOutlined,
@@ -281,14 +282,15 @@ export default function AppLayout() {
     queueJobs.length > 0 ? (
       <Button
         size="small"
-        shape="round"
         type={anyQueueRunning ? 'primary' : 'default'}
         ghost={anyQueueRunning}
         icon={
           anyQueueRunning ? (
             <SyncOutlined spin />
+          ) : hasFailed ? (
+            <CloseCircleFilled style={{ color: token.colorError }} />
           ) : (
-            <Badge status={hasFailed ? 'error' : 'success'} />
+            <CheckCircleFilled style={{ color: token.colorSuccess }} />
           )
         }
         onClick={() => {
@@ -352,7 +354,7 @@ export default function AppLayout() {
                   trigger="click"
                   placement="bottomRight"
                   content={
-                    <div style={{ width: 332, maxWidth: 'calc(100vw - 40px)' }}>
+                    <div style={{ width: 376, maxWidth: 'calc(100vw - 40px)' }}>
                       <UpdateQueuePanel mode="popover" onCollapse={() => setPopoverOpen(false)} />
                     </div>
                   }
@@ -420,14 +422,14 @@ export default function AppLayout() {
         <Outlet />
       </Layout.Content>
 
-      {/* 超宽屏（>= 1980px）停靠在右侧纯空白边距区域：0 遮挡、0 挤压卡片 */}
+      {/* 超宽屏（>= 2020px）停靠在右侧纯空白边距区域：0 遮挡、0 挤压卡片 */}
       {isUltrawide && queueJobs.length > 0 && !queueCollapsed && (
         <div
           style={{
             position: 'fixed',
             top: 80,
-            right: 'max(16px, calc((100vw - 1280px) / 2 - 348px))',
-            width: 332,
+            right: 'max(16px, calc((100vw - 1280px) / 2 - 392px))',
+            width: 376,
             zIndex: 90,
           }}
         >

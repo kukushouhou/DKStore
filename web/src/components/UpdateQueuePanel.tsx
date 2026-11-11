@@ -1,5 +1,4 @@
 import {
-  Badge,
   Button,
   Card,
   Flex,
@@ -11,9 +10,15 @@ import {
   Typography,
   theme,
 } from 'antd'
-import { CloseOutlined, SyncOutlined } from '@ant-design/icons'
+import {
+  CheckCircleFilled,
+  CloseCircleFilled,
+  CloseOutlined,
+  SyncOutlined,
+  UpOutlined,
+} from '@ant-design/icons'
 import { useQueryClient } from '@tanstack/react-query'
-import { api, type LayerProgress, type UpdateJobItem } from '../api/client'
+import { api, type LayerProgress, type OverviewResponse, type UpdateJobItem } from '../api/client'
 import { useOrderedQueueJobs } from '../hooks/useUpdateQueue'
 import { useI18n } from '../i18n'
 import { useUIStore, type ProgressStyle } from '../store/ui'
@@ -148,11 +153,13 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
     >
       {/* 队列标题栏 */}
       <Flex wrap="wrap" align="center" justify="space-between" gap={8}>
-        <Space size={8} align="center" style={{ minWidth: 0 }}>
+        <Space size={6} align="center" style={{ minWidth: 0 }}>
           {anyRunning ? (
             <SyncOutlined spin style={{ color: token.colorPrimary }} />
+          ) : jobs.some((j) => j.status === 'failed') ? (
+            <CloseCircleFilled style={{ color: token.colorError }} />
           ) : (
-            <Badge status={jobs.some((j) => j.status === 'failed') ? 'error' : 'success'} />
+            <CheckCircleFilled style={{ color: token.colorSuccess }} />
           )}
           <Typography.Text strong>
             {t.queue.panelTitle.replace('{count}', String(jobs.length))}
@@ -191,7 +198,12 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
             </Button>
           )}
 
-          <Button size="small" onClick={handleCollapse}>
+          <Button
+            size="small"
+            icon={<UpOutlined style={{ fontSize: 10 }} />}
+            iconPlacement="end"
+            onClick={handleCollapse}
+          >
             {t.queue.collapseBtn}
           </Button>
         </Space>
@@ -207,12 +219,33 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
         }}
       >
         {jobs.map((job) => {
-          const displayName =
-            job.serviceName && job.serviceName !== 'main' && job.serviceName !== job.appName
-              ? `${job.appName} / ${job.serviceName}`
-              : job.appName
+          const cachedOverviews = qc.getQueriesData<OverviewResponse>({ queryKey: ['overview'] })
+          let knownMultiContainer: boolean | undefined
+          for (const [, ov] of cachedOverviews) {
+            if (!ov) continue
+            for (const list of [ov.normal, ov.caution, ov.noUpdate]) {
+              const found = list?.find((a) => a.key === job.appKey || a.name === job.appName)
+              if (found) {
+                const cnt =
+                  found.totalServiceCount ?? found.allServices?.length ?? found.services.length
+                knownMultiContainer = cnt >= 2
+                break
+              }
+            }
+            if (knownMultiContainer !== undefined) break
+          }
+          const shouldAppendSvc =
+            Boolean(job.serviceName) &&
+            job.serviceName !== 'main' &&
+            job.serviceName !== job.appName &&
+            (knownMultiContainer === true ||
+              (knownMultiContainer === undefined && job.serviceName !== 'app'))
+          const displayName = shouldAppendSvc
+            ? `${job.appName} / ${job.serviceName}`
+            : job.appName
           const oldVer = extractTagLabel(job.oldVersion, job.oldImageRef)
           const tgtVer = extractTagLabel(job.targetVersion, job.targetImageRef)
+          const verText = oldVer ? `${oldVer} → ${tgtVer}` : tgtVer
           const layers = job.progress?.layers ?? []
           const showLayered = progressStyle === 'layered' && layers.length > 0
           const doneLayers =
@@ -249,36 +282,38 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
                   job.status === 'failed' ? token.colorErrorBorder : token.colorBorderSecondary,
               }}
             >
-              {/* 第一行：应用名 + 版本号变化 + 右侧独立「详情」按钮 */}
-              <Flex align="center" justify="space-between" gap={8}>
+              {/* 第一行：应用名 + 完整版本号变化（短文本同行、长文本自动换行，两侧均 0 截断） + 右侧「详情」按钮 */}
+              <Flex align="flex-start" justify="space-between" gap={8}>
                 <Flex
                   align="center"
                   gap={6}
-                  wrap={isCompactWidth ? 'nowrap' : 'wrap'}
+                  wrap="wrap"
                   style={{ minWidth: 0, flex: 1 }}
                 >
                   <Typography.Text
                     strong
                     ellipsis={{ tooltip: `${displayName} (${job.hostName})` }}
-                    style={{ fontSize: token.fontSizeSM }}
+                    style={{ fontSize: token.fontSizeSM, maxWidth: '100%' }}
                   >
                     {displayName}
                   </Typography.Text>
-                  {(oldVer || tgtVer) && (
-                    <Tag
-                      variant="filled"
-                      style={{
-                        margin: 0,
-                        fontFamily: token.fontFamilyCode,
-                        fontSize: 11,
-                        maxWidth: '100%',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        flexShrink: isCompactWidth ? 1 : 0,
-                      }}
-                    >
-                      {oldVer ? `${oldVer} → ${tgtVer}` : tgtVer}
-                    </Tag>
+                  {verText && (
+                    <Tooltip title={verText.length > 32 ? verText : undefined}>
+                      <Tag
+                        variant="filled"
+                        style={{
+                          margin: 0,
+                          fontFamily: token.fontFamilyCode,
+                          fontSize: 12,
+                          maxWidth: '100%',
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          flexShrink: 0,
+                        }}
+                      >
+                        {verText}
+                      </Tag>
+                    </Tooltip>
                   )}
                 </Flex>
 

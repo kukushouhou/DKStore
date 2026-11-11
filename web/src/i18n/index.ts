@@ -107,14 +107,14 @@ const zhCN = {
   },
   queue: {
     headerPill: '更新队列 ({count})',
-    panelTitle: '更新任务队列（{count}）',
+    panelTitle: '更新队列 ({count})',
     modeUnified: '整体',
     modeLayered: '分层',
     unifiedTip: '整体模式：以单根总进度条展示每个应用的整体更新进度，画面更简洁。',
     layeredTip:
       '分层模式（默认）：按容器镜像的每一层文件并排展示独立进度，绿色代表已完成或直接复用，蓝色代表正在下载或解压。',
-    clearFinished: '清空已完成',
-    collapseBtn: '收起 ▴',
+    clearFinished: '清空',
+    collapseBtn: '收起',
     detailBtn: '详情',
     dismissTip: '移除此记录',
     statusQueued: '排队等待中…',
@@ -622,8 +622,8 @@ const enUS: Dict = {
     unifiedTip: 'Unified mode: displays a single overall progress bar for each app update.',
     layeredTip:
       'Layered mode (default): shows all image layers side by side — green for completed or reused, blue for downloading or extracting.',
-    clearFinished: 'Clear Done',
-    collapseBtn: 'Hide ▴',
+    clearFinished: 'Clear',
+    collapseBtn: 'Hide',
     detailBtn: 'Details',
     dismissTip: 'Dismiss',
     statusQueued: 'Queued…',
