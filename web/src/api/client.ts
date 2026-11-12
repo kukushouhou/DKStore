@@ -12,11 +12,20 @@ export class ApiError extends Error {
   }
 }
 
-export function apiBase(): string {
-  if (typeof window !== 'undefined' && window.location.pathname.startsWith('/dkstore')) {
-    return '/dkstore/api/v1'
+export function gatewayPrefix(): string {
+  if (typeof window === 'undefined') return ''
+  const p = window.location.pathname
+  if (p === '/app/dkstore' || p.startsWith('/app/dkstore/')) {
+    return '/app/dkstore'
   }
-  return '/api/v1'
+  if (p === '/dkstore' || p.startsWith('/dkstore/')) {
+    return '/dkstore'
+  }
+  return ''
+}
+
+export function apiBase(): string {
+  return `${gatewayPrefix()}/api/v1`
 }
 
 export function resolveIconUrl(iconUrl?: string): string | undefined {
@@ -28,13 +37,12 @@ export function resolveIconUrl(iconUrl?: string): string | undefined {
   ) {
     return iconUrl
   }
-  const hasPrefix =
-    typeof window !== 'undefined' && window.location.pathname.startsWith('/dkstore')
-  if (iconUrl.startsWith('/dkstore/api/v1')) {
+  const prefix = gatewayPrefix()
+  if (iconUrl.startsWith('/app/dkstore/api/v1') || iconUrl.startsWith('/dkstore/api/v1')) {
     return iconUrl
   }
   if (iconUrl.startsWith('/api/v1')) {
-    return hasPrefix ? `/dkstore${iconUrl}` : iconUrl
+    return prefix ? `${prefix}${iconUrl}` : iconUrl
   }
   if (iconUrl.startsWith('/')) {
     return `${apiBase()}${iconUrl}`

@@ -43,6 +43,7 @@ type dockerInfoResp struct {
 	OSType          string `json:"OSType"`
 	Architecture    string `json:"Architecture"`
 	OperatingSystem string `json:"OperatingSystem"`
+	KernelVersion   string `json:"KernelVersion"`
 	ServerVersion   string `json:"ServerVersion"`
 }
 
@@ -53,12 +54,13 @@ func (a *Adapter) Probe(ctx context.Context) (*platform.HostInfo, error) {
 		return nil, i18n.NewEngineError(i18n.MsgDockerProbeFailed, i18n.DetailOf(err))
 	}
 	osName, arch, variant := normalizePlatform(info.OSType, info.Architecture)
+	platVer := a.detectPlatformVersion(ctx, info)
 	return &platform.HostInfo{
 		OS:              osName,
 		Arch:            arch,
 		Variant:         variant,
 		DockerVersion:   info.ServerVersion,
-		PlatformVersion: info.OperatingSystem,
+		PlatformVersion: platVer,
 		Capabilities: platform.Capabilities{
 			Discover:            true,
 			CheckUpdate:         true,
@@ -69,6 +71,29 @@ func (a *Adapter) Probe(ctx context.Context) (*platform.HostInfo, error) {
 			Rollback:            true,
 		},
 	}, nil
+}
+
+func (a *Adapter) detectPlatformVersion(ctx context.Context, info dockerInfoResp) string {
+	platVer := strings.TrimSpace(info.OperatingSystem)
+	kvLower := strings.ToLower(strings.TrimSpace(info.KernelVersion))
+	osLower := strings.ToLower(platVer)
+	if strings.Contains(kvLower, "-trim") || strings.Contains(osLower, "fnos") || strings.Contains(osLower, "trim") {
+		if b, err := a.tr.ReadFile(ctx, "/etc/trim_version"); err == nil {
+			if tv := strings.TrimSpace(string(b)); tv != "" {
+				if strings.HasPrefix(strings.ToLower(tv), "fnos") {
+					return tv
+				}
+				return "fnOS " + tv
+			}
+		}
+		if !strings.Contains(osLower, "fnos") {
+			if platVer != "" {
+				return "fnOS (" + platVer + ")"
+			}
+			return "fnOS"
+		}
+	}
+	return platVer
 }
 
 type containerSummary struct {
@@ -90,8 +115,54 @@ type containerInspect struct {
 	Image  string `json:"Image"`
 	Config struct {
 		Image  string            `json:"Image"`
+		Env    []string          `json:"Env"`
 		Labels map[string]string `json:"Labels"`
 	} `json:"Config"`
+	Mounts []struct {
+		Source string `json:"Source"`
+	} `json:"Mounts"`
+}
+
+var reFnOSAppCenterPath = regexp.MustCompile(`^/vol\d+/@(appcenter|appconf|appdata|apphome|appshare)(/|$)`)
+
+func isVendorManagedPath(p string) bool {
+	s := strings.TrimSpace(p)
+	if s == "" {
+		return false
+	}
+	if strings.HasPrefix(s, "/var/packages/") || strings.HasPrefix(s, "/var/apps/") {
+		return true
+	}
+	return reFnOSAppCenterPath.MatchString(s)
+}
+
+func isVendorManagedContainer(labels map[string]string, env []string, mountSources []string) bool {
+	if isVendorManagedPath(labels["com.docker.compose.project.working_dir"]) {
+		return true
+	}
+	for _, cf := range splitFiles(labels["com.docker.compose.project.config_files"]) {
+		if isVendorManagedPath(cf) {
+			return true
+		}
+	}
+	for _, e := range env {
+		if strings.HasPrefix(e, "TRIM_APPDEST=") || strings.HasPrefix(e, "TRIM_APPNAME=") || strings.HasPrefix(e, "TRIM_PKGVAR=") {
+			return true
+		}
+	}
+	for _, ms := range mountSources {
+		s := strings.TrimSpace(ms)
+		if strings.HasPrefix(s, "/var/packages/") {
+			return true
+		}
+		if strings.HasPrefix(s, "/var/apps/") && !strings.Contains(s, "/share/") {
+			return true
+		}
+		if strings.HasPrefix(s, "/vol") && strings.Contains(s, "/@appcenter/") {
+			return true
+		}
+	}
+	return false
 }
 
 type imageInspect struct {
@@ -140,6 +211,14 @@ func (a *Adapter) ListApps(ctx context.Context) ([]platform.App, error) {
 			repoDigests = img.RepoDigests
 		}
 
+		var mountSources []string
+		for _, m := range detail.Mounts {
+			if m.Source != "" {
+				mountSources = append(mountSources, m.Source)
+			}
+		}
+		vendorManaged := isVendorManagedContainer(labels, detail.Config.Env, mountSources)
+
 		projName := strings.TrimSpace(labels["com.docker.compose.project"])
 		svcName := strings.TrimSpace(labels["com.docker.compose.service"])
 
@@ -150,10 +229,14 @@ func (a *Adapter) ListApps(ctx context.Context) ([]platform.App, error) {
 				workDir := labels["com.docker.compose.project.working_dir"]
 				cfgFiles := splitFiles(labels["com.docker.compose.project.config_files"])
 				envFiles := splitFiles(labels["com.docker.compose.project.environment_file"])
+				src := platform.SourceCompose
+				if vendorManaged {
+					src = platform.SourceVendorManaged
+				}
 				app = &platform.App{
 					Key:    appKey,
 					Name:   projName,
-					Source: platform.SourceCompose,
+					Source: src,
 					Project: &platform.ProjectInfo{
 						Name:        projName,
 						WorkingDir:  workDir,
@@ -162,6 +245,8 @@ func (a *Adapter) ListApps(ctx context.Context) ([]platform.App, error) {
 					},
 				}
 				composeMap[appKey] = app
+			} else if vendorManaged {
+				app.Source = platform.SourceVendorManaged
 			}
 			svcKey := fmt.Sprintf("%s/%s", appKey, svcName)
 			svc, sExists := serviceMap[svcKey]
@@ -193,10 +278,14 @@ func (a *Adapter) ListApps(ctx context.Context) ([]platform.App, error) {
 		}
 		appKey := fmt.Sprintf("%s/container/%s", a.hostID, cName)
 		svcKey := appKey + "/main"
+		standaloneSrc := platform.SourceStandalone
+		if vendorManaged {
+			standaloneSrc = platform.SourceVendorManaged
+		}
 		standaloneApps = append(standaloneApps, platform.App{
 			Key:    appKey,
 			Name:   cName,
-			Source: platform.SourceStandalone,
+			Source: standaloneSrc,
 			Services: []platform.Service{
 				{
 					Key:          svcKey,
@@ -379,13 +468,13 @@ func (a *Adapter) ListRuntimeApps(ctx context.Context) ([]platform.AppRuntimeTre
 		}
 
 		projName := strings.TrimSpace(cs.Labels["com.docker.compose.project"])
-		workDir := strings.TrimSpace(cs.Labels["com.docker.compose.project.working_dir"])
+		vendorManaged := isVendorManagedContainer(cs.Labels, nil, nil)
 		if projName != "" {
 			appKey := fmt.Sprintf("%s/compose/%s", a.hostID, projName)
 			tree, exists := composeMap[appKey]
 			if !exists {
 				src := platform.SourceCompose
-				if strings.HasPrefix(workDir, "/var/packages/") {
+				if vendorManaged {
 					src = platform.SourceVendorManaged
 				}
 				tree = &platform.AppRuntimeTree{
@@ -395,7 +484,7 @@ func (a *Adapter) ListRuntimeApps(ctx context.Context) ([]platform.AppRuntimeTre
 					Source: src,
 				}
 				composeMap[appKey] = tree
-			} else if strings.HasPrefix(workDir, "/var/packages/") {
+			} else if vendorManaged {
 				tree.Source = platform.SourceVendorManaged
 			}
 			tree.TotalCount++
@@ -409,7 +498,7 @@ func (a *Adapter) ListRuntimeApps(ctx context.Context) ([]platform.AppRuntimeTre
 		}
 
 		src := platform.SourceStandalone
-		if strings.HasPrefix(workDir, "/var/packages/") {
+		if vendorManaged {
 			src = platform.SourceVendorManaged
 		}
 		appKey := fmt.Sprintf("%s/container/%s", a.hostID, cName)

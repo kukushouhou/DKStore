@@ -1,0 +1,15 @@
+{
+  ".url": {
+    "dkstore.Application": {
+      "title": "DKStore 容器更新中心",
+      "desc": "跨平台 Docker 应用更新中心（支持单服务安全升级与历史回退）",
+      "icon": "images/icon_{0}.png",
+      "type": "iframe",
+      "protocol": "",
+      "gatewayPrefix": "/app/dkstore",
+      "gatewaySocket": "app.sock",
+      "url": "/app/dkstore/",
+      "allUsers": false
+    }
+  }
+}

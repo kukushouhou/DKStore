@@ -79,6 +79,12 @@ func Check(ctx context.Context, lang i18n.Lang) Status {
 		} else {
 			cmdHint = "在群晖 DSM「套件中心 → 手动安装」上传新版 .spk 完成覆盖升级（自动保留数据）"
 		}
+	case "fnos_fpk":
+		if lang == i18n.EnUS {
+			cmdHint = "Upgrade via fnOS App Center -> Manual Install new .fpk"
+		} else {
+			cmdHint = "在飞牛 fnOS「应用中心 → 手动安装」上传新版 .fpk 完成覆盖升级（自动保留数据）"
+		}
 	default:
 		cmdHint = "dkstore --version"
 	}

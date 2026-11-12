@@ -23,19 +23,37 @@ import (
 const (
 	ModeDocker   = "docker"
 	ModeSynology = "synology_spk"
+	ModeFnOS     = "fnos_fpk"
 	ModeOpenWrt  = "openwrt"
 	ModeBinary   = "binary"
 )
 
 // 核验失败原因码（由 internal/i18n.HostAuthHint 转为本地化文案）。
 const (
-	ReasonUnsupportedMode = "unsupported_mode"      // 非群晖/OpenWrt 套件安装，不支持宿主登录态
+	ReasonUnsupportedMode = "unsupported_mode"      // 非群晖/飞牛/OpenWrt 套件安装，不支持宿主登录态
 	ReasonNoCookie        = "no_host_cookie"        // 请求中没有宿主登录 Cookie
+	ReasonNoFnOSGateway   = "no_fnos_gateway"       // 飞牛套件未通过桌面统一网关 Socket 访问
 	ReasonInvalidCookie   = "invalid_host_cookie"   // Cookie 含非法字符
 	ReasonUnavailable     = "host_auth_unavailable" // 宿主核验程序不存在（如未安装 LuCI / 非标准 DSM）
 	ReasonSessionInvalid  = "host_session_invalid"  // 宿主会话无效或已过期
 	ReasonNotAdmin        = "host_not_admin"        // 登录用户不是宿主管理员
 )
+
+type trustedGatewayKey struct{}
+
+// WithTrustedGateway 标记请求来自受信任的本机统一网关 Unix Socket（严禁用于 TCP 端口监听连接）。
+func WithTrustedGateway(ctx context.Context) context.Context {
+	return context.WithValue(ctx, trustedGatewayKey{}, true)
+}
+
+// IsTrustedGateway 判断请求上下文是否来自本机统一网关 Unix Socket。
+func IsTrustedGateway(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, _ := ctx.Value(trustedGatewayKey{}).(bool)
+	return v
+}
 
 const (
 	execTimeout     = 3 * time.Second
@@ -90,13 +108,16 @@ func DefaultRunner(ctx context.Context, env []string, name string, args ...strin
 }
 
 // DetectInstallMode 按运行环境判定安装方式：
-// 容器内运行 → docker；/var/packages/dkstore 存在 → synology_spk；/etc/openwrt_release 存在 → openwrt；其他 → binary。
+// 容器内运行 → docker；/var/packages/dkstore 存在 → synology_spk；/var/apps/dkstore 或 TRIM_APPNAME=dkstore → fnos_fpk；/etc/openwrt_release 存在 → openwrt；其他 → binary。
 func DetectInstallMode(fs FS) string {
 	if inContainer(fs) {
 		return ModeDocker
 	}
 	if fs.Exists("/var/packages/dkstore") {
 		return ModeSynology
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("TRIM_APPNAME")), "dkstore") || fs.Exists("/var/apps/dkstore") {
+		return ModeFnOS
 	}
 	if fs.Exists("/etc/openwrt_release") {
 		return ModeOpenWrt
@@ -184,7 +205,7 @@ func (v *Verifier) InstallMode() string { return v.mode }
 
 // Supported 表示当前安装方式是否支持复用宿主登录态。
 func (v *Verifier) Supported() bool {
-	return v.mode == ModeSynology || v.mode == ModeOpenWrt
+	return v.mode == ModeSynology || v.mode == ModeFnOS || v.mode == ModeOpenWrt
 }
 
 // Verify 核验请求是否携带宿主管理员的有效登录态。
@@ -192,11 +213,38 @@ func (v *Verifier) Verify(ctx context.Context, r *http.Request) Result {
 	switch v.mode {
 	case ModeSynology:
 		return v.verifySynology(ctx, r)
+	case ModeFnOS:
+		return v.verifyFnOS(ctx, r)
 	case ModeOpenWrt:
 		return v.verifyOpenWrt(ctx, r)
 	default:
 		return Result{Reason: ReasonUnsupportedMode}
 	}
+}
+
+// ---------- 飞牛 fnOS 统一网关 ----------
+
+// verifyFnOS 仅信任来自本机统一网关 Unix Socket（${TRIM_APPDEST}/app.sock）转发的 X-Trim-* 身份头；
+// 对直接访问 TCP 端口（如 :8090）的请求一律拒绝信任任何 X-Trim-* Header，防止局域网伪造请求头绕过鉴权。
+func (v *Verifier) verifyFnOS(ctx context.Context, r *http.Request) Result {
+	if r == nil || (!IsTrustedGateway(ctx) && !IsTrustedGateway(r.Context())) {
+		return Result{Reason: ReasonNoFnOSGateway}
+	}
+	isAdmin := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Trim-Isadmin")))
+	user := strings.TrimSpace(r.Header.Get("X-Trim-Username"))
+	if user == "" {
+		user = strings.TrimSpace(r.Header.Get("X-Trim-Userid"))
+	}
+	if isAdmin == "" && user == "" {
+		return Result{Reason: ReasonNoFnOSGateway}
+	}
+	if isAdmin != "true" && isAdmin != "1" {
+		return Result{Reason: ReasonNotAdmin}
+	}
+	if !validUser(user) {
+		user = "admin"
+	}
+	return Result{OK: true, User: user}
 }
 
 func (v *Verifier) cached(key string, fn func() Result) Result {

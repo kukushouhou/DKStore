@@ -1,0 +1,93 @@
+#!/bin/bash
+
+DATA_DIR="${TRIM_PKGVAR:-/var/apps/dkstore/var}"
+APP_BIN="${TRIM_APPDEST:-/var/apps/dkstore/target}/server/dkstore"
+SOCKET_PATH="${TRIM_APPDEST:-/var/apps/dkstore/target}/app.sock"
+LOG_FILE="${DATA_DIR}/dkstore.log"
+PID_FILE="${DATA_DIR}/app.pid"
+
+mkdir -p "${DATA_DIR}"
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"
+}
+
+check_process() {
+    local pid="$1"
+    [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null
+}
+
+status_app() {
+    if [ -f "${PID_FILE}" ]; then
+        local pid
+        pid="$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')"
+        if check_process "${pid}"; then
+            return 0
+        fi
+        rm -f "${PID_FILE}"
+    fi
+    return 1
+}
+
+start_app() {
+    if status_app; then
+        return 0
+    fi
+    log_msg "Starting DKStore..."
+    chmod +x "${APP_BIN}" 2>/dev/null || true
+    rm -f "${SOCKET_PATH}"
+    TRIM_APPNAME="dkstore" \
+    DKSTORE_LISTEN=":8090" \
+    DKSTORE_UNIX_SOCKET="${SOCKET_PATH}" \
+    DKSTORE_DATA_DIR="${DATA_DIR}" \
+    nohup "${APP_BIN}" >> "${LOG_FILE}" 2>&1 &
+    printf "%s" "$!" > "${PID_FILE}"
+    local wait_ms=0
+    while [ ! -S "${SOCKET_PATH}" ] && [ "${wait_ms}" -lt 30 ]; do
+        sleep 0.1
+        wait_ms=$((wait_ms + 1))
+    done
+    [ -S "${SOCKET_PATH}" ] && chmod 0666 "${SOCKET_PATH}" 2>/dev/null || true
+    return 0
+}
+
+stop_app() {
+    log_msg "Stopping DKStore..."
+    if [ -r "${PID_FILE}" ]; then
+        local pid
+        pid="$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')"
+        if check_process "${pid}"; then
+            kill -TERM "${pid}" >> "${LOG_FILE}" 2>&1 || true
+            local count=0
+            while check_process "${pid}" && [ "${count}" -lt 10 ]; do
+                sleep 1
+                count=$((count + 1))
+            done
+            if check_process "${pid}"; then
+                kill -KILL "${pid}" >> "${LOG_FILE}" 2>&1 || true
+            fi
+        fi
+        rm -f "${PID_FILE}"
+    fi
+    rm -f "${SOCKET_PATH}"
+    return 0
+}
+
+case "$1" in
+start)
+    start_app
+    ;;
+stop)
+    stop_app
+    ;;
+status)
+    if status_app; then
+        exit 0
+    else
+        exit 3
+    fi
+    ;;
+*)
+    exit 1
+    ;;
+esac

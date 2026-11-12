@@ -227,13 +227,21 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// handleSetPassword 修改管理员密码（必须已设置密码并提供旧密码；首次设置走 /auth/setup）。
+// handleSetPassword 修改管理员密码（必须已设置密码并提供旧密码；若为飞牛免密设备态首次设置密码则直接初始化）。
 func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		OldPassword string `json:"oldPassword"`
 		NewPassword string `json:"newPassword"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
+	if !s.d.Auth.PasswordSet(r.Context()) && s.d.Auth.IsAuthenticated(r.Context(), r) {
+		if err := s.d.Auth.Setup(r.Context(), w, body.NewPassword); err != nil {
+			s.writeAuthError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
 	if err := s.d.Auth.SetPassword(r.Context(), w, body.OldPassword, body.NewPassword); err != nil {
 		if errors.Is(err, auth.ErrInvalidCredentials) {
 			// 旧密码错误不应让前端误判为会话失效（401），用 400 返回
@@ -863,7 +871,19 @@ func (r *statusRecorder) Flush() {
 
 func (s *Server) logMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/dkstore/") {
+		if r.Method == http.MethodGet && r.URL.Path == "/app/dkstore" {
+			target := "/app/dkstore/"
+			if r.URL.RawQuery != "" {
+				target += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, target, http.StatusFound)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/app/dkstore/") {
+			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/app/dkstore")
+		} else if r.URL.Path == "/app/dkstore" {
+			r.URL.Path = "/"
+		} else if strings.HasPrefix(r.URL.Path, "/dkstore/") {
 			r.URL.Path = strings.TrimPrefix(r.URL.Path, "/dkstore")
 		} else if r.URL.Path == "/dkstore" {
 			r.URL.Path = "/"

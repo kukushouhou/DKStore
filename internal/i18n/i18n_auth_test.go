@@ -11,7 +11,7 @@ func TestAuthErrorCodesBilingual(t *testing.T) {
 			}
 		}
 	}
-	hints := []string{"no_host_cookie", "invalid_host_cookie", "host_auth_unavailable", "host_session_invalid", "host_not_admin"}
+	hints := []string{"no_host_cookie", "no_fnos_gateway", "invalid_host_cookie", "host_auth_unavailable", "host_session_invalid", "host_not_admin"}
 	for _, h := range hints {
 		for _, l := range []Lang{ZhCN, EnUS} {
 			if HostAuthHint(l, h) == "" {

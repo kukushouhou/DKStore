@@ -341,3 +341,45 @@ func TestJobProgressTracker_MonotonicPercentLiveMemoryLogsAndErrorFormatting(t *
 		t.Fatal("expected SSE broadcast to include terminal error LogChunk")
 	}
 }
+
+func TestNormalizeOldDockerZstdError(t *testing.T) {
+	cases := []struct {
+		ver  string
+		want bool
+	}{
+		{"19.03.13", true},
+		{"20.10.6", true},
+		{"20.10.9", true},
+		{"20.10.10", false},
+		{"24.0.7", false},
+		{"27.3.1", false},
+		{"Container Manager (DSM WebAPI)", false},
+	}
+	for _, c := range cases {
+		if got := isDockerBeforeZstd(c.ver); got != c.want {
+			t.Errorf("isDockerBeforeZstd(%q) = %v, want %v", c.ver, got, c.want)
+		}
+	}
+
+	raw := "failed to register layer: ApplyLayer exit status 1 stdout:  stderr: archive/tar: invalid tar header"
+	code, msg := normalizeUpdateError("pull_failed", raw, &host.Host{
+		Info: &platform.HostInfo{DockerVersion: "20.10.6"},
+	})
+	if code != "pull_failed" {
+		t.Fatalf("code = %q", code)
+	}
+	zh := i18n.FormatUpdateError(i18n.ZhCN, code, msg)
+	en := i18n.FormatUpdateError(i18n.EnUS, code, msg)
+	if !strings.Contains(zh, "20.10.6") || !strings.Contains(zh, "zstd") {
+		t.Fatalf("unexpected zh error: %q", zh)
+	}
+	if !strings.Contains(en, "20.10.6") || !strings.Contains(en, "zstd") {
+		t.Fatalf("unexpected en error: %q", en)
+	}
+
+	// Legacy unencoded ApplyLayer error stored in SQLite should also localize cleanly
+	legacyZh := i18n.FormatUpdateError(i18n.ZhCN, "pull_failed", raw)
+	if !strings.Contains(legacyZh, "zstd") || strings.Contains(legacyZh, "invalid tar header") {
+		t.Fatalf("unexpected legacy zh error: %q", legacyZh)
+	}
+}

@@ -113,6 +113,12 @@ func (s *Service) Status(ctx context.Context, r *http.Request) StatusInfo {
 		if s.host.Supported() {
 			res := s.host.Verify(ctx, r)
 			if res.OK {
+				if s.host.InstallMode() == hostauth.ModeFnOS {
+					info.Mode = ModeDevice
+					info.Authenticated = true
+					info.HostUser = res.User
+					return info
+				}
 				info.Mode = ModeSetupRequired
 				info.HostUser = res.User
 				return info
@@ -148,6 +154,9 @@ func (s *Service) Status(ctx context.Context, r *http.Request) StatusInfo {
 // Authorize 判断请求能否访问业务接口；不通过时返回 API 错误码（unauthorized / setup_required）。
 func (s *Service) Authorize(ctx context.Context, r *http.Request) (ok bool, code string) {
 	if !s.PasswordSet(ctx) {
+		if s.host.InstallMode() == hostauth.ModeFnOS && s.host.Supported() && s.host.Verify(ctx, r).OK {
+			return true, ""
+		}
 		return false, ErrSetupRequired.Error()
 	}
 	if s.hasSession(r) {

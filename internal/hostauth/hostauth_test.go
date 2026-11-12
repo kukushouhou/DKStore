@@ -286,3 +286,37 @@ func TestUnsupportedMode(t *testing.T) {
 		}
 	}
 }
+
+func TestFnOSGatewayVerify(t *testing.T) {
+	fs := fakeFS{files: map[string]string{"/var/apps/dkstore": "", "/proc/1/cgroup": "0::/"}}
+	if m := DetectInstallMode(fs); m != ModeFnOS {
+		t.Fatalf("DetectInstallMode = %q, want %q", m, ModeFnOS)
+	}
+	v := New(ModeFnOS, nil, fs)
+	if !v.Supported() {
+		t.Fatal("ModeFnOS must be supported")
+	}
+
+	// Spoofed headers over untrusted TCP must be rejected!
+	spoofReq, _ := http.NewRequest(http.MethodGet, "http://192.168.31.18:8090/api/v1/hosts", nil)
+	spoofReq.Header.Set("X-Trim-Isadmin", "true")
+	spoofReq.Header.Set("X-Trim-Username", "admin")
+	if res := v.Verify(context.Background(), spoofReq); res.OK || res.Reason != ReasonNoFnOSGateway {
+		t.Fatalf("spoofed TCP header must fail: %+v", res)
+	}
+
+	// Trusted Unix socket connection from fnOS Unified Gateway with admin=true succeeds
+	gwCtx := WithTrustedGateway(context.Background())
+	gwReq := spoofReq.WithContext(gwCtx)
+	if res := v.Verify(gwCtx, gwReq); !res.OK || res.User != "admin" {
+		t.Fatalf("trusted gateway admin should pass: %+v", res)
+	}
+
+	// Non-admin fnOS user over trusted gateway is rejected with ReasonNotAdmin
+	nonAdminReq, _ := http.NewRequestWithContext(gwCtx, http.MethodGet, "http://localhost/app/dkstore/", nil)
+	nonAdminReq.Header.Set("X-Trim-Isadmin", "false")
+	nonAdminReq.Header.Set("X-Trim-Username", "guest")
+	if res := v.Verify(gwCtx, nonAdminReq); res.OK || res.Reason != ReasonNotAdmin {
+		t.Fatalf("non-admin gateway user must fail: %+v", res)
+	}
+}

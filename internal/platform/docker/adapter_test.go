@@ -28,3 +28,39 @@ services:
 		t.Fatalf("cache = %q", got["cache"])
 	}
 }
+
+func TestIsVendorManagedContainer(t *testing.T) {
+	// User-created Compose project on fnOS (/vol1/1000/docker/memos) with watchcow label must remain updatable
+	if isVendorManagedContainer(map[string]string{
+		"com.docker.compose.project":             "memos",
+		"com.docker.compose.project.working_dir": "/vol1/1000/docker/memos",
+		"watchcow.enable":                        "true",
+	}, []string{"PATH=/usr/bin"}, []string{"/vol1/1000/docker/memos/data"}) {
+		t.Fatal("user compose project in /vol1/1000/docker must NOT be vendor-managed")
+	}
+
+	// fnOS App Center package (/var/apps/immich/target/docker) must be vendor-managed
+	if !isVendorManagedContainer(map[string]string{
+		"com.docker.compose.project":             "immich",
+		"com.docker.compose.project.working_dir": "/var/apps/immich/target/docker",
+	}, nil, nil) {
+		t.Fatal("/var/apps/* must be detected as vendor-managed")
+	}
+
+	// fnOS App Center resolved symlink (/vol1/@appcenter/plex/docker) must be vendor-managed
+	if !isVendorManagedContainer(map[string]string{
+		"com.docker.compose.project.working_dir": "/vol1/@appcenter/plex/docker",
+	}, nil, nil) {
+		t.Fatal("/vol1/@appcenter/* must be detected as vendor-managed")
+	}
+
+	// TRIM_APPDEST env var must be vendor-managed
+	if !isVendorManagedContainer(nil, []string{"TRIM_APPDEST=/var/apps/jellyfin/target"}, nil) {
+		t.Fatal("TRIM_APPDEST env must be detected as vendor-managed")
+	}
+
+	// User container mounting shared data folder (/var/apps/notepad/share/notes) must NOT be locked as vendor-managed
+	if isVendorManagedContainer(nil, nil, []string{"/var/apps/notepad/share/notes"}) {
+		t.Fatal("/var/apps/*/share/* user data mount must NOT lock user container")
+	}
+}

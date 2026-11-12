@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/kukushouhou/DKStore/internal/checker"
 	"github.com/kukushouhou/DKStore/internal/config"
 	"github.com/kukushouhou/DKStore/internal/host"
+	"github.com/kukushouhou/DKStore/internal/hostauth"
 	"github.com/kukushouhou/DKStore/internal/ignore"
 	"github.com/kukushouhou/DKStore/internal/inventory"
 	"github.com/kukushouhou/DKStore/internal/notify"
@@ -88,42 +91,81 @@ func run() error {
 		log.Warn("未使用内嵌前端（开发模式或前端未构建）")
 	}
 
+	handler := api.New(api.Deps{
+		Log:     log,
+		Store:   st,
+		Auth:    authSvc,
+		Hosts:   hostReg,
+		Reg:     regCli,
+		Ignore:  ignSvc,
+		Notify:  ntfSvc,
+		Checker: chkSvc,
+		Updater: upSvc,
+		Assets:  assets,
+	}).Handler()
+
 	srv := &http.Server{
-		Addr: cfg.Listen,
-		Handler: api.New(api.Deps{
-			Log:     log,
-			Store:   st,
-			Auth:    authSvc,
-			Hosts:   hostReg,
-			Reg:     regCli,
-			Ignore:  ignSvc,
-			Notify:  ntfSvc,
-			Checker: chkSvc,
-			Updater: upSvc,
-			Assets:  assets,
-		}).Handler(),
+		Addr:              cfg.Listen,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		log.Info("HTTP 服务监听", "addr", cfg.Listen)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
+	var unixSrv *http.Server
+	if cfg.UnixSocket != "" {
+		_ = os.Remove(cfg.UnixSocket)
+		if err := os.MkdirAll(filepath.Dir(cfg.UnixSocket), 0o755); err != nil {
+			return fmt.Errorf("创建 Unix Socket 目录失败: %w", err)
 		}
-		close(errCh)
-	}()
+		unixLn, err := net.Listen("unix", cfg.UnixSocket)
+		if err != nil {
+			return fmt.Errorf("监听 Unix Socket (%s) 失败: %w", cfg.UnixSocket, err)
+		}
+		_ = os.Chmod(cfg.UnixSocket, 0o666)
+		unixSrv = &http.Server{
+			Handler:           handler,
+			ReadHeaderTimeout: 10 * time.Second,
+			ConnContext: func(c context.Context, _ net.Conn) context.Context {
+				return hostauth.WithTrustedGateway(c)
+			},
+		}
+		go func() {
+			log.Info("Unix Socket 网关监听", "socket", cfg.UnixSocket)
+			if err := unixSrv.Serve(unixLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("Unix Socket 服务异常退出", "err", err)
+			}
+		}()
+	}
+
+	errCh := make(chan error, 1)
+	if cfg.Listen != "" {
+		go func() {
+			log.Info("HTTP 服务监听", "addr", cfg.Listen)
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+			close(errCh)
+		}()
+	}
 
 	select {
-	case err := <-errCh:
-		return err
+	case err, ok := <-errCh:
+		if ok && err != nil {
+			return err
+		}
 	case <-ctx.Done():
 	}
 
 	log.Info("正在停止…")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	return srv.Shutdown(shutdownCtx)
+	if unixSrv != nil {
+		_ = unixSrv.Shutdown(shutdownCtx)
+		_ = os.Remove(cfg.UnixSocket)
+	}
+	if cfg.Listen != "" {
+		return srv.Shutdown(shutdownCtx)
+	}
+	return nil
 }
 
 func newLogger(level string) *slog.Logger {

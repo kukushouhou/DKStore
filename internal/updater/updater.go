@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1049,7 +1050,7 @@ func (s *Service) executeJob(j Job) {
 		}
 	}
 
-	ad, _, err := s.hosts.OpenAdapter(ctx, j.HostID)
+	ad, h, err := s.hosts.OpenAdapter(ctx, j.HostID)
 	if err != nil {
 		tracker.fail(j, "connect_failed", i18n.DetailOf(err))
 		return
@@ -1088,6 +1089,7 @@ func (s *Service) executeJob(j Job) {
 			code = ue.Code
 			msg = ue.Message
 		}
+		code, msg = normalizeUpdateError(code, msg, h)
 		tracker.fail(j, code, msg)
 		return
 	}
@@ -1112,7 +1114,7 @@ func (s *Service) executeComposeJob(j Job, proj platform.ProjectInfo, newYAML st
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	ad, _, err := s.hosts.OpenAdapter(ctx, j.HostID)
+	ad, h, err := s.hosts.OpenAdapter(ctx, j.HostID)
 	if err != nil {
 		tracker.fail(j, "connect_failed", i18n.DetailOf(err))
 		return
@@ -1129,6 +1131,7 @@ func (s *Service) executeComposeJob(j Job, proj platform.ProjectInfo, newYAML st
 			code = ue.Code
 			msg = ue.Message
 		}
+		code, msg = normalizeUpdateError(code, msg, h)
 		tracker.fail(j, code, msg)
 		return
 	}
@@ -1174,7 +1177,7 @@ func (s *Service) executeStandaloneConfigJob(j Job, env []platform.EnvVar, ports
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
-	ad, _, err := s.hosts.OpenAdapter(ctx, j.HostID)
+	ad, h, err := s.hosts.OpenAdapter(ctx, j.HostID)
 	if err != nil {
 		tracker.fail(j, "connect_failed", i18n.DetailOf(err))
 		return
@@ -1212,6 +1215,7 @@ func (s *Service) executeStandaloneConfigJob(j Job, env []platform.EnvVar, ports
 			code = ue.Code
 			msg = ue.Message
 		}
+		code, msg = normalizeUpdateError(code, msg, h)
 		tracker.fail(j, code, msg)
 		return
 	}
@@ -1372,4 +1376,61 @@ func splitRefAndTag(ref string) (repo, tag string) {
 func replaceRefTag(origRef, newTag string) string {
 	base, _ := splitRefAndTag(origRef)
 	return base + ":" + newTag
+}
+
+// normalizeUpdateError 识别旧版 Docker Engine (< 20.10.10) 拉取 zstd 压缩层触发的 invalid tar header 错误，转为直观可操作提示。
+func normalizeUpdateError(code, msg string, h *host.Host) (string, string) {
+	if code != "pull_failed" && code != "recreate_failed" {
+		return code, msg
+	}
+	raw := i18n.LocalizeDetail(i18n.ZhCN, msg)
+	lower := strings.ToLower(raw)
+	isZstdUnpackErr := (strings.Contains(raw, "ApplyLayer") && strings.Contains(raw, "archive/tar: invalid tar header")) ||
+		(strings.Contains(lower, "zstd") && (strings.Contains(lower, "unhandled") || strings.Contains(lower, "unsupported")))
+	if !isZstdUnpackErr {
+		return code, msg
+	}
+	if h != nil && h.Info != nil && isDockerBeforeZstd(h.Info.DockerVersion) {
+		return "pull_failed", i18n.EngineDetail(i18n.MsgDockerPullOldZstdVer, strings.TrimSpace(h.Info.DockerVersion))
+	}
+	if strings.Contains(raw, "ApplyLayer") && strings.Contains(raw, "archive/tar: invalid tar header") {
+		return "pull_failed", i18n.EngineDetail(i18n.MsgDockerPullOldZstd)
+	}
+	return code, msg
+}
+
+// isDockerBeforeZstd 判断 Docker Engine 版本号是否早于原生支持 zstd OCI 层解压的 20.10.10。
+func isDockerBeforeZstd(ver string) bool {
+	s := strings.TrimPrefix(strings.TrimSpace(ver), "v")
+	if idx := strings.IndexAny(s, "-+ "); idx >= 0 {
+		s = s[:idx]
+	}
+	parts := strings.Split(s, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	maj, err1 := strconv.Atoi(parts[0])
+	min, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	patch := 0
+	if len(parts) >= 3 {
+		if p, err := strconv.Atoi(parts[2]); err == nil {
+			patch = p
+		}
+	}
+	if maj < 20 {
+		return true
+	}
+	if maj > 20 {
+		return false
+	}
+	if min < 10 {
+		return true
+	}
+	if min > 10 {
+		return false
+	}
+	return patch < 10
 }

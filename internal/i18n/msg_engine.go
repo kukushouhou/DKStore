@@ -42,6 +42,8 @@ const (
 	MsgDockerUnhealthy         = "docker.unhealthy"           // 容器健康检查未通过
 	MsgDockerInspectPulled     = "docker.inspect_pulled"      // 读取新拉取镜像信息失败: %s
 	MsgDockerPullFailed        = "docker.pull_failed"         // 拉取失败: %s
+	MsgDockerPullOldZstdVer    = "docker.pull_old_zstd_ver"   // 目标设备 Docker 版本过旧（当前 %s），不支持 zstd
+	MsgDockerPullOldZstd       = "docker.pull_old_zstd"       // 目标设备 Docker 版本过旧，不支持 zstd
 	MsgDockerVendorReadonly    = "docker.vendor_readonly"     // 厂商托管容器不可直接修改
 	MsgDockerNoExec            = "docker.no_exec"             // 传输层不支持更新执行
 	MsgDockerImageChanged      = "docker.image_changed"       // 容器镜像已被外部修改 (%s -> %s)
@@ -104,6 +106,8 @@ var engineMessages = map[string][2]string{
 	MsgDockerUnhealthy:         {"容器健康检查未通过（unhealthy）", "Container health check failed (unhealthy)"},
 	MsgDockerInspectPulled:     {"读取新拉取镜像信息失败：%s", "Failed to inspect the pulled image: %s"},
 	MsgDockerPullFailed:        {"%s", "%s"},
+	MsgDockerPullOldZstdVer:    {"目标设备 Docker 版本过旧（当前 %s），不支持解压新版镜像的 zstd 压缩层，请先升级该设备的 Docker（需 ≥ 20.10.10）", "Docker Engine on the target host is too old (currently %s) to extract zstd-compressed image layers; please upgrade Docker on that host to 20.10.10 or newer"},
+	MsgDockerPullOldZstd:       {"目标设备 Docker 版本过旧，不支持解压新版镜像的 zstd 压缩层，请先升级该设备的 Docker（需 ≥ 20.10.10）", "Docker Engine on the target host is too old to extract zstd-compressed image layers; please upgrade Docker on that host to 20.10.10 or newer"},
 	MsgDockerVendorReadonly:    {"该容器由系统套件托管，不能直接修改", "This container is managed by the vendor package and cannot be modified directly"},
 	MsgDockerNoExec:            {"当前连接方式不支持执行更新", "The current connection does not support update execution"},
 	MsgDockerImageChanged:      {"容器镜像已被外部修改（%s → %s）", "Container image was changed externally (%s → %s)"},

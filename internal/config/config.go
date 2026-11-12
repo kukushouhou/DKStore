@@ -11,17 +11,19 @@ import (
 
 // Config 是进程级启动配置；运行期可调整的设置存放在数据库 setting 表中。
 type Config struct {
-	Listen   string // HTTP 监听地址
-	DataDir  string // 数据目录：数据库、密钥、日志
-	LogLevel string // debug | info | warn | error
-	DevMode  bool   // 开发模式：不提供内嵌前端，由 Vite dev server 代理
+	Listen     string // HTTP 监听地址（TCP）
+	UnixSocket string // 可选本地网关 Unix Socket 路径（如飞牛 fnOS ${TRIM_APPDEST}/app.sock）
+	DataDir    string // 数据目录：数据库、密钥、日志
+	LogLevel   string // debug | info | warn | error
+	DevMode    bool   // 开发模式：不提供内嵌前端，由 Vite dev server 代理
 }
 
-// Load 解析命令行参数与环境变量。环境变量：DKSTORE_LISTEN、DKSTORE_DATA_DIR、DKSTORE_LOG_LEVEL、DKSTORE_DEV。
+// Load 解析命令行参数与环境变量。环境变量：DKSTORE_LISTEN、DKSTORE_UNIX_SOCKET、DKSTORE_DATA_DIR、DKSTORE_LOG_LEVEL、DKSTORE_DEV。
 func Load(args []string) (*Config, error) {
 	fs := flag.NewFlagSet("dkstore", flag.ContinueOnError)
 	c := &Config{}
 	fs.StringVar(&c.Listen, "listen", envOr("DKSTORE_LISTEN", ":8780"), "HTTP 监听地址")
+	fs.StringVar(&c.UnixSocket, "unix-socket", envOr("DKSTORE_UNIX_SOCKET", ""), "本地网关 Unix Socket 路径")
 	fs.StringVar(&c.DataDir, "data", envOr("DKSTORE_DATA_DIR", "./data"), "数据目录")
 	fs.StringVar(&c.LogLevel, "log-level", envOr("DKSTORE_LOG_LEVEL", "info"), "日志级别")
 	fs.BoolVar(&c.DevMode, "dev", envOr("DKSTORE_DEV", "") == "1", "开发模式")

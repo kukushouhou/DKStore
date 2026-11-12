@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kukushouhou/DKStore/internal/hostauth"
 	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/platform"
 	"github.com/kukushouhou/DKStore/internal/platform/docker"
@@ -132,7 +133,7 @@ type dbtx interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-// EnsureLocalHost 在主机表为空且本机存在 /var/run/docker.sock 时，自动添加一条“本机 Docker”记录。
+// EnsureLocalHost 在主机表为空且本机存在 /var/run/docker.sock 时，自动添加一条本机设备记录。
 func (r *Registry) EnsureLocalHost(ctx context.Context) error {
 	var count int
 	if err := r.st.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM host`).Scan(&count); err != nil {
@@ -145,9 +146,15 @@ func (r *Registry) EnsureLocalHost(ctx context.Context) error {
 	if _, err := os.Stat(sock); err != nil {
 		return nil
 	}
+	name := "本机 Docker"
+	kind := "docker"
+	if hostauth.DetectInstallMode(hostauth.OSFS()) == hostauth.ModeFnOS {
+		name = "本机飞牛 NAS"
+		kind = "fnos"
+	}
 	_, err := r.Create(ctx, CreateOrUpdateInput{
-		Name:      "本机 Docker",
-		Kind:      "docker",
+		Name:      name,
+		Kind:      kind,
 		Transport: "local",
 	}, i18n.ZhCN)
 	return err
@@ -815,6 +822,12 @@ func (r *Registry) testConnection(ctx context.Context, in CreateOrUpdateInput, l
 				Message: tr("仅使用标准 Docker/Compose 发现", "Using standard Docker/Compose discovery"),
 			})
 		}
+	} else if in.Kind == "fnos" || isFnOSTarget(ctx, sshTr) {
+		res.Steps = append(res.Steps, StepResult{
+			Step:    tr("飞牛 fnOS 应用中心边界识别", "fnOS App Center boundary protection"),
+			Status:  "ok",
+			Message: tr("已启用（原位更新 Compose 项目，自动将 /var/apps 套件容器保护为只读）", "Enabled (in-place Compose updates; protects /var/apps packages as read-only)"),
+		})
 	}
 	res.OK = true
 	res.Info = info
@@ -941,6 +954,10 @@ func (r *Registry) OpenAdapter(ctx context.Context, hostID string) (platform.Ada
 		}
 		return synology.New(h.ID, sshTr, dsmCfg), h, nil
 	}
+	if h.Kind != "fnos" && isFnOSTarget(ctx, sshTr) {
+		h.Kind = "fnos"
+		_, _ = r.st.DB.ExecContext(ctx, `UPDATE host SET kind='fnos' WHERE id=?`, h.ID)
+	}
 	return docker.New(h.ID, sshTr), h, nil
 }
 
@@ -954,6 +971,14 @@ func (r *Registry) recordHostKeyChange(ctx context.Context, id, prevKey, newKey 
 func isSynologyTarget(ctx context.Context, tr transport.Transport) bool {
 	b, err := tr.ReadFile(ctx, "/etc.defaults/VERSION")
 	return err == nil && len(b) > 0
+}
+
+func isFnOSTarget(ctx context.Context, tr transport.Transport) bool {
+	if b, err := tr.ReadFile(ctx, "/proc/sys/kernel/osrelease"); err == nil && strings.Contains(strings.ToLower(string(b)), "-trim") {
+		return true
+	}
+	b, err := tr.ReadFile(ctx, "/etc/trim_version")
+	return err == nil && len(strings.TrimSpace(string(b))) > 0
 }
 
 func (r *Registry) markOffline(ctx context.Context, id string) {

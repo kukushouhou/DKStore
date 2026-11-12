@@ -17,7 +17,7 @@ type fakeHost struct {
 
 func (f fakeHost) InstallMode() string { return f.mode }
 func (f fakeHost) Supported() bool {
-	return f.mode == hostauth.ModeSynology || f.mode == hostauth.ModeOpenWrt
+	return f.mode == hostauth.ModeSynology || f.mode == hostauth.ModeFnOS || f.mode == hostauth.ModeOpenWrt
 }
 func (f fakeHost) Verify(context.Context, *http.Request) hostauth.Result { return f.res }
 
@@ -65,6 +65,8 @@ func TestStatusModes(t *testing.T) {
 		{"syno uninit trusted", fakeHost{hostauth.ModeSynology, okHost}, "", ModeSetupRequired, false, "", false, "setup_required"},
 		{"owrt uninit trusted", fakeHost{hostauth.ModeOpenWrt, okHost}, "", ModeSetupRequired, false, "", false, "setup_required"},
 		{"syno uninit untrusted blocked", fakeHost{hostauth.ModeSynology, failHost}, "", ModeHostLoginRequired, false, hostauth.ReasonNoCookie, false, "setup_required"},
+		{"fnos uninit trusted gateway zero-pw", fakeHost{hostauth.ModeFnOS, okHost}, "", ModeDevice, true, "", true, ""},
+		{"fnos uninit untrusted tcp blocked", fakeHost{hostauth.ModeFnOS, hostauth.Result{Reason: hostauth.ReasonNoFnOSGateway}}, "", ModeHostLoginRequired, false, hostauth.ReasonNoFnOSGateway, false, "setup_required"},
 		{"pw set, trusted host auto login", fakeHost{hostauth.ModeSynology, okHost}, hashPassword("secret1"), ModeDevice, true, "", true, ""},
 		{"pw set, untrusted browser needs pw", fakeHost{hostauth.ModeSynology, failHost}, hashPassword("secret1"), ModePassword, false, "", false, "unauthorized"},
 		{"pw set docker", fakeHost{hostauth.ModeDocker, failHost}, hashPassword("secret1"), ModePassword, false, "", false, "unauthorized"},

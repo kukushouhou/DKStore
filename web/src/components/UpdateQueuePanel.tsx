@@ -107,7 +107,7 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
     if (isDone) return t.queue.layerDone
     switch (layer.status) {
       case 'downloading':
-        return t.queue.layerDownloading
+        return (layer.percent ?? 0) >= 100 ? t.queue.layerDownloaded : t.queue.layerDownloading
       case 'extracting':
         return t.queue.layerExtracting
       case 'done':
@@ -281,7 +281,8 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
           const doneLayers =
             job.status === 'succeeded'
               ? layers.length
-              : layers.filter((l) => l.status === 'done' || (l.percent ?? 0) >= 100).length
+              : layers.filter((l) => l.status === 'done').length
+          const hasExtracting = layers.some((l) => l.status === 'extracting')
           const unifiedPct =
             job.status === 'succeeded'
               ? 100
@@ -391,24 +392,33 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
                 <Flex align="center" gap={8}>
                   <Flex align="center" gap={3} style={{ flex: 1, minWidth: 0 }}>
                     {layers.map((layer, idx) => {
-                      const isDone =
-                        job.status === 'succeeded' ||
-                        layer.status === 'done' ||
-                        (layer.percent ?? 0) >= 100
+                      const isDone = job.status === 'succeeded' || layer.status === 'done'
+                      const stagePct = Math.max(0, Math.min(100, layer.percent ?? 0))
                       const pct = isDone
                         ? 100
-                        : Math.max(0, Math.min(100, layer.percent ?? 0))
-                      const fillBg =
-                        job.status === 'failed' && !isDone
+                        : layer.status === 'extracting'
+                          ? 55 + Math.round(0.44 * (layer.percent !== undefined ? stagePct : 50))
+                          : layer.status === 'downloading'
+                            ? Math.round(0.55 * stagePct)
+                            : 0
+                      const isFailedLayer =
+                        job.status === 'failed' &&
+                        !isDone &&
+                        (hasExtracting
+                          ? layer.status === 'extracting'
+                          : layer.status === 'downloading' || pct > 0)
+                      const fillBg = isDone
+                        ? token.colorSuccess
+                        : isFailedLayer
                           ? token.colorError
-                          : isDone
-                            ? token.colorSuccess
+                          : job.status === 'failed'
+                            ? token.colorTextQuaternary
                             : token.colorPrimary
                       const sizeInfo =
                         layer.total > 0
-                          ? ` · ${formatBytes(layer.current)} / ${formatBytes(layer.total)} (${Math.round(pct)}%)`
-                          : pct > 0 && !isDone
-                            ? ` (${Math.round(pct)}%)`
+                          ? ` · ${formatBytes(layer.current)} / ${formatBytes(layer.total)} (${Math.round(stagePct)}%)`
+                          : stagePct > 0 && !isDone
+                            ? ` (${Math.round(stagePct)}%)`
                             : ''
                       const tip = `${t.queue.layerIdLabel} ${layer.id || idx + 1}: ${formatLayerStatus(layer, isDone)}${sizeInfo}`
 

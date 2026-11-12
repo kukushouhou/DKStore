@@ -295,6 +295,8 @@ func HostAuthHint(lang Lang, code string) string {
 			return "The device login session is invalid or has expired. Sign in to the device admin page again and refresh."
 		case "host_not_admin":
 			return "The account signed in to the device is not an administrator."
+		case "no_fnos_gateway":
+			return "Please open DKStore from the fnOS desktop icon first, or sign in via the fnOS web desktop."
 		}
 		return ""
 	}
@@ -309,6 +311,8 @@ func HostAuthHint(lang Lang, code string) string {
 		return "设备登录状态无效或已过期，请重新登录设备管理后台后刷新本页。"
 	case "host_not_admin":
 		return "当前登录设备的账号不是管理员。"
+	case "no_fnos_gateway":
+		return "请从飞牛 fnOS 桌面点击 DKStore 图标免密进入（在设置中配置密码后，即可通过端口直连访问）。"
 	}
 	return ""
 }
@@ -417,6 +421,9 @@ func formatAppSvc(it NotifyItem) string {
 // FormatUpdateError 根据更新错误编码生成对应语言的可读错误消息（立项文档 §7.2）。
 func FormatUpdateError(lang Lang, code, detail string) string {
 	detail = LocalizeDetail(lang, detail)
+	if code == "pull_failed" && strings.Contains(detail, "ApplyLayer") && strings.Contains(detail, "archive/tar: invalid tar header") {
+		detail = EngineMessage(lang, MsgDockerPullOldZstd)
+	}
 	if lang == EnUS {
 		switch code {
 		case "external_conflict":

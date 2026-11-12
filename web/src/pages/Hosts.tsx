@@ -43,11 +43,11 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError, type HostInput, type HostItem, type HostTestResult } from '../api/client'
 import { useI18n } from '../i18n'
 
-type PlatformId = 'synology' | 'linux' | 'local'
+type PlatformId = 'synology' | 'fnos' | 'linux' | 'local'
 
 interface PlatformSpec {
   id: PlatformId
-  kind: 'synology' | 'docker'
+  kind: 'synology' | 'fnos' | 'docker'
   transports: ('dsm_api' | 'ssh' | 'local')[]
   defaultTransport: 'dsm_api' | 'ssh' | 'local'
 }
@@ -58,6 +58,12 @@ const PLATFORM_SPECS: PlatformSpec[] = [
     kind: 'synology',
     transports: ['dsm_api', 'ssh'],
     defaultTransport: 'dsm_api',
+  },
+  {
+    id: 'fnos',
+    kind: 'fnos',
+    transports: ['ssh'],
+    defaultTransport: 'ssh',
   },
   {
     id: 'linux',
@@ -170,7 +176,13 @@ export default function HostsPage() {
     setOtpCode('')
     form.resetFields()
     const initPlatform: PlatformId =
-      h.transport === 'local' ? 'local' : h.kind === 'synology' ? 'synology' : 'linux'
+      h.transport === 'local'
+        ? 'local'
+        : h.kind === 'synology'
+          ? 'synology'
+          : h.kind === 'fnos'
+            ? 'fnos'
+            : 'linux'
     setPlatformId(initPlatform)
     form.setFieldsValue({
       name: h.name,
@@ -293,6 +305,12 @@ export default function HostsPage() {
           title: t.hosts.platformSynology,
           desc: t.hosts.platformSynologyDesc,
         }
+      case 'fnos':
+        return {
+          icon: <HddOutlined style={{ fontSize: 20, color: token.colorPrimary }} />,
+          title: t.hosts.platformFnos,
+          desc: t.hosts.platformFnosDesc,
+        }
       case 'linux':
         return {
           icon: <CloudServerOutlined style={{ fontSize: 20, color: token.colorPrimary }} />,
@@ -412,6 +430,7 @@ export default function HostsPage() {
                 <Space direction="vertical" size={6} style={{ width: '100%' }}>
                   <Space wrap>
                     {h.kind === 'synology' && <Tag color="geekblue">Synology DSM</Tag>}
+                    {h.kind === 'fnos' && <Tag color="cyan">{t.hosts.tagFnos}</Tag>}
                     <Tag>
                       {h.transport === 'local'
                         ? t.hosts.localSocket
@@ -538,6 +557,19 @@ export default function HostsPage() {
             <Form.Item name="transport" hidden>
               <Input />
             </Form.Item>
+
+            {platformId === 'fnos' && (
+              <Alert
+                type="info"
+                showIcon
+                style={{ marginBottom: 16 }}
+                title={
+                  <Typography.Text style={{ fontSize: token.fontSizeSM }}>
+                    {t.hosts.fnosSshGuide}
+                  </Typography.Text>
+                }
+              />
+            )}
 
             {/* 2. 连接方式切换（当平台支持多种连接方式时显示 Segmented + 对称优缺点提示卡片） */}
             {currentSpec.transports.length > 1 && (
