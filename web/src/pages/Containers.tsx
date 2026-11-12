@@ -19,6 +19,7 @@ import {
 import {
   DownOutlined,
   ExpandAltOutlined,
+  HddOutlined,
   PlusOutlined,
   ReloadOutlined,
   RightOutlined,
@@ -49,6 +50,50 @@ function formatMem(bytes: number): string {
   return `${mb >= 10 ? mb.toFixed(0) : mb.toFixed(1)} MB`
 }
 
+function mergeFastWithCachedStats(
+  fastItems: AppRuntimeTree[],
+  statsItems?: AppRuntimeTree[],
+): AppRuntimeTree[] {
+  if (!statsItems || statsItems.length === 0) return fastItems
+  const appStatsByKey = new Map<string, AppRuntimeTree>()
+  for (const sApp of statsItems) {
+    if (sApp.statsReady !== false) {
+      appStatsByKey.set(sApp.key, sApp)
+    }
+  }
+  if (appStatsByKey.size === 0) return fastItems
+
+  return fastItems.map((fApp) => {
+    const prevApp = appStatsByKey.get(fApp.key)
+    if (!prevApp) return fApp
+    const cMap = new Map<string, ContainerRuntimeStat>()
+    for (const sc of prevApp.containers) {
+      cMap.set(sc.id || sc.name, sc)
+    }
+    let cpuSum = 0
+    let memSum = 0
+    const mergedContainers = fApp.containers.map((fc) => {
+      const prevC = cMap.get(fc.id || fc.name)
+      if (!prevC || fc.state !== 'running') return fc
+      cpuSum += prevC.cpuPercent
+      memSum += prevC.memUsage
+      return {
+        ...fc,
+        cpuPercent: prevC.cpuPercent,
+        memUsage: prevC.memUsage,
+        memLimit: prevC.memLimit,
+      }
+    })
+    return {
+      ...fApp,
+      cpuPercent: Math.round(cpuSum * 100) / 100,
+      memUsage: memSum,
+      statsReady: true,
+      containers: mergedContainers,
+    }
+  })
+}
+
 export default function ContainersPage() {
   const { locale, t } = useI18n()
   const { token } = theme.useToken()
@@ -69,14 +114,64 @@ export default function ContainersPage() {
     queryKey: ['hosts', locale],
     queryFn: api.listHosts,
   })
-  const containersQuery = useQuery({
-    queryKey: ['containers', hostFilter, locale],
-    queryFn: () => api.listContainers(hostFilter || undefined),
+
+  // 首屏快速列表（跳过慢速 stats 采样，毫秒级返回结构与运行状态）
+  const fastQuery = useQuery({
+    queryKey: ['containers-fast', hostFilter],
+    queryFn: () => api.listContainers(hostFilter || undefined, false),
+    staleTime: 10000,
+  })
+
+  // 完整实时资源占用轮询（异步补齐 CPU / 内存并在后台定时刷新）
+  const statsQuery = useQuery({
+    queryKey: ['containers', hostFilter],
+    queryFn: () => api.listContainers(hostFilter || undefined, true),
     refetchInterval: 10000,
   })
 
-  const hosts = hostsQuery.data?.items ?? []
-  const rawTrees = useMemo(() => containersQuery.data?.items ?? [], [containersQuery.data?.items])
+  const hosts = useMemo(() => hostsQuery.data?.items ?? [], [hostsQuery.data?.items])
+
+  const rawTrees = useMemo(() => {
+    const statsItems = statsQuery.data?.items
+    const fastItems = fastQuery.data?.items
+    if (statsItems && (!fastItems || statsQuery.dataUpdatedAt >= fastQuery.dataUpdatedAt)) {
+      return statsItems
+    }
+    if (fastItems) {
+      return mergeFastWithCachedStats(fastItems, statsItems)
+    }
+    return statsItems ?? []
+  }, [fastQuery.data?.items, fastQuery.dataUpdatedAt, statsQuery.data?.items, statsQuery.dataUpdatedAt])
+
+  const distinctHostCount = useMemo(() => {
+    const ids = new Set<string>()
+    for (const h of hosts) ids.add(h.id)
+    for (const a of rawTrees) {
+      if (a.hostId) ids.add(a.hostId)
+    }
+    return ids.size
+  }, [hosts, rawTrees])
+
+  // 当存在多台设备且处于「全部设备」视图时，独立展示「所属设备」列；单设备或已筛选具体设备时自动收起冗余列
+  const showHostCol = distinctHostCount > 1 && !hostFilter
+
+  const colSpan = showHostCol
+    ? {
+        name: { xs: 10, md: 7 },
+        host: { xs: 5, md: 3 },
+        state: { xs: 5, md: 3 },
+        uptime: { xs: 0, md: 3 },
+        resource: { xs: 4, md: 3 },
+        image: { xs: 0, md: 5 },
+      }
+    : {
+        name: { xs: 12, md: 8 },
+        host: { xs: 0, md: 0 },
+        state: { xs: 6, md: 3 },
+        uptime: { xs: 0, md: 3 },
+        resource: { xs: 6, md: 4 },
+        image: { xs: 0, md: 6 },
+      }
 
   const counts = useMemo(() => {
     let all = 0
@@ -96,13 +191,15 @@ export default function ContainersPage() {
     const q = keyword.trim().toLowerCase()
     const result: AppRuntimeTree[] = []
     for (const app of rawTrees) {
-      const appNameMatches = q ? app.name.toLowerCase().includes(q) : true
+      const appOrHostMatches = q
+        ? app.name.toLowerCase().includes(q) || app.hostName.toLowerCase().includes(q)
+        : true
       const matchedContainers = app.containers.filter((c) => {
         const isRunning = c.state === 'running'
         if (stateFilter === 'running' && !isRunning) return false
         if (stateFilter === 'stopped' && isRunning) return false
         if (!q) return true
-        if (appNameMatches) return true
+        if (appOrHostMatches) return true
         return (
           c.name.toLowerCase().includes(q) ||
           (c.service && c.service.toLowerCase().includes(q)) ||
@@ -142,6 +239,14 @@ export default function ContainersPage() {
   const toggleOne = (key: string) => {
     setCollapsedKeys((prev) => ({ ...prev, [key]: !prev[key] }))
   }
+
+  const handleRefresh = () => {
+    void fastQuery.refetch()
+    void statsQuery.refetch()
+  }
+
+  const isInitialLoading = fastQuery.isPending && statsQuery.isPending
+  const isRefreshing = fastQuery.isFetching || statsQuery.isFetching
 
   const formatUptime = (c: ContainerRuntimeStat): string => {
     if (c.state !== 'running') {
@@ -232,6 +337,36 @@ export default function ContainersPage() {
     return <Badge status="default" text={t.containers.stateStopped} />
   }
 
+  const renderHostCell = (hostName: string, muted = false) => (
+    <Flex align="center" gap={6} style={{ minWidth: 0, paddingRight: 8, opacity: muted ? 0.65 : 1 }}>
+      <HddOutlined style={{ color: token.colorTextTertiary, fontSize: token.fontSizeSM, flexShrink: 0 }} />
+      <Typography.Text
+        type="secondary"
+        style={{ fontSize: token.fontSizeSM }}
+        ellipsis={{ tooltip: hostName }}
+      >
+        {hostName}
+      </Typography.Text>
+    </Flex>
+  )
+
+  const renderImageCell = (image: string) => (
+    <Tooltip title={image}>
+      <Typography.Text
+        type="secondary"
+        style={{
+          fontSize: token.fontSizeSM,
+          fontFamily: token.fontFamilyCode,
+          maxWidth: '100%',
+          display: 'inline-block',
+        }}
+        ellipsis
+      >
+        {image}
+      </Typography.Text>
+    </Tooltip>
+  )
+
   const renderInitialBadge = (name: string) => (
     <Tag
       color={pickTagColor(name)}
@@ -280,9 +415,9 @@ export default function ContainersPage() {
             </Button>
           )}
           <Button
-            icon={<ReloadOutlined spin={containersQuery.isFetching} />}
-            loading={containersQuery.isFetching}
-            onClick={() => containersQuery.refetch()}
+            icon={<ReloadOutlined spin={isRefreshing} />}
+            loading={isRefreshing && isInitialLoading}
+            onClick={handleRefresh}
           >
             {t.containers.refresh}
           </Button>
@@ -331,7 +466,7 @@ export default function ContainersPage() {
         />
       </Flex>
 
-      {containersQuery.isPending ? (
+      {isInitialLoading ? (
         <Flex justify="center" style={{ padding: 48 }}>
           <Spin />
         </Flex>
@@ -341,7 +476,7 @@ export default function ContainersPage() {
         </Card>
       ) : (
         <Card styles={{ body: { padding: 0 } }} style={{ overflow: 'hidden' }}>
-          {/* 统一表头（5 列：8 / 4 / 4 / 4 / 4） */}
+          {/* 统一表头（设备与当前镜像完全拆分独立） */}
           <Row
             align="middle"
             style={{
@@ -353,21 +488,12 @@ export default function ContainersPage() {
               color: token.colorTextSecondary,
             }}
           >
-            <Col xs={12} md={8}>
-              {t.containers.colName}
-            </Col>
-            <Col xs={6} md={4}>
-              {t.containers.colState}
-            </Col>
-            <Col xs={0} md={4}>
-              {t.containers.colUptime}
-            </Col>
-            <Col xs={6} md={4}>
-              {t.containers.colResource}
-            </Col>
-            <Col xs={0} md={4} style={{ textAlign: 'right' }}>
-              {t.containers.colImage}
-            </Col>
+            <Col {...colSpan.name}>{t.containers.colName}</Col>
+            {showHostCol && <Col {...colSpan.host}>{t.containers.colHost}</Col>}
+            <Col {...colSpan.state}>{t.containers.colState}</Col>
+            <Col {...colSpan.uptime}>{t.containers.colUptime}</Col>
+            <Col {...colSpan.resource}>{t.containers.colResource}</Col>
+            <Col {...colSpan.image}>{t.containers.colImage}</Col>
           </Row>
 
           {/* 树状行列表 */}
@@ -375,6 +501,7 @@ export default function ContainersPage() {
             const isProject = app.containers.length > 1
             const collapsed = Boolean(collapsedKeys[app.key])
             const isLastApp = appIdx === filteredTrees.length - 1
+            const statsReady = app.statsReady !== false
 
             // 单容器项目行
             if (!isProject && app.containers.length === 1) {
@@ -392,10 +519,10 @@ export default function ContainersPage() {
                     fontSize: token.fontSize,
                   }}
                 >
-                  <Col xs={12} md={8}>
-                    <Flex align="center" gap={10} style={{ paddingLeft: 22, minWidth: 0 }}>
+                  <Col {...colSpan.name}>
+                    <Flex align="center" gap={10} style={{ paddingLeft: 22, paddingRight: 8, minWidth: 0 }}>
                       {renderInitialBadge(app.name)}
-                      <Typography.Text strong ellipsis style={{ maxWidth: 200 }}>
+                      <Typography.Text strong ellipsis={{ tooltip: app.name }} style={{ maxWidth: 220 }}>
                         {app.name}
                       </Typography.Text>
                       <Tag
@@ -408,7 +535,7 @@ export default function ContainersPage() {
                                 ? 'purple'
                                 : undefined
                         }
-                        style={{ margin: 0 }}
+                        style={{ margin: 0, flexShrink: 0 }}
                       >
                         {app.source === 'dsm_project'
                           ? t.home.tagDSM
@@ -420,39 +547,29 @@ export default function ContainersPage() {
                       </Tag>
                     </Flex>
                   </Col>
-                  <Col xs={6} md={4}>
-                    {renderStateCell(c)}
-                  </Col>
-                  <Col xs={0} md={4}>
+                  {showHostCol && <Col {...colSpan.host}>{renderHostCell(app.hostName)}</Col>}
+                  <Col {...colSpan.state}>{renderStateCell(c)}</Col>
+                  <Col {...colSpan.uptime}>
                     <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                       {formatUptime(c)}
                     </Typography.Text>
                   </Col>
-                  <Col xs={6} md={4}>
-                    <Typography.Text
-                      style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
-                    >
-                      {isRunning
-                        ? `${c.cpuPercent.toFixed(1)}% · ${formatMem(c.memUsage)}`
-                        : '-'}
-                    </Typography.Text>
-                  </Col>
-                  <Col xs={0} md={4} style={{ textAlign: 'right' }}>
-                    <Tooltip title={`${c.image} (${app.hostName})`}>
-                      <Typography.Text
-                        type="secondary"
-                        style={{
-                          fontSize: token.fontSizeSM,
-                          fontFamily: token.fontFamilyCode,
-                          maxWidth: '100%',
-                          display: 'inline-block',
-                        }}
-                        ellipsis
-                      >
-                        {c.image}
+                  <Col {...colSpan.resource}>
+                    {!isRunning ? (
+                      <Typography.Text style={{ fontSize: token.fontSizeSM }}>-</Typography.Text>
+                    ) : !statsReady ? (
+                      <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                        {t.containers.statsLoading}
                       </Typography.Text>
-                    </Tooltip>
+                    ) : (
+                      <Typography.Text
+                        style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
+                      >
+                        {`${c.cpuPercent.toFixed(1)}% · ${formatMem(c.memUsage)}`}
+                      </Typography.Text>
+                    )}
                   </Col>
+                  <Col {...colSpan.image}>{renderImageCell(c.image)}</Col>
                 </Row>
               )
             }
@@ -460,6 +577,9 @@ export default function ContainersPage() {
             // 多容器项目父节点 + 子容器行
             const allRunning = app.runningCount === app.totalCount && app.totalCount > 0
             const someRunning = app.runningCount > 0 && app.runningCount < app.totalCount
+            const uniqueImages = Array.from(
+              new Set(app.containers.map((c) => c.image).filter(Boolean)),
+            )
 
             return (
               <div
@@ -484,24 +604,25 @@ export default function ContainersPage() {
                     fontSize: token.fontSize,
                   }}
                 >
-                  <Col xs={12} md={8}>
-                    <Flex align="center" gap={10} style={{ minWidth: 0 }}>
+                  <Col {...colSpan.name}>
+                    <Flex align="center" gap={10} style={{ paddingRight: 8, minWidth: 0 }}>
                       <Typography.Text
                         type="secondary"
-                        style={{ fontSize: token.fontSizeSM, width: 12, display: 'inline-block' }}
+                        style={{ fontSize: token.fontSizeSM, width: 12, display: 'inline-block', flexShrink: 0 }}
                       >
                         {collapsed ? <RightOutlined /> : <DownOutlined />}
                       </Typography.Text>
                       {renderInitialBadge(app.name)}
-                      <Typography.Text strong ellipsis style={{ maxWidth: 200 }}>
+                      <Typography.Text strong ellipsis={{ tooltip: app.name }} style={{ maxWidth: 220 }}>
                         {app.name}
                       </Typography.Text>
-                      <Tag color="blue" style={{ margin: 0 }}>
+                      <Tag color="blue" style={{ margin: 0, flexShrink: 0 }}>
                         {t.containers.projectTag.replace('{count}', String(app.totalCount))}
                       </Tag>
                     </Flex>
                   </Col>
-                  <Col xs={6} md={4}>
+                  {showHostCol && <Col {...colSpan.host}>{renderHostCell(app.hostName)}</Col>}
+                  <Col {...colSpan.state}>
                     <Badge
                       status={allRunning ? 'success' : someRunning ? 'warning' : 'default'}
                       text={
@@ -523,29 +644,53 @@ export default function ContainersPage() {
                       }
                     />
                   </Col>
-                  <Col xs={0} md={4}>
+                  <Col {...colSpan.uptime}>
                     <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                       {formatProjectUptime(app)}
                     </Typography.Text>
                   </Col>
-                  <Col xs={6} md={4}>
-                    <Typography.Text
-                      strong
-                      style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
-                    >
-                      {app.runningCount > 0
-                        ? `${app.cpuPercent.toFixed(1)}% · ${formatMem(app.memUsage)}`
-                        : '-'}
-                    </Typography.Text>
+                  <Col {...colSpan.resource}>
+                    {app.runningCount <= 0 ? (
+                      <Typography.Text strong style={{ fontSize: token.fontSizeSM }}>
+                        -
+                      </Typography.Text>
+                    ) : !statsReady ? (
+                      <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                        {t.containers.statsLoading}
+                      </Typography.Text>
+                    ) : (
+                      <Typography.Text
+                        strong
+                        style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
+                      >
+                        {`${app.cpuPercent.toFixed(1)}% · ${formatMem(app.memUsage)}`}
+                      </Typography.Text>
+                    )}
                   </Col>
-                  <Col xs={0} md={4} style={{ textAlign: 'right' }}>
-                    <Typography.Text
-                      type="secondary"
-                      style={{ fontSize: token.fontSizeSM }}
-                      ellipsis
-                    >
-                      {app.hostName}
-                    </Typography.Text>
+                  <Col {...colSpan.image}>
+                    {uniqueImages.length === 1 ? (
+                      renderImageCell(uniqueImages[0])
+                    ) : (
+                      <Tooltip
+                        title={
+                          <div style={{ fontFamily: token.fontFamilyCode, fontSize: token.fontSizeSM }}>
+                            {uniqueImages.map((img) => (
+                              <div key={img}>{img}</div>
+                            ))}
+                          </div>
+                        }
+                      >
+                        <Typography.Text
+                          type="secondary"
+                          style={{ fontSize: token.fontSizeSM, color: token.colorTextTertiary }}
+                        >
+                          {t.containers.projectImagesCount.replace(
+                            '{count}',
+                            String(uniqueImages.length),
+                          )}
+                        </Typography.Text>
+                      </Tooltip>
+                    )}
                   </Col>
                 </Row>
 
@@ -567,11 +712,11 @@ export default function ContainersPage() {
                           fontSize: token.fontSizeSM,
                         }}
                       >
-                        <Col xs={12} md={8}>
-                          <Flex align="center" gap={8} style={{ paddingLeft: 28, minWidth: 0 }}>
+                        <Col {...colSpan.name}>
+                          <Flex align="center" gap={8} style={{ paddingLeft: 28, paddingRight: 8, minWidth: 0 }}>
                             <Typography.Text
                               type="secondary"
-                              style={{ fontFamily: token.fontFamilyCode, userSelect: 'none' }}
+                              style={{ fontFamily: token.fontFamilyCode, userSelect: 'none', flexShrink: 0 }}
                             >
                               {isLastChild ? '└─' : '├─'}
                             </Typography.Text>
@@ -582,43 +727,35 @@ export default function ContainersPage() {
                               {c.name}
                             </Typography.Text>
                             {c.service && c.service !== c.name && (
-                              <Tag style={{ margin: 0 }}>{c.service}</Tag>
+                              <Tag style={{ margin: 0, flexShrink: 0 }}>{c.service}</Tag>
                             )}
                           </Flex>
                         </Col>
-                        <Col xs={6} md={4}>
-                          {renderStateCell(c)}
-                        </Col>
-                        <Col xs={0} md={4}>
+                        {showHostCol && (
+                          <Col {...colSpan.host}>{renderHostCell(app.hostName, true)}</Col>
+                        )}
+                        <Col {...colSpan.state}>{renderStateCell(c)}</Col>
+                        <Col {...colSpan.uptime}>
                           <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                             {formatUptime(c)}
                           </Typography.Text>
                         </Col>
-                        <Col xs={6} md={4}>
-                          <Typography.Text
-                            style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
-                          >
-                            {isRunning
-                              ? `${c.cpuPercent.toFixed(1)}% · ${formatMem(c.memUsage)}`
-                              : '-'}
-                          </Typography.Text>
-                        </Col>
-                        <Col xs={0} md={4} style={{ textAlign: 'right' }}>
-                          <Tooltip title={c.image}>
-                            <Typography.Text
-                              type="secondary"
-                              style={{
-                                fontSize: token.fontSizeSM,
-                                fontFamily: token.fontFamilyCode,
-                                maxWidth: '100%',
-                                display: 'inline-block',
-                              }}
-                              ellipsis
-                            >
-                              {c.image}
+                        <Col {...colSpan.resource}>
+                          {!isRunning ? (
+                            <Typography.Text style={{ fontSize: token.fontSizeSM }}>-</Typography.Text>
+                          ) : !statsReady ? (
+                            <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                              {t.containers.statsLoading}
                             </Typography.Text>
-                          </Tooltip>
+                          ) : (
+                            <Typography.Text
+                              style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
+                            >
+                              {`${c.cpuPercent.toFixed(1)}% · ${formatMem(c.memUsage)}`}
+                            </Typography.Text>
+                          )}
                         </Col>
+                        <Col {...colSpan.image}>{renderImageCell(c.image)}</Col>
                       </Row>
                     )
                   })}

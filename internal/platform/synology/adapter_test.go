@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/kukushouhou/DKStore/internal/platform"
@@ -296,5 +297,100 @@ func TestDSMStandaloneConfigReadAndUpdateWithBackupRestore(t *testing.T) {
 	cfgAfter, _ := ad.GetStandaloneConfig(t.Context(), "myapp", "main")
 	if len(cfgAfter.Env) != 2 || cfgAfter.Ports[0].HostPort != "28080" {
 		t.Fatalf("expected updated env and ports, got %+v", cfgAfter)
+	}
+}
+
+func TestListRuntimeAppsViaDSMAPI_FastModeSkipsStatsAndProjectGet(t *testing.T) {
+	var projGetHits, statsHits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		apiName := r.FormValue("api")
+		method := r.FormValue("method")
+		write := func(v any) { _ = json.NewEncoder(w).Encode(v) }
+		switch apiName + "." + method {
+		case "SYNO.API.Auth.login":
+			write(map[string]any{"success": true, "data": map[string]any{"sid": "sid-rt"}})
+		case "SYNO.Docker.Project.list":
+			write(map[string]any{
+				"success": true,
+				"data": map[string]any{
+					"p1": map[string]any{
+						"id":           "p1",
+						"name":         "immich",
+						"path":         "/volume1/docker/immich",
+						"status":       "RUNNING",
+						"containerIds": []string{"cid1111111111111", "cid2222222222222"},
+					},
+				},
+			})
+		case "SYNO.Docker.Project.get":
+			projGetHits.Add(1)
+			write(map[string]any{"success": true, "data": map[string]any{}})
+		case "SYNO.Docker.Container.list":
+			write(map[string]any{
+				"success": true,
+				"data": map[string]any{
+					"containers": []map[string]any{
+						{
+							"id":     "cid1111111111111",
+							"name":   "immich-server",
+							"Image":  "ghcr.io/immich-app/immich-server:release",
+							"status": "running",
+							"Labels": map[string]string{"com.docker.compose.project": "immich", "com.docker.compose.service": "immich-server"},
+							"State":  map[string]any{"Running": true, "Status": "running"},
+						},
+						{
+							"id":     "cid2222222222222",
+							"name":   "immich-redis",
+							"Image":  "redis:7-alpine",
+							"status": "running",
+							"Labels": map[string]string{"com.docker.compose.project": "immich", "com.docker.compose.service": "redis"},
+							"State":  map[string]any{"Running": true, "Status": "running"},
+						},
+					},
+				},
+			})
+		case "SYNO.Docker.Container.stats":
+			hit := statsHits.Add(1)
+			write(map[string]any{
+				"success": true,
+				"data": map[string]any{
+					"immich-server": map[string]any{
+						"cpu_stats": map[string]any{
+							"cpu_usage":        map[string]any{"total_usage": uint64(hit) * 40_000_000},
+							"system_cpu_usage": uint64(hit) * 1_000_000_000,
+							"online_cpus":      2,
+						},
+						"memory_stats": map[string]any{"usage": uint64(128 * 1024 * 1024), "limit": uint64(2048 * 1024 * 1024)},
+					},
+				},
+			})
+		default:
+			write(map[string]any{"success": true, "data": map[string]any{}})
+		}
+	}))
+	defer srv.Close()
+
+	ad := New("h-nas", nil, DSMConfig{URL: srv.URL, Username: "admin", Secret: "pass"})
+	defer ad.Close()
+
+	// Fast mode (withStats=false): 0 stats hits, 0 Project.get hits!
+	fast, err := ad.ListRuntimeAppsWithOptions(t.Context(), false)
+	if err != nil || len(fast) != 1 || len(fast[0].Containers) != 2 {
+		t.Fatalf("unexpected fast result: len=%d err=%v", len(fast), err)
+	}
+	if fast[0].StatsReady || statsHits.Load() != 0 || projGetHits.Load() != 0 {
+		t.Fatalf("expected 0 statsHits & 0 projGetHits, got stats=%d projGet=%d", statsHits.Load(), projGetHits.Load())
+	}
+
+	// Full stats mode: populates stats without N+1 Project.get, and warm call uses only 1 stats RPC
+	full1, err := ad.ListRuntimeAppsWithOptions(t.Context(), true)
+	if err != nil || !full1[0].StatsReady || full1[0].CPUPercent <= 0 || projGetHits.Load() != 0 {
+		t.Fatalf("unexpected full1: %+v projGet=%d err=%v", full1, projGetHits.Load(), err)
+	}
+	hitsAfterCold := statsHits.Load()
+	full2, err := ad.ListRuntimeAppsWithOptions(t.Context(), true)
+	if err != nil || statsHits.Load() != hitsAfterCold+1 || full2[0].CPUPercent <= 0 {
+		t.Fatalf("expected warm call to do only 1 stats RPC, before=%d after=%d cpu=%v err=%v", hitsAfterCold, statsHits.Load(), full2[0].CPUPercent, err)
 	}
 }

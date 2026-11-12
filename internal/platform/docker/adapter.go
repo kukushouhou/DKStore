@@ -24,15 +24,26 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type cpuSample struct {
+	stats dockerCPUStats
+	at    time.Time
+}
+
 // Adapter 实现 platform.Adapter。
 type Adapter struct {
-	hostID string
-	tr     transport.Transport
+	hostID  string
+	tr      transport.Transport
+	statsMu sync.Mutex
+	prevCPU map[string]cpuSample
 }
 
 // New 创建原生 Docker 适配器。
 func New(hostID string, tr transport.Transport) *Adapter {
-	return &Adapter{hostID: hostID, tr: tr}
+	return &Adapter{
+		hostID:  hostID,
+		tr:      tr,
+		prevCPU: make(map[string]cpuSample),
+	}
 }
 
 func (a *Adapter) Kind() string { return "docker" }
@@ -78,12 +89,14 @@ func (a *Adapter) detectPlatformVersion(ctx context.Context, info dockerInfoResp
 	kvLower := strings.ToLower(strings.TrimSpace(info.KernelVersion))
 	osLower := strings.ToLower(platVer)
 	if strings.Contains(kvLower, "-trim") || strings.Contains(osLower, "fnos") || strings.Contains(osLower, "trim") {
-		if b, err := a.tr.ReadFile(ctx, "/etc/trim_version"); err == nil {
-			if tv := strings.TrimSpace(string(b)); tv != "" {
-				if strings.HasPrefix(strings.ToLower(tv), "fnos") {
-					return tv
+		for _, verFile := range []string{"/usr/trim/etc/version", "/etc/trim_version"} {
+			if b, err := a.tr.ReadFile(ctx, verFile); err == nil {
+				if tv := strings.TrimSpace(string(b)); tv != "" {
+					if strings.HasPrefix(strings.ToLower(tv), "fnos") {
+						return tv
+					}
+					return "fnOS " + tv
 				}
-				return "fnOS " + tv
 			}
 		}
 		if !strings.Contains(osLower, "fnos") {
@@ -385,37 +398,23 @@ func parseHealthFromStatus(status string) string {
 	}
 }
 
-// ListRuntimeApps 采集主机上全部容器的树状实时运行状态与资源占用。
-func (a *Adapter) ListRuntimeApps(ctx context.Context) ([]platform.AppRuntimeTree, error) {
-	var list []containerSummary
-	if err := a.getJSON(ctx, "/containers/json?all=1", &list); err != nil {
-		return nil, i18n.NewEngineError(i18n.MsgDockerListFailed, i18n.DetailOf(err))
-	}
+type statVal struct {
+	cpu      float64
+	memUsage int64
+	memLimit int64
+}
 
-	var filtered []containerSummary
-	for _, cs := range list {
-		if cs.Labels["dkstore.self"] == "true" {
-			continue
-		}
-		filtered = append(filtered, cs)
+func (a *Adapter) fetchOneShotStats(ctx context.Context, ids []string) map[string]dockerContainerStats {
+	out := make(map[string]dockerContainerStats, len(ids))
+	if len(ids) == 0 {
+		return out
 	}
-
-	type statVal struct {
-		cpu      float64
-		memUsage int64
-		memLimit int64
-	}
-	statsMap := make(map[string]statVal, len(filtered))
 	var mu sync.Mutex
-	sem := make(chan struct{}, 8)
+	sem := make(chan struct{}, 12)
 	var wg sync.WaitGroup
-
-	for _, cs := range filtered {
-		if strings.ToLower(cs.State) != "running" {
-			continue
-		}
+	for _, id := range ids {
 		wg.Add(1)
-		go func(id string) {
+		go func(cid string) {
 			defer wg.Done()
 			select {
 			case sem <- struct{}{}:
@@ -426,16 +425,119 @@ func (a *Adapter) ListRuntimeApps(ctx context.Context) ([]platform.AppRuntimeTre
 			sCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 			defer cancel()
 			var st dockerContainerStats
-			if err := a.getJSON(sCtx, "/containers/"+url.PathEscape(id)+"/stats?stream=false", &st); err != nil {
+			if err := a.getJSON(sCtx, "/containers/"+url.PathEscape(cid)+"/stats?stream=false&one-shot=true", &st); err != nil {
 				return
 			}
-			cpu, memU, memL := computeStats(st)
 			mu.Lock()
-			statsMap[id] = statVal{cpu: cpu, memUsage: memU, memLimit: memL}
+			out[cid] = st
 			mu.Unlock()
-		}(cs.ID)
+		}(id)
 	}
 	wg.Wait()
+	return out
+}
+
+func (a *Adapter) collectRuntimeStats(ctx context.Context, runningIDs []string) map[string]statVal {
+	statsMap := make(map[string]statVal, len(runningIDs))
+	if len(runningIDs) == 0 {
+		return statsMap
+	}
+
+	raw1 := a.fetchOneShotStats(ctx, runningIDs)
+	now := time.Now()
+	var coldIDs []string
+
+	a.statsMu.Lock()
+	if a.prevCPU == nil {
+		a.prevCPU = make(map[string]cpuSample)
+	}
+	for k, v := range a.prevCPU {
+		if now.Sub(v.at) > 2*time.Minute {
+			delete(a.prevCPU, k)
+		}
+	}
+	for _, id := range runningIDs {
+		st, ok := raw1[id]
+		if !ok {
+			continue
+		}
+		if st.PreCPUStats.SystemCPUUsage > 0 {
+			cpu, memU, memL := computeStats(st)
+			statsMap[id] = statVal{cpu: cpu, memUsage: memU, memLimit: memL}
+			a.prevCPU[id] = cpuSample{stats: st.CPUStats, at: now}
+			continue
+		}
+		prev, hasPrev := a.prevCPU[id]
+		a.prevCPU[id] = cpuSample{stats: st.CPUStats, at: now}
+		if hasPrev && now.Sub(prev.at) <= 60*time.Second && prev.stats.SystemCPUUsage > 0 && st.CPUStats.SystemCPUUsage > prev.stats.SystemCPUUsage {
+			st.PreCPUStats = prev.stats
+			cpu, memU, memL := computeStats(st)
+			statsMap[id] = statVal{cpu: cpu, memUsage: memU, memLimit: memL}
+		} else {
+			_, memU, memL := computeStats(st)
+			statsMap[id] = statVal{cpu: 0, memUsage: memU, memLimit: memL}
+			coldIDs = append(coldIDs, id)
+		}
+	}
+	a.statsMu.Unlock()
+
+	if len(coldIDs) > 0 && ctx.Err() == nil {
+		select {
+		case <-ctx.Done():
+			return statsMap
+		case <-time.After(150 * time.Millisecond):
+		}
+		raw2 := a.fetchOneShotStats(ctx, coldIDs)
+		now2 := time.Now()
+		a.statsMu.Lock()
+		for _, id := range coldIDs {
+			st2, ok := raw2[id]
+			if !ok {
+				continue
+			}
+			if st2.PreCPUStats.SystemCPUUsage == 0 {
+				if prev, hasPrev := a.prevCPU[id]; hasPrev && prev.stats.SystemCPUUsage > 0 {
+					st2.PreCPUStats = prev.stats
+				}
+			}
+			cpu, memU, memL := computeStats(st2)
+			statsMap[id] = statVal{cpu: cpu, memUsage: memU, memLimit: memL}
+			a.prevCPU[id] = cpuSample{stats: st2.CPUStats, at: now2}
+		}
+		a.statsMu.Unlock()
+	}
+
+	return statsMap
+}
+
+// ListRuntimeApps 采集主机上全部容器的树状实时运行状态与资源占用。
+func (a *Adapter) ListRuntimeApps(ctx context.Context) ([]platform.AppRuntimeTree, error) {
+	return a.ListRuntimeAppsWithOptions(ctx, true)
+}
+
+// ListRuntimeAppsWithOptions 按需采集主机容器树（withStats=false 时跳过 stats 采样以实现毫秒级首屏）。
+func (a *Adapter) ListRuntimeAppsWithOptions(ctx context.Context, withStats bool) ([]platform.AppRuntimeTree, error) {
+	var list []containerSummary
+	if err := a.getJSON(ctx, "/containers/json?all=1", &list); err != nil {
+		return nil, i18n.NewEngineError(i18n.MsgDockerListFailed, i18n.DetailOf(err))
+	}
+
+	var filtered []containerSummary
+	var runningIDs []string
+	for _, cs := range list {
+		if cs.Labels["dkstore.self"] == "true" {
+			continue
+		}
+		filtered = append(filtered, cs)
+		if strings.ToLower(cs.State) == "running" {
+			runningIDs = append(runningIDs, cs.ID)
+		}
+	}
+
+	var statsMap map[string]statVal
+	if withStats {
+		statsMap = a.collectRuntimeStats(ctx, runningIDs)
+	}
 
 	composeMap := make(map[string]*platform.AppRuntimeTree)
 	var standaloneApps []platform.AppRuntimeTree
@@ -478,10 +580,11 @@ func (a *Adapter) ListRuntimeApps(ctx context.Context) ([]platform.AppRuntimeTre
 					src = platform.SourceVendorManaged
 				}
 				tree = &platform.AppRuntimeTree{
-					Key:    appKey,
-					HostID: a.hostID,
-					Name:   projName,
-					Source: src,
+					Key:        appKey,
+					HostID:     a.hostID,
+					Name:       projName,
+					Source:     src,
+					StatsReady: withStats,
 				}
 				composeMap[appKey] = tree
 			} else if vendorManaged {
@@ -515,6 +618,7 @@ func (a *Adapter) ListRuntimeApps(ctx context.Context) ([]platform.AppRuntimeTre
 			TotalCount:   1,
 			CPUPercent:   cStat.CPUPercent,
 			MemUsage:     cStat.MemUsage,
+			StatsReady:   withStats,
 			Containers:   []platform.ContainerRuntimeStat{cStat},
 		})
 	}

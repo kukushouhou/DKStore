@@ -65,6 +65,7 @@ type AppRuntimeTree struct {
 	TotalCount   int                    `json:"totalCount"`
 	CPUPercent   float64                `json:"cpuPercent"`
 	MemUsage     int64                  `json:"memUsage"`
+	StatsReady   bool                   `json:"statsReady"`
 	Containers   []ContainerRuntimeStat `json:"containers"`
 }
 
@@ -72,6 +73,12 @@ type AppRuntimeTree struct {
 type RuntimeStatAdapter interface {
 	Adapter
 	ListRuntimeApps(ctx context.Context) ([]AppRuntimeTree, error)
+}
+
+// RuntimeStatOptionsAdapter 扩展 RuntimeStatAdapter，支持按需跳过资源占用采样以秒级返回容器列表。
+type RuntimeStatOptionsAdapter interface {
+	RuntimeStatAdapter
+	ListRuntimeAppsWithOptions(ctx context.Context, withStats bool) ([]AppRuntimeTree, error)
 }
 
 // LayerProgress 描述单个镜像层的实时下载/解压状态与进度（附录 E.1）。

@@ -115,6 +115,7 @@ export interface AppRuntimeTree {
   totalCount: number
   cpuPercent: number
   memUsage: number
+  statsReady?: boolean
   containers: ContainerRuntimeStat[]
 }
 
@@ -552,10 +553,13 @@ export const api = {
     request<HostTestResult>('/hosts/test', { method: 'POST', body: JSON.stringify(input) }),
   keygen: () => request<{ privateKey: string; authorizedKey: string }>('/hosts/keygen', { method: 'POST' }),
 
-  listContainers: (hostId?: string) =>
-    request<{ items: AppRuntimeTree[] }>(
-      hostId ? `/containers?hostId=${encodeURIComponent(hostId)}` : '/containers',
-    ),
+  listContainers: (hostId?: string, withStats = true) => {
+    const params = new URLSearchParams()
+    if (hostId) params.set('hostId', hostId)
+    if (!withStats) params.set('stats', '0')
+    const qs = params.toString()
+    return request<{ items: AppRuntimeTree[] }>(qs ? `/containers?${qs}` : '/containers')
+  },
 
   getSettings: () => request<AppSettings>('/settings'),
   saveSettings: (cfg: AppSettings) =>

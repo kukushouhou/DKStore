@@ -113,6 +113,21 @@ type stashedToken struct {
 	expires time.Time
 }
 
+const runtimeAdapterIdleTTL = 90 * time.Second
+
+type pooledRuntimeAdapter struct {
+	ad       platform.Adapter
+	refs     int
+	evicted  bool
+	lastUsed time.Time
+}
+
+type dialRuntimeCall struct {
+	done chan struct{}
+	ent  *pooledRuntimeAdapter
+	err  error
+}
+
 // Registry 管理主机与凭证。
 type Registry struct {
 	st  *store.Store
@@ -120,11 +135,162 @@ type Registry struct {
 
 	tokMu  sync.Mutex
 	tokens map[string]stashedToken
+
+	rtMu       sync.Mutex
+	rtPool     map[string]*pooledRuntimeAdapter
+	rtInflight map[string]*dialRuntimeCall
 }
 
 // NewRegistry 创建主机注册表。
 func NewRegistry(st *store.Store, box *secret.Box) *Registry {
-	return &Registry{st: st, box: box, tokens: make(map[string]stashedToken)}
+	return &Registry{
+		st:         st,
+		box:        box,
+		tokens:     make(map[string]stashedToken),
+		rtPool:     make(map[string]*pooledRuntimeAdapter),
+		rtInflight: make(map[string]*dialRuntimeCall),
+	}
+}
+
+// Close 关闭并清理运行态适配器连接池。
+func (r *Registry) Close() error {
+	r.rtMu.Lock()
+	var toClose []platform.Adapter
+	for id, ent := range r.rtPool {
+		ent.evicted = true
+		delete(r.rtPool, id)
+		if ent.refs <= 0 {
+			toClose = append(toClose, ent.ad)
+		}
+	}
+	r.rtMu.Unlock()
+	for _, ad := range toClose {
+		_ = ad.Close()
+	}
+	return nil
+}
+
+func (r *Registry) evictRuntimeAdapter(hostID string) {
+	r.rtMu.Lock()
+	ent := r.rtPool[hostID]
+	var toClose platform.Adapter
+	if ent != nil {
+		ent.evicted = true
+		delete(r.rtPool, hostID)
+		if ent.refs <= 0 {
+			toClose = ent.ad
+		}
+	}
+	r.rtMu.Unlock()
+	if toClose != nil {
+		_ = toClose.Close()
+	}
+}
+
+func (r *Registry) makeReleaseFn(hostID string, ent *pooledRuntimeAdapter) func(bool) {
+	var once sync.Once
+	return func(failed bool) {
+		once.Do(func() {
+			var toClose platform.Adapter
+			r.rtMu.Lock()
+			ent.refs--
+			ent.lastUsed = time.Now()
+			if failed {
+				ent.evicted = true
+				if r.rtPool[hostID] == ent {
+					delete(r.rtPool, hostID)
+				}
+			}
+			if ent.evicted && ent.refs <= 0 {
+				toClose = ent.ad
+			}
+			r.rtMu.Unlock()
+			if toClose != nil {
+				_ = toClose.Close()
+			}
+		})
+	}
+}
+
+func (r *Registry) acquireRuntimeAdapter(ctx context.Context, hostID string) (platform.Adapter, bool, func(bool), error) {
+	now := time.Now()
+	var stale []platform.Adapter
+
+	r.rtMu.Lock()
+	for id, e := range r.rtPool {
+		if e.refs <= 0 && now.Sub(e.lastUsed) > runtimeAdapterIdleTTL {
+			e.evicted = true
+			delete(r.rtPool, id)
+			stale = append(stale, e.ad)
+		}
+	}
+	if ent := r.rtPool[hostID]; ent != nil && !ent.evicted {
+		ent.refs++
+		ent.lastUsed = now
+		rel := r.makeReleaseFn(hostID, ent)
+		r.rtMu.Unlock()
+		for _, ad := range stale {
+			_ = ad.Close()
+		}
+		return ent.ad, true, rel, nil
+	}
+	if dc := r.rtInflight[hostID]; dc != nil {
+		r.rtMu.Unlock()
+		for _, ad := range stale {
+			_ = ad.Close()
+		}
+		select {
+		case <-dc.done:
+			if dc.err != nil {
+				return nil, false, nil, dc.err
+			}
+			r.rtMu.Lock()
+			ent := dc.ent
+			if ent != nil && !ent.evicted {
+				ent.refs++
+				ent.lastUsed = time.Now()
+				rel := r.makeReleaseFn(hostID, ent)
+				r.rtMu.Unlock()
+				return ent.ad, true, rel, nil
+			}
+			r.rtMu.Unlock()
+		case <-ctx.Done():
+			return nil, false, nil, ctx.Err()
+		}
+		// 若并发拨号所得适配器已被驱逐，重新走一次新建
+		r.rtMu.Lock()
+	}
+
+	dc := &dialRuntimeCall{done: make(chan struct{})}
+	r.rtInflight[hostID] = dc
+	r.rtMu.Unlock()
+	for _, ad := range stale {
+		_ = ad.Close()
+	}
+
+	dialCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	ad, _, err := r.OpenAdapter(dialCtx, hostID)
+	cancel()
+
+	r.rtMu.Lock()
+	delete(r.rtInflight, hostID)
+	if err != nil {
+		dc.err = err
+		close(dc.done)
+		r.rtMu.Unlock()
+		return nil, false, nil, err
+	}
+	ent := &pooledRuntimeAdapter{
+		ad:       ad,
+		refs:     1,
+		lastUsed: time.Now(),
+	}
+	r.rtPool[hostID] = ent
+	dc.ent = ent
+	close(dc.done)
+	rel := r.makeReleaseFn(hostID, ent)
+	r.rtMu.Unlock()
+	return ad, false, rel, nil
 }
 
 // dbtx 同时被 *sql.DB 与 *sql.Tx 实现。
@@ -133,18 +299,31 @@ type dbtx interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-// EnsureLocalHost 在主机表为空且本机存在 /var/run/docker.sock 时，自动添加一条本机设备记录。
+// EnsureLocalHost 在尚未完成过自动本机初始化、主机表为空且本机 /var/run/docker.sock 可访问时，自动添加本机设备记录。
+// 支持在启动时及后续 Docker 服务延迟就绪（如飞牛首次开启 Docker 后）自动挂载本机设备。
 func (r *Registry) EnsureLocalHost(ctx context.Context) error {
+	_, err := r.EnsureLocalHostAdded(ctx)
+	return err
+}
+
+// EnsureLocalHostAdded 与 EnsureLocalHost 相同，若本次新创建了本机设备则返回该主机记录（供上层自动触发首次扫描）。
+func (r *Registry) EnsureLocalHostAdded(ctx context.Context) (*Host, error) {
+	var initialized string
+	_ = r.st.DB.QueryRowContext(ctx, `SELECT v FROM setting WHERE k='auto_local_initialized'`).Scan(&initialized)
+	if initialized == "1" {
+		return nil, nil
+	}
 	var count int
 	if err := r.st.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM host`).Scan(&count); err != nil {
-		return err
+		return nil, err
 	}
 	if count > 0 {
-		return nil
+		_, _ = r.st.DB.ExecContext(ctx, `INSERT INTO setting(k, v) VALUES ('auto_local_initialized', '1') ON CONFLICT(k) DO UPDATE SET v='1'`)
+		return nil, nil
 	}
 	sock := transport.DefaultLocalSocket()
 	if _, err := os.Stat(sock); err != nil {
-		return nil
+		return nil, nil
 	}
 	name := "本机 Docker"
 	kind := "docker"
@@ -152,12 +331,16 @@ func (r *Registry) EnsureLocalHost(ctx context.Context) error {
 		name = "本机飞牛 NAS"
 		kind = "fnos"
 	}
-	_, err := r.Create(ctx, CreateOrUpdateInput{
+	h, err := r.Create(ctx, CreateOrUpdateInput{
 		Name:      name,
 		Kind:      kind,
 		Transport: "local",
 	}, i18n.ZhCN)
-	return err
+	if err != nil {
+		return nil, err
+	}
+	_, _ = r.st.DB.ExecContext(ctx, `INSERT INTO setting(k, v) VALUES ('auto_local_initialized', '1') ON CONFLICT(k) DO UPDATE SET v='1'`)
+	return h, nil
 }
 
 // LocalStatus 返回是否已存在本机设备、是否可一键添加本机设备以及本机 Docker Socket 状态（ok | socket_missing | permission_denied）。
@@ -191,37 +374,93 @@ func (r *Registry) LocalStatus(ctx context.Context) (hasLocalHost bool, canAddLo
 	return
 }
 
-// ListRuntimeContainers 采集全部（或指定）主机上容器的树状实时运行状态。
-func (r *Registry) ListRuntimeContainers(ctx context.Context, hostIDFilter string) ([]platform.AppRuntimeTree, error) {
+func (r *Registry) querySingleHostRuntime(ctx context.Context, h Host, wantStats bool) ([]platform.AppRuntimeTree, error) {
+	runOnce := func(ad platform.Adapter) ([]platform.AppRuntimeTree, error) {
+		if optAd, ok := ad.(platform.RuntimeStatOptionsAdapter); ok {
+			return optAd.ListRuntimeAppsWithOptions(ctx, wantStats)
+		}
+		if rtAd, ok := ad.(platform.RuntimeStatAdapter); ok {
+			return rtAd.ListRuntimeApps(ctx)
+		}
+		return nil, nil
+	}
+
+	ad, wasWarm, release, err := r.acquireRuntimeAdapter(ctx, h.ID)
+	if err != nil {
+		return nil, err
+	}
+	apps, err := runOnce(ad)
+	if err != nil {
+		release(true)
+		// 若复用的空闲连接已断开，自动重连重试一次
+		if wasWarm && ctx.Err() == nil {
+			ad2, _, release2, err2 := r.acquireRuntimeAdapter(ctx, h.ID)
+			if err2 != nil {
+				return nil, err2
+			}
+			apps, err = runOnce(ad2)
+			release2(err != nil)
+		}
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		release(false)
+	}
+
+	for i := range apps {
+		apps[i].HostID = h.ID
+		apps[i].HostName = h.Name
+	}
+	return apps, nil
+}
+
+// ListRuntimeContainers 并发采集全部（或指定）主机上容器的树状实时运行状态。
+// withStats 默认 true；传入 false 时跳过 CPU/内存采样以实现列表毫秒级首屏返回。
+func (r *Registry) ListRuntimeContainers(ctx context.Context, hostIDFilter string, withStats ...bool) ([]platform.AppRuntimeTree, error) {
+	wantStats := true
+	if len(withStats) > 0 {
+		wantStats = withStats[0]
+	}
 	hosts, err := r.List(ctx)
 	if err != nil {
 		return nil, err
 	}
 	filter := strings.TrimSpace(hostIDFilter)
-	out := make([]platform.AppRuntimeTree, 0)
+	var targets []Host
 	for _, h := range hosts {
 		if filter != "" && h.ID != filter {
 			continue
 		}
-		ad, _, err := r.OpenAdapter(ctx, h.ID)
-		if err != nil {
-			continue
-		}
-		rtAd, ok := ad.(platform.RuntimeStatAdapter)
-		if !ok {
-			_ = ad.Close()
-			continue
-		}
-		apps, err := rtAd.ListRuntimeApps(ctx)
-		_ = ad.Close()
-		if err != nil {
-			continue
-		}
-		for i := range apps {
-			apps[i].HostID = h.ID
-			apps[i].HostName = h.Name
-			out = append(out, apps[i])
-		}
+		targets = append(targets, h)
+	}
+	if len(targets) == 0 {
+		return []platform.AppRuntimeTree{}, nil
+	}
+
+	perHostTimeout := 12 * time.Second
+	if !wantStats {
+		perHostTimeout = 8 * time.Second
+	}
+
+	perHost := make([][]platform.AppRuntimeTree, len(targets))
+	var wg sync.WaitGroup
+	for i, h := range targets {
+		wg.Add(1)
+		go func(idx int, item Host) {
+			defer wg.Done()
+			hCtx, cancel := context.WithTimeout(ctx, perHostTimeout)
+			defer cancel()
+			if apps, err := r.querySingleHostRuntime(hCtx, item, wantStats); err == nil && len(apps) > 0 {
+				perHost[idx] = apps
+			}
+		}(i, h)
+	}
+	wg.Wait()
+
+	out := make([]platform.AppRuntimeTree, 0)
+	for _, apps := range perHost {
+		out = append(out, apps...)
 	}
 	return out, nil
 }
@@ -466,6 +705,7 @@ func (r *Registry) Create(ctx context.Context, in CreateOrUpdateInput, lang i18n
 	if err != nil {
 		return nil, i18n.NewHostError("host.save_failed", err)
 	}
+	r.evictRuntimeAdapter(id)
 	return r.Get(ctx, id)
 }
 
@@ -573,6 +813,7 @@ func (r *Registry) Update(ctx context.Context, id string, in CreateOrUpdateInput
 	if err != nil {
 		return nil, i18n.NewHostError("host.save_failed", err)
 	}
+	r.evictRuntimeAdapter(id)
 	return r.Get(ctx, id)
 }
 
@@ -597,6 +838,7 @@ func buildSaveVerifyError(res *TestResult, lang i18n.Lang) error {
 
 // Delete 删除主机（级联删除其下的 app / service）及其加密凭据记录。
 func (r *Registry) Delete(ctx context.Context, id string) error {
+	r.evictRuntimeAdapter(id)
 	return r.withTx(ctx, func(tx *sql.Tx) error {
 		refs, err := loadRefs(ctx, tx, id)
 		if err != nil {
@@ -935,7 +1177,11 @@ func (r *Registry) OpenAdapter(ctx context.Context, hostID string) (platform.Ada
 		h.Status = "offline"
 		return nil, h, err
 	}
+	prevMode := h.TransportMode
 	h.TransportMode = string(sshTr.Mode())
+	if h.TransportMode != "" && h.TransportMode != prevMode {
+		_, _ = r.st.DB.ExecContext(ctx, `UPDATE host SET transport_mode=? WHERE id=?`, h.TransportMode, h.ID)
+	}
 	if presented := sshTr.PresentedHostKey(); presented != "" {
 		if prevKey != "" {
 			r.recordHostKeyChange(ctx, h.ID, prevKey, presented)
@@ -977,8 +1223,12 @@ func isFnOSTarget(ctx context.Context, tr transport.Transport) bool {
 	if b, err := tr.ReadFile(ctx, "/proc/sys/kernel/osrelease"); err == nil && strings.Contains(strings.ToLower(string(b)), "-trim") {
 		return true
 	}
-	b, err := tr.ReadFile(ctx, "/etc/trim_version")
-	return err == nil && len(strings.TrimSpace(string(b))) > 0
+	for _, p := range []string{"/usr/trim/etc/version", "/etc/trim_version"} {
+		if b, err := tr.ReadFile(ctx, p); err == nil && len(strings.TrimSpace(string(b))) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Registry) markOffline(ctx context.Context, id string) {

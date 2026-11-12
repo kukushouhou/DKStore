@@ -76,8 +76,9 @@ func newReadOnlyHTTPClient(dial func(ctx context.Context, network, addr string) 
 		Transport: &http.Transport{
 			DialContext:         dial,
 			DisableKeepAlives:   false,
-			MaxIdleConnsPerHost: 4,
-			IdleConnTimeout:     30 * time.Second,
+			MaxIdleConns:        32,
+			MaxIdleConnsPerHost: 16,
+			IdleConnTimeout:     45 * time.Second,
 		},
 		Timeout: 30 * time.Second,
 	}

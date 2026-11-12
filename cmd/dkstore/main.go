@@ -62,6 +62,7 @@ func run() error {
 
 	authSvc := auth.New(st, nil) // nil：按运行环境自动判定安装方式并构建宿主登录态核验器
 	hostReg := host.NewRegistry(st, box)
+	defer hostReg.Close()
 	_ = hostReg.EnsureLocalHost(ctx)
 
 	invSvc := inventory.New(st, hostReg)

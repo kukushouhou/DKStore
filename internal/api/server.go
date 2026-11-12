@@ -157,6 +157,11 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 	var hasLocalHost, canAddLocal bool
 	localStatus := "socket_missing"
 	if s.d.Hosts != nil {
+		if st.Authenticated {
+			if added, _ := s.d.Hosts.EnsureLocalHostAdded(r.Context()); added != nil && s.d.Checker != nil {
+				s.d.Checker.Trigger("auto_local", added.ID, false)
+			}
+		}
 		hasLocalHost, canAddLocal, localStatus = s.d.Hosts.LocalStatus(r.Context())
 	}
 	resp := map[string]any{
@@ -255,6 +260,11 @@ func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
+	if s.d.Hosts != nil {
+		if added, _ := s.d.Hosts.EnsureLocalHostAdded(r.Context()); added != nil && s.d.Checker != nil {
+			s.d.Checker.Trigger("auto_local", added.ID, false)
+		}
+	}
 	hostID := strings.TrimSpace(r.URL.Query().Get("hostId"))
 	ov, err := s.d.Checker.Overview(r.Context(), hostID, s.langOf(r))
 	if err != nil {
@@ -284,7 +294,9 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListContainers(w http.ResponseWriter, r *http.Request) {
 	hostID := strings.TrimSpace(r.URL.Query().Get("hostId"))
-	items, err := s.d.Hosts.ListRuntimeContainers(r.Context(), hostID)
+	statsParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("stats")))
+	withStats := statsParam != "0" && statsParam != "false"
+	items, err := s.d.Hosts.ListRuntimeContainers(r.Context(), hostID, withStats)
 	if err != nil {
 		writeError(w, s.langOf(r), http.StatusInternalServerError, "db_error", err.Error())
 		return

@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kukushouhou/DKStore/internal/i18n"
@@ -54,6 +55,14 @@ type Adapter struct {
 	dock   *docker.Adapter
 	dsm    DSMConfig
 	dsmCli *dsmClient
+
+	projMu        sync.Mutex
+	cachedProjs   []dsmProject
+	cachedProjsAt time.Time
+
+	statsMu       sync.Mutex
+	prevDSMStats  map[string]dsmCPUStats
+	prevDSMStatAt time.Time
 }
 
 // New 创建群晖 DSM 平台适配器。当 tr == nil 时工作在纯 DSM WebAPI 免 SSH 模式。
@@ -1583,18 +1592,56 @@ func parseDSMStartedAt(raw string) int64 {
 	return 0
 }
 
+func (a *Adapter) listDSMProjectsCached(ctx context.Context) ([]dsmProject, error) {
+	a.projMu.Lock()
+	if a.cachedProjs != nil && time.Since(a.cachedProjsAt) <= 30*time.Second {
+		cp := append([]dsmProject(nil), a.cachedProjs...)
+		a.projMu.Unlock()
+		return cp, nil
+	}
+	a.projMu.Unlock()
+
+	list, err := a.listDSMProjects(ctx)
+	if err == nil {
+		a.projMu.Lock()
+		a.cachedProjs = append([]dsmProject(nil), list...)
+		a.cachedProjsAt = time.Now()
+		a.projMu.Unlock()
+	}
+	return list, err
+}
+
 // ListRuntimeApps 采集群晖主机上全部容器与项目的树状实时运行状态与资源占用。
 func (a *Adapter) ListRuntimeApps(ctx context.Context) ([]platform.AppRuntimeTree, error) {
+	return a.ListRuntimeAppsWithOptions(ctx, true)
+}
+
+// ListRuntimeAppsWithOptions 按需采集群晖主机容器与项目运行树（withStats=false 时跳过资源采样以实现首屏秒开）。
+func (a *Adapter) ListRuntimeAppsWithOptions(ctx context.Context, withStats bool) ([]platform.AppRuntimeTree, error) {
 	if a.dock == nil {
-		return a.listRuntimeAppsViaDSMAPI(ctx)
+		return a.listRuntimeAppsViaDSMAPI(ctx, withStats)
 	}
 
-	trees, err := a.dock.ListRuntimeApps(ctx)
+	var (
+		trees []platform.AppRuntimeTree
+		err   error
+		projs []dsmProject
+		wg    sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		trees, err = a.dock.ListRuntimeAppsWithOptions(ctx, withStats)
+	}()
+	go func() {
+		defer wg.Done()
+		projs, _ = a.listDSMProjectsCached(ctx)
+	}()
+	wg.Wait()
 	if err != nil {
 		return nil, err
 	}
 
-	projs, _ := a.listDSMProjects(ctx)
 	byName := make(map[string]dsmProject, len(projs))
 	for _, p := range projs {
 		if p.Name != "" {
@@ -1616,50 +1663,148 @@ func (a *Adapter) ListRuntimeApps(ctx context.Context) ([]platform.AppRuntimeTre
 	return trees, nil
 }
 
-func (a *Adapter) listRuntimeAppsViaDSMAPI(ctx context.Context) ([]platform.AppRuntimeTree, error) {
-	if a.dsmCli == nil {
-		return nil, i18n.NewHostError("dsm.not_configured", nil)
+func (a *Adapter) collectDSMRuntimeStats(ctx context.Context, initial map[string]dsmContainerStat) map[string]dsmContainerStat {
+	if len(initial) == 0 {
+		return initial
 	}
-	stats1, _ := a.dsmCli.ContainerStats(ctx)
-	projs, err := a.dsmCli.ListProjects(ctx)
-	if err != nil {
-		return nil, err
-	}
-	containers, err := a.dsmCli.ListContainers(ctx)
-	if err != nil {
-		return nil, err
-	}
-	select {
-	case <-ctx.Done():
-	case <-time.After(150 * time.Millisecond):
-	}
-	statsMap, _ := a.dsmCli.ContainerStats(ctx)
-	if len(statsMap) == 0 {
-		statsMap = stats1
-	} else {
-		for k, cur := range statsMap {
-			if cur.PreCPUStats.SystemCPUUsage == 0 {
-				if prev, ok := stats1[k]; ok {
-					cur.PreCPUStats = prev.CPUStats
-					statsMap[k] = cur
+	now := time.Now()
+	needSecondPass := false
+
+	a.statsMu.Lock()
+	hasWarmPrev := len(a.prevDSMStats) > 0 && now.Sub(a.prevDSMStatAt) <= 60*time.Second
+	if hasWarmPrev {
+		for k, cur := range initial {
+			if cur.PreCPUStats.SystemCPUUsage == 0 && cur.CPU == 0 {
+				if prev, ok := a.prevDSMStats[k]; ok && prev.SystemCPUUsage > 0 && cur.CPUStats.SystemCPUUsage > prev.SystemCPUUsage {
+					cur.PreCPUStats = prev
+					initial[k] = cur
 				}
 			}
 		}
+	} else {
+		for _, cur := range initial {
+			if cur.PreCPUStats.SystemCPUUsage == 0 && cur.CPU == 0 && cur.CPUStats.SystemCPUUsage > 0 {
+				needSecondPass = true
+				break
+			}
+		}
+	}
+	nextPrev := make(map[string]dsmCPUStats, len(initial))
+	for k, cur := range initial {
+		if cur.CPUStats.SystemCPUUsage > 0 {
+			nextPrev[k] = cur.CPUStats
+		}
+	}
+	a.prevDSMStats = nextPrev
+	a.prevDSMStatAt = now
+	a.statsMu.Unlock()
+
+	if !needSecondPass || ctx.Err() != nil {
+		return initial
 	}
 
-	byID := make(map[string]dsmContainerListItem, len(containers))
+	select {
+	case <-ctx.Done():
+		return initial
+	case <-time.After(150 * time.Millisecond):
+	}
+	stats2, err := a.dsmCli.ContainerStats(ctx)
+	if err != nil || len(stats2) == 0 {
+		return initial
+	}
+	now2 := time.Now()
+	a.statsMu.Lock()
+	nextPrev2 := make(map[string]dsmCPUStats, len(stats2))
+	for k, cur := range stats2 {
+		if cur.PreCPUStats.SystemCPUUsage == 0 {
+			if prev, ok := initial[k]; ok {
+				cur.PreCPUStats = prev.CPUStats
+				stats2[k] = cur
+			}
+		}
+		if cur.CPUStats.SystemCPUUsage > 0 {
+			nextPrev2[k] = cur.CPUStats
+		}
+	}
+	a.prevDSMStats = nextPrev2
+	a.prevDSMStatAt = now2
+	a.statsMu.Unlock()
+	return stats2
+}
+
+func (a *Adapter) listRuntimeAppsViaDSMAPI(ctx context.Context, withStats bool) ([]platform.AppRuntimeTree, error) {
+	if a.dsmCli == nil {
+		return nil, i18n.NewHostError("dsm.not_configured", nil)
+	}
+	// 先确保已登录（合并并发登录请求，避免下方并发调用各自触发登录）
+	if _, err := a.dsmCli.currentSID(ctx); err != nil {
+		return nil, err
+	}
+
+	var (
+		projs      []dsmProject
+		projErr    error
+		containers []dsmContainerListItem
+		contErr    error
+		stats1     map[string]dsmContainerStat
+		wg         sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		projs, projErr = a.dsmCli.ListProjects(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		containers, contErr = a.dsmCli.ListContainers(ctx)
+	}()
+	if withStats {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			stats1, _ = a.dsmCli.ContainerStats(ctx)
+		}()
+	}
+	wg.Wait()
+	if projErr != nil {
+		return nil, projErr
+	}
+	if contErr != nil {
+		return nil, contErr
+	}
+
+	var statsMap map[string]dsmContainerStat
+	if withStats {
+		statsMap = a.collectDSMRuntimeStats(ctx, stats1)
+	}
+
+	byID := make(map[string]dsmContainerListItem, len(containers)*2)
 	byName := make(map[string]dsmContainerListItem, len(containers))
+	byProjName := make(map[string][]dsmContainerListItem)
+	byWorkDir := make(map[string][]dsmContainerListItem)
 	for _, c := range containers {
 		if c.ID != "" {
 			byID[c.ID] = c
+			if sid := shortID(c.ID); sid != "-" {
+				byID[sid] = c
+			}
 		}
 		n := strings.TrimPrefix(c.Name, "/")
 		if n != "" {
 			byName[n] = c
 		}
+		if pn := strings.ToLower(strings.TrimSpace(c.Labels["com.docker.compose.project"])); pn != "" {
+			byProjName[pn] = append(byProjName[pn], c)
+		}
+		if wd := strings.TrimRight(strings.TrimSpace(c.Labels["com.docker.compose.project.working_dir"]), "/"); wd != "" {
+			byWorkDir[wd] = append(byWorkDir[wd], c)
+		}
 	}
 
 	lookupStat := func(id, name string) (float64, int64, int64) {
+		if !withStats {
+			return 0, 0, 0
+		}
 		if st, ok := statsMap[name]; ok {
 			return computeDSMStat(st)
 		}
@@ -1669,124 +1814,78 @@ func (a *Adapter) listRuntimeAppsViaDSMAPI(ctx context.Context) ([]platform.AppR
 		return 0, 0, 0
 	}
 
+	// 优先直接用 ListProjects + ListContainers 内存关联，仅在列表未命中任何容器时才并发回退 GetProject
+	projMatched := make([][]dsmContainerListItem, len(projs))
+	var needDetailIdx []int
+	for i, p := range projs {
+		seenC := make(map[string]bool)
+		var matched []dsmContainerListItem
+		addItem := func(item dsmContainerListItem) {
+			key := item.ID
+			if key == "" {
+				key = strings.TrimPrefix(item.Name, "/")
+			}
+			if key == "" || seenC[key] {
+				return
+			}
+			seenC[key] = true
+			matched = append(matched, item)
+		}
+		allIDsFound := len(p.ContainerIDs) > 0
+		for _, cid := range p.ContainerIDs {
+			if item, ok := byID[cid]; ok {
+				addItem(item)
+			} else if item, ok := byID[shortID(cid)]; ok {
+				addItem(item)
+			} else {
+				allIDsFound = false
+			}
+		}
+		if cleanPath := strings.TrimRight(strings.TrimSpace(p.Path), "/"); cleanPath != "" {
+			for _, item := range byWorkDir[cleanPath] {
+				addItem(item)
+			}
+		}
+		if p.Name != "" {
+			for _, item := range byProjName[strings.ToLower(p.Name)] {
+				addItem(item)
+			}
+		}
+		projMatched[i] = matched
+		if len(matched) == 0 || !allIDsFound {
+			if len(p.ContainerIDs) > 0 || strings.EqualFold(p.Status, "RUNNING") || len(matched) == 0 {
+				needDetailIdx = append(needDetailIdx, i)
+			}
+		}
+	}
+
+	details := make([]*dsmProjectDetail, len(projs))
+	if len(needDetailIdx) > 0 {
+		sem := make(chan struct{}, 6)
+		var dwg sync.WaitGroup
+		for _, idx := range needDetailIdx {
+			dwg.Add(1)
+			go func(i int, pid string) {
+				defer dwg.Done()
+				select {
+				case sem <- struct{}{}:
+					defer func() { <-sem }()
+				case <-ctx.Done():
+					return
+				}
+				if d, err := a.dsmCli.GetProject(ctx, pid); err == nil {
+					details[i] = d
+				}
+			}(idx, projs[idx].ID)
+		}
+		dwg.Wait()
+	}
+
 	claimed := make(map[string]bool)
 	var out []platform.AppRuntimeTree
 
-	for _, p := range projs {
-		detail, err := a.dsmCli.GetProject(ctx, p.ID)
-		if err != nil {
-			continue
-		}
-		for _, cid := range detail.ContainerIDs {
-			claimed[cid] = true
-		}
-
-		src := platform.SourceDSMProject
-		appKeyPrefix := "dsm_project"
-		if detail.IsPackage || strings.HasPrefix(detail.Path, "/var/packages/") {
-			src = platform.SourceVendorManaged
-			appKeyPrefix = "compose"
-		}
-		appKey := fmt.Sprintf("%s/%s/%s", a.hostID, appKeyPrefix, detail.Name)
-		tree := platform.AppRuntimeTree{
-			Key:    appKey,
-			HostID: a.hostID,
-			Name:   detail.Name,
-			Source: src,
-		}
-
-		for _, c := range detail.Containers {
-			claimed[c.ID] = true
-			cName := strings.TrimPrefix(c.Name, "/")
-			if cName == "" {
-				cName = shortID(c.ID)
-			}
-			claimed[cName] = true
-
-			listItem, hasList := byID[c.ID]
-			if !hasList {
-				listItem, hasList = byName[cName]
-			}
-
-			state := strings.ToLower(strings.TrimSpace(c.State.Status))
-			if state == "" && hasList {
-				state = strings.ToLower(strings.TrimSpace(listItem.State.Status))
-				if state == "" {
-					state = strings.ToLower(strings.TrimSpace(listItem.Status))
-				}
-			}
-			if state == "" {
-				if c.State.Running || (hasList && listItem.State.Running) {
-					state = "running"
-				} else {
-					state = "stopped"
-				}
-			}
-
-			startedAt := parseDSMStartedAt(c.State.StartedAt)
-			if startedAt == 0 && hasList {
-				startedAt = parseDSMStartedAt(listItem.State.StartedAt)
-			}
-			uptime := ""
-			if hasList {
-				uptime = listItem.UpStatus
-			}
-			health := strings.ToLower(strings.TrimSpace(c.State.Health.Status))
-			if health == "" && hasList {
-				health = strings.ToLower(strings.TrimSpace(listItem.State.Health.Status))
-			}
-
-			imgRef := c.Config.Image
-			if imgRef == "" && hasList {
-				imgRef = containerImageRef(listItem)
-			}
-			if imgRef == "" {
-				imgRef = c.Image
-			}
-
-			var cpu float64
-			var memU, memL int64
-			if state == "running" {
-				cpu, memU, memL = lookupStat(c.ID, cName)
-			}
-
-			cStat := platform.ContainerRuntimeStat{
-				ID:         shortID(c.ID),
-				Name:       cName,
-				Service:    strings.TrimSpace(c.Config.Labels["com.docker.compose.service"]),
-				Image:      imgRef,
-				State:      state,
-				Health:     health,
-				Uptime:     uptime,
-				StartedAt:  startedAt,
-				CPUPercent: cpu,
-				MemUsage:   memU,
-				MemLimit:   memL,
-			}
-			tree.TotalCount++
-			if state == "running" {
-				tree.RunningCount++
-			}
-			tree.CPUPercent = math.Round((tree.CPUPercent+cpu)*100) / 100
-			tree.MemUsage += memU
-			tree.Containers = append(tree.Containers, cStat)
-		}
-
-		sort.Slice(tree.Containers, func(i, j int) bool {
-			return tree.Containers[i].Name < tree.Containers[j].Name
-		})
-		out = append(out, tree)
-	}
-
-	composeGroups := make(map[string]*platform.AppRuntimeTree)
-	for _, c := range containers {
+	buildStatFromListItem := func(c dsmContainerListItem) (platform.ContainerRuntimeStat, string, float64, int64) {
 		cName := strings.TrimPrefix(c.Name, "/")
-		if claimed[c.ID] || (cName != "" && claimed[cName]) {
-			continue
-		}
-		if c.Labels["dkstore.self"] == "true" {
-			continue
-		}
 		if cName == "" {
 			cName = shortID(c.ID)
 		}
@@ -1801,13 +1900,12 @@ func (a *Adapter) listRuntimeAppsViaDSMAPI(ctx context.Context) ([]platform.AppR
 				state = "stopped"
 			}
 		}
-
 		var cpu float64
 		var memU, memL int64
 		if state == "running" {
 			cpu, memU, memL = lookupStat(c.ID, cName)
 		}
-		cStat := platform.ContainerRuntimeStat{
+		return platform.ContainerRuntimeStat{
 			ID:         shortID(c.ID),
 			Name:       cName,
 			Service:    strings.TrimSpace(c.Labels["com.docker.compose.service"]),
@@ -1819,6 +1917,175 @@ func (a *Adapter) listRuntimeAppsViaDSMAPI(ctx context.Context) ([]platform.AppR
 			CPUPercent: cpu,
 			MemUsage:   memU,
 			MemLimit:   memL,
+		}, state, cpu, memU
+	}
+
+	for i, p := range projs {
+		for _, cid := range p.ContainerIDs {
+			claimed[cid] = true
+			if sid := shortID(cid); sid != "-" {
+				claimed[sid] = true
+			}
+		}
+
+		detail := details[i]
+		pName := p.Name
+		pPath := p.Path
+		isPkg := p.IsPackage
+		if detail != nil {
+			if detail.Name != "" {
+				pName = detail.Name
+			}
+			if detail.Path != "" {
+				pPath = detail.Path
+			}
+			if detail.IsPackage {
+				isPkg = true
+			}
+			for _, cid := range detail.ContainerIDs {
+				claimed[cid] = true
+			}
+		}
+
+		src := platform.SourceDSMProject
+		appKeyPrefix := "dsm_project"
+		if isPkg || strings.HasPrefix(pPath, "/var/packages/") {
+			src = platform.SourceVendorManaged
+			appKeyPrefix = "compose"
+		}
+		appKey := fmt.Sprintf("%s/%s/%s", a.hostID, appKeyPrefix, pName)
+		tree := platform.AppRuntimeTree{
+			Key:        appKey,
+			HostID:     a.hostID,
+			Name:       pName,
+			Source:     src,
+			StatsReady: withStats,
+		}
+
+		if detail != nil && len(detail.Containers) > 0 {
+			for _, c := range detail.Containers {
+				claimed[c.ID] = true
+				if sid := shortID(c.ID); sid != "-" {
+					claimed[sid] = true
+				}
+				cName := strings.TrimPrefix(c.Name, "/")
+				if cName == "" {
+					cName = shortID(c.ID)
+				}
+				claimed[cName] = true
+
+				listItem, hasList := byID[c.ID]
+				if !hasList {
+					listItem, hasList = byName[cName]
+				}
+
+				state := strings.ToLower(strings.TrimSpace(c.State.Status))
+				if state == "" && hasList {
+					state = strings.ToLower(strings.TrimSpace(listItem.State.Status))
+					if state == "" {
+						state = strings.ToLower(strings.TrimSpace(listItem.Status))
+					}
+				}
+				if state == "" {
+					if c.State.Running || (hasList && listItem.State.Running) {
+						state = "running"
+					} else {
+						state = "stopped"
+					}
+				}
+
+				startedAt := parseDSMStartedAt(c.State.StartedAt)
+				if startedAt == 0 && hasList {
+					startedAt = parseDSMStartedAt(listItem.State.StartedAt)
+				}
+				uptime := ""
+				if hasList {
+					uptime = listItem.UpStatus
+				}
+				health := strings.ToLower(strings.TrimSpace(c.State.Health.Status))
+				if health == "" && hasList {
+					health = strings.ToLower(strings.TrimSpace(listItem.State.Health.Status))
+				}
+
+				imgRef := c.Config.Image
+				if imgRef == "" && hasList {
+					imgRef = containerImageRef(listItem)
+				}
+				if imgRef == "" {
+					imgRef = c.Image
+				}
+
+				var cpu float64
+				var memU, memL int64
+				if state == "running" {
+					cpu, memU, memL = lookupStat(c.ID, cName)
+				}
+
+				cStat := platform.ContainerRuntimeStat{
+					ID:         shortID(c.ID),
+					Name:       cName,
+					Service:    strings.TrimSpace(c.Config.Labels["com.docker.compose.service"]),
+					Image:      imgRef,
+					State:      state,
+					Health:     health,
+					Uptime:     uptime,
+					StartedAt:  startedAt,
+					CPUPercent: cpu,
+					MemUsage:   memU,
+					MemLimit:   memL,
+				}
+				tree.TotalCount++
+				if state == "running" {
+					tree.RunningCount++
+				}
+				tree.CPUPercent = math.Round((tree.CPUPercent+cpu)*100) / 100
+				tree.MemUsage += memU
+				tree.Containers = append(tree.Containers, cStat)
+			}
+		} else {
+			for _, item := range projMatched[i] {
+				if item.ID != "" {
+					claimed[item.ID] = true
+					if sid := shortID(item.ID); sid != "-" {
+						claimed[sid] = true
+					}
+				}
+				cName := strings.TrimPrefix(item.Name, "/")
+				if cName != "" {
+					claimed[cName] = true
+				}
+				cStat, state, cpu, memU := buildStatFromListItem(item)
+				tree.TotalCount++
+				if state == "running" {
+					tree.RunningCount++
+				}
+				tree.CPUPercent = math.Round((tree.CPUPercent+cpu)*100) / 100
+				tree.MemUsage += memU
+				tree.Containers = append(tree.Containers, cStat)
+			}
+		}
+
+		if len(tree.Containers) == 0 {
+			continue
+		}
+		sort.Slice(tree.Containers, func(i, j int) bool {
+			return tree.Containers[i].Name < tree.Containers[j].Name
+		})
+		out = append(out, tree)
+	}
+
+	composeGroups := make(map[string]*platform.AppRuntimeTree)
+	for _, c := range containers {
+		cName := strings.TrimPrefix(c.Name, "/")
+		if claimed[c.ID] || claimed[shortID(c.ID)] || (cName != "" && claimed[cName]) {
+			continue
+		}
+		if c.Labels["dkstore.self"] == "true" {
+			continue
+		}
+		cStat, state, cpu, memU := buildStatFromListItem(c)
+		if cName == "" {
+			cName = cStat.Name
 		}
 
 		projName := strings.TrimSpace(c.Labels["com.docker.compose.project"])
@@ -1842,10 +2109,11 @@ func (a *Adapter) listRuntimeAppsViaDSMAPI(ctx context.Context) ([]platform.AppR
 					src = platform.SourceVendorManaged
 				}
 				grp = &platform.AppRuntimeTree{
-					Key:    appKey,
-					HostID: a.hostID,
-					Name:   projName,
-					Source: src,
+					Key:        appKey,
+					HostID:     a.hostID,
+					Name:       projName,
+					Source:     src,
+					StatsReady: withStats,
 				}
 				composeGroups[appKey] = grp
 			}
@@ -1876,6 +2144,7 @@ func (a *Adapter) listRuntimeAppsViaDSMAPI(ctx context.Context) ([]platform.AppR
 			TotalCount:   1,
 			CPUPercent:   cpu,
 			MemUsage:     memU,
+			StatsReady:   withStats,
 			Containers:   []platform.ContainerRuntimeStat{cStat},
 		})
 	}

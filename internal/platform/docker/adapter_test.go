@@ -1,6 +1,15 @@
 package docker
 
-import "testing"
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"strings"
+	"sync/atomic"
+	"testing"
+)
 
 func TestParseComposeImagesAndDotEnv(t *testing.T) {
 	env := parseDotEnv([]byte(`
@@ -62,5 +71,76 @@ func TestIsVendorManagedContainer(t *testing.T) {
 	// User container mounting shared data folder (/var/apps/notepad/share/notes) must NOT be locked as vendor-managed
 	if isVendorManagedContainer(nil, nil, []string{"/var/apps/notepad/share/notes"}) {
 		t.Fatal("/var/apps/*/share/* user data mount must NOT lock user container")
+	}
+}
+
+func TestListRuntimeAppsWithOptions_FastAndOneShotStats(t *testing.T) {
+	var statsHits atomic.Int32
+	tr := &fakeExecTransport{
+		doHandler: func(path string) (*http.Response, error) {
+			jsonResp := func(v any) (*http.Response, error) {
+				b, _ := json.Marshal(v)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(bytes.NewReader(b)),
+				}, nil
+			}
+			if path == "/containers/json?all=1" {
+				return jsonResp([]map[string]any{
+					{
+						"Id":     "c111111111111111",
+						"Names":  []string{"/nginx-web"},
+						"Image":  "nginx:1.27-alpine",
+						"State":  "running",
+						"Status": "Up 2 hours (healthy)",
+					},
+				})
+			}
+			if strings.Contains(path, "/stats?stream=false&one-shot=true") {
+				hit := statsHits.Add(1)
+				return jsonResp(map[string]any{
+					"cpu_stats": map[string]any{
+						"cpu_usage":        map[string]any{"total_usage": uint64(hit) * 50_000_000},
+						"system_cpu_usage": uint64(hit) * 1_000_000_000,
+						"online_cpus":      2,
+					},
+					"precpu_stats": map[string]any{},
+					"memory_stats": map[string]any{
+						"usage": uint64(64 * 1024 * 1024),
+						"limit": uint64(1024 * 1024 * 1024),
+					},
+				})
+			}
+			return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader(""))}, nil
+		},
+	}
+
+	ad := New("h1", tr)
+
+	// 1. withStats=false skips /stats completely and marks StatsReady=false
+	fastTrees, err := ad.ListRuntimeAppsWithOptions(context.Background(), false)
+	if err != nil || len(fastTrees) != 1 {
+		t.Fatalf("fast ListRuntimeAppsWithOptions failed: len=%d err=%v", len(fastTrees), err)
+	}
+	if fastTrees[0].StatsReady || statsHits.Load() != 0 {
+		t.Fatalf("expected StatsReady=false and 0 stats hits, got StatsReady=%v hits=%d", fastTrees[0].StatsReady, statsHits.Load())
+	}
+
+	// 2. Cold withStats=true uses two one-shot samples (150ms apart) to compute CPU%
+	coldTrees, err := ad.ListRuntimeAppsWithOptions(context.Background(), true)
+	if err != nil || len(coldTrees) != 1 {
+		t.Fatalf("cold ListRuntimeAppsWithOptions failed: err=%v", err)
+	}
+	if !coldTrees[0].StatsReady || statsHits.Load() != 2 || coldTrees[0].CPUPercent <= 0 {
+		t.Fatalf("expected cold statsReady=true, hits=2, cpu>0; got ready=%v hits=%d cpu=%v", coldTrees[0].StatsReady, statsHits.Load(), coldTrees[0].CPUPercent)
+	}
+
+	// 3. Warm withStats=true reuses previous CPU sample in a SINGLE one-shot call (no sleep)
+	warmTrees, err := ad.ListRuntimeAppsWithOptions(context.Background(), true)
+	if err != nil || len(warmTrees) != 1 {
+		t.Fatalf("warm ListRuntimeAppsWithOptions failed: err=%v", err)
+	}
+	if statsHits.Load() != 3 || warmTrees[0].CPUPercent <= 0 {
+		t.Fatalf("expected warm call to add only 1 stats hit (total 3), got hits=%d cpu=%v", statsHits.Load(), warmTrees[0].CPUPercent)
 	}
 }

@@ -84,6 +84,7 @@ export default function HostsPage() {
   const { token } = theme.useToken()
   const qc = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
+  const authQuery = useQuery({ queryKey: ['authStatus'], queryFn: api.authStatus })
   const hostsQuery = useQuery({ queryKey: ['hosts', locale], queryFn: api.listHosts })
 
   const [modalOpen, setModalOpen] = useState(false)
@@ -144,29 +145,69 @@ export default function HostsPage() {
   }
 
   useEffect(() => {
-    if (searchParams.get('connectLocal') === '1') {
+    if (searchParams.get('connectLocal') === '1' && authQuery.data && hostsQuery.data) {
       setEditing(null)
       setTestResult(null)
       setGeneratedPubKey('')
       setOtpModalOpen(false)
       setOtpCode('')
       form.resetFields()
-      setPlatformId('synology')
-      form.setFieldsValue({
-        name: t.auth.spkDefaultName,
-        kind: 'synology',
-        transport: 'dsm_api',
-        dsmUrl: 'http://127.0.0.1:5000',
-        address: '127.0.0.1',
-        port: 22,
-        sshAuth: 'password',
-      })
+      const instMode = authQuery.data.installMode
+      if (instMode === 'synology_spk') {
+        setPlatformId('synology')
+        form.setFieldsValue({
+          name: t.auth.spkDefaultName,
+          kind: 'synology',
+          transport: 'dsm_api',
+          dsmUrl: 'http://127.0.0.1:5000',
+          address: '127.0.0.1',
+          port: 22,
+          sshAuth: 'password',
+        })
+      } else if (canAddLocal) {
+        setPlatformId('local')
+        form.setFieldsValue({
+          name: instMode === 'fnos_fpk' ? t.hosts.fnosLocalDefaultName : t.hosts.localDefaultName,
+          kind: instMode === 'fnos_fpk' ? 'fnos' : 'docker',
+          transport: 'local',
+        })
+      } else if (instMode === 'fnos_fpk') {
+        setPlatformId('fnos')
+        form.setFieldsValue({
+          name: t.hosts.fnosLocalDefaultName,
+          kind: 'fnos',
+          transport: 'ssh',
+          address: '127.0.0.1',
+          port: 22,
+          sshAuth: 'password',
+        })
+      } else {
+        setPlatformId('linux')
+        form.setFieldsValue({
+          name: t.hosts.localDefaultName,
+          kind: 'docker',
+          transport: 'ssh',
+          address: '127.0.0.1',
+          port: 22,
+          sshAuth: 'password',
+        })
+      }
       setModalOpen(true)
       const next = new URLSearchParams(searchParams)
       next.delete('connectLocal')
       setSearchParams(next, { replace: true })
     }
-  }, [form, searchParams, setSearchParams, t.auth.spkDefaultName])
+  }, [
+    authQuery.data,
+    canAddLocal,
+    form,
+    hostsQuery.data,
+    searchParams,
+    setSearchParams,
+    t.auth.spkDefaultName,
+    t.hosts.fnosLocalDefaultName,
+    t.hosts.localDefaultName,
+  ])
 
   const openEdit = (h: HostItem) => {
     setEditing(h)

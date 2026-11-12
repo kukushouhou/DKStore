@@ -225,3 +225,44 @@ func TestDeviceTokenStashBinding(t *testing.T) {
 		t.Fatalf("expected tok, got %q", got)
 	}
 }
+
+func TestListRuntimeContainers_ReusesAdapterSessionAcrossPolls(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeDSM{}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+
+	r := newTestRegistry(t)
+	defer r.Close()
+
+	in := CreateOrUpdateInput{
+		Name: "nas-a", Kind: "synology", Transport: "dsm_api",
+		DSMURL: srv.URL, DSMUser: "admin", DSMSecret: "p1", DSMOTPCode: "123456",
+	}
+	h, err := r.Create(ctx, in, i18n.ZhCN)
+	if err != nil {
+		t.Fatalf("create host failed: %v", err)
+	}
+
+	f.mu.Lock()
+	didBefore := f.didLogins
+	f.mu.Unlock()
+
+	// Consecutive fast + stats + poll calls must reuse the pooled DSM session (only 1 login)
+	if _, err := r.ListRuntimeContainers(ctx, h.ID, false); err != nil {
+		t.Fatalf("fast ListRuntimeContainers failed: %v", err)
+	}
+	if _, err := r.ListRuntimeContainers(ctx, h.ID, true); err != nil {
+		t.Fatalf("stats ListRuntimeContainers failed: %v", err)
+	}
+	if _, err := r.ListRuntimeContainers(ctx, "", true); err != nil {
+		t.Fatalf("poll ListRuntimeContainers failed: %v", err)
+	}
+
+	f.mu.Lock()
+	didAfter := f.didLogins
+	f.mu.Unlock()
+	if didAfter-didBefore != 1 {
+		t.Fatalf("expected pooled runtime adapter to login once across 3 calls, got %d logins", didAfter-didBefore)
+	}
+}
