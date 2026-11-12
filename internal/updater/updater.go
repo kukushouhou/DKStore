@@ -1352,7 +1352,7 @@ func hasCustomMirrorPrefix(ref string) bool {
 	}
 	switch strings.ToLower(first) {
 	case "docker.1ms.run", "docker.3ms.run", "docker.m.daocloud.io", "dockerproxy.com",
-		"docker.nju.edu.cn", "hub-mirror.c.163.com", "mirror.baidubce.com",
+		"docker.nju.edu.cn", "hub-mirror.c.163.com", "mirror.baidubce.com", "docker.fnnas.com",
 		"ghcr.nju.edu.cn", "ghcr.m.daocloud.io", "ghcr-proxy.com":
 		return true
 	default:
