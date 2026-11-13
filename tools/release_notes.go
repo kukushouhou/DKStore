@@ -57,8 +57,8 @@ func extractChangelogSection(content, cleanVer string) string {
 		return sec
 	}
 
-	// 2. 回退匹配 ## [Unreleased] 章节（支持在提交信息写 release: vX.Y.Z 时直接合并 Unreleased 中维护的双语日志）
-	reUnreleased := regexp.MustCompile(`(?i)^##\s+\[?unreleased\]?(?:\s|$|-)`)
+	// 2. 回退匹配 ## [开发中 / Unreleased] 或 ## [Unreleased] 章节（支持发版时直接提取未发布双语日志）
+	reUnreleased := regexp.MustCompile(`(?i)^##\s+\[?(?:开发中\s*/\s*)?unreleased\]?(?:\s|$|-)|^##\s+\[?开发中\]?(?:\s|$|-)`)
 	return sliceH2Section(lines, reUnreleased)
 }
 
