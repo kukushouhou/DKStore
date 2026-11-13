@@ -1,26 +1,45 @@
-# Changelog / 更新日志
+# 更新日志 / Changelog
 
-All notable changes to **DKStore** will be documented in this file.
-本项目的所有重要变更均会以中英双语记录在此文件中。
+本文件记录 **DKStore** 的所有重要版本变更。
+
+All notable changes to **DKStore** are documented in this file.
+
+## [开发中 / Unreleased]
+
+## [v0.2.0] - 2026-11-14
+
+### 新功能
+- **原生多平台发行包生态**：新增群晖 DSM 7 套件（`.spk`）、飞牛 fnOS 原生应用（`.fpk`）与 OpenWrt / iStoreOS LuCI 原生插件（`.ipk` / `.apk` / `.run`），支持复用宿主管理员登录态免二次密码直进并自动接入本机容器 (`2af488f`, `934d007`, `adf4d2b`)
+- **群晖免 SSH 接入与设备管理增强**：新增群晖 DSM WebAPI 免 SSH 接入模式（支持 2FA 动态码与设备令牌持久化），完善首次初始化向导，重构设备卡片展示（独立呈现连接地址、CPU 架构与系统环境）并补全编辑设备时的已存密码/私钥留空提示与解绑管理 (`34b414a`, `dc34423`, `ced256b`, `52f128f`)
+- **单服务精准升级、分层进度与安全回退**：新增一键单服务升级（自动保留自定义镜像加速源前缀）、多段版本号前缀锁定、镜像分层流式进度、实时只读 `xterm` 更新日志、简洁直观的 YAML/容器配置在线修改更新（支持防覆盖风险检测与一键恢复原配置），以及基于结构化版本标签的安全回退与历史记录快捷清理 (`a5833e4`, `d2855be`, `08f614e`, `6dab9c8`, `389d6d6`)
+- **容器运行监控与一键移除**：新增树状项目/容器实时资源监控视图（内置本地 SQLite 快照与后台并发采样实现秒开，独立展示所属设备与当前镜像），支持独立容器与整项目的可选镜像及目录清理移除 (`27349c0`, `09f47ab`, `14b6c2b`, `986e1fd`)
+- **私有仓库凭据原位快捷配置**：更新页私有仓库未授权提示支持当前页直接弹窗、自动带出目标仓库域名并在保存后立即触发重新检查 (`f2421c6`)
+
+### 问题修复
+- **鉴权会话与版本候选列表修复**：修复登录会话过期后前端未主动感知并跳转重登的问题，修正版本候选标签 SemVer 倒序排列与变体噪音过滤逻辑 (`2600492`, `782a01c`)
 
 ---
 
-## [Unreleased]
-
-### 新功能 / Features
-- **原生多平台发行包生态**：完整支持群晖 DSM 7 套件（`.spk`）、飞牛 fnOS 原生应用（`.fpk`）与 OpenWrt / iStoreOS LuCI 原生插件（`.ipk` / `.apk` / `.run`），内置宿主登录态免二次密码直进与本机容器自动接入 (`2af488f`, `934d007`, `adf4d2b`)
+### Features
 - **Native Multi-Platform Packages**: Added native installers for Synology DSM 7 (`.spk`), fnOS App Center (`.fpk`), and OpenWrt / iStoreOS LuCI (`.ipk` / `.apk` / `.run`) with seamless host admin session reuse and automatic local Docker discovery (`2af488f`, `934d007`, `adf4d2b`)
-- **一处安装，多端无 Agent 管理**：支持本机 Unix Socket、群晖免 SSH 的 DSM WebAPI（含 2FA 动态码与设备令牌持久化）及标准 SSH（Socket 转发 / `dial-stdio` / `sudo` 提权）统一管理多台 NAS、软路由与 Linux 服务器 (`a84bdd3`, `34b414a`, `dc34423`)
-- **Install Once, Manage Everywhere**: Agentless management across local Docker sockets, SSH-free Synology DSM WebAPI (with 2FA OTP & persistent device tokens), and standard SSH (`streamlocal` / `dial-stdio` / `sudo`) (`a84bdd3`, `34b414a`, `dc34423`)
-- **单服务精准升级、分层进度与有条件回退**：支持执行前冲突校验、镜像分层流式进度展示、实时只读 `xterm` 更新日志、多段版本号前缀锁定、YAML/独立容器配置修改更新，以及基于远端 Digest 核验的安全回退 (`a5833e4`, `21a3b21`, `d2855be`)
-- **Safe Service-Level Upgrades & Conditional Rollback**: Pre-flight conflict checks, real-time per-layer pull progress, live `xterm` log viewer, multi-segment version prefix locking, in-place YAML/container config editing, and verified digest-safe rollbacks (`a5833e4`, `21a3b21`, `d2855be`)
-- **容器运行监控与清理能力**：提供树状项目/容器实时资源监控视图，并支持独立容器与整项目的可选镜像/目录清理移除 (`27349c0`, `14b6c2b`, `986e1fd`)
-- **Runtime Container Tree & App Removal**: Added hierarchical project/container runtime monitor and safe container/project removal with optional image and directory cleanup (`27349c0`, `14b6c2b`, `986e1fd`)
+- **SSH-Free Synology Access & Host Management**: Added direct Synology DSM WebAPI mode (with 2FA OTP and persistent device tokens), guided initial setup wizard, redesigned device cards (explicitly displaying connection address, CPU architecture, and OS/Docker environment), and added leave-blank credential hints for device editing alongside explicit unbinding (`34b414a`, `dc34423`, `ced256b`, `52f128f`)
+- **Safe Service-Level Upgrades & Conditional Rollback**: Added one-click single-service upgrades (preserving custom registry mirror prefixes), multi-segment version prefix locking, real-time per-layer pull progress, read-only `xterm` live logs, streamlined in-place YAML/container config updates (with overwrite risk detection and one-click original config restore), structured-tag verified rollbacks, and quick history cleanup (`a5833e4`, `d2855be`, `08f614e`, `6dab9c8`, `389d6d6`)
+- **Runtime Container Tree & App Removal**: Added hierarchical project/container resource monitor (with persisted SQLite snapshots and concurrent sampling for instant cold loads, plus separate Device and Current Image columns) and container/project removal with optional image and directory cleanup (`27349c0`, `09f47ab`, `14b6c2b`, `986e1fd`)
+- **Inline Private Registry Credentials**: Private registry auth prompts on the Updates page now open an inline modal with the target registry domain pre-filled and automatically trigger a recheck upon saving (`f2421c6`)
 
-### 性能优化 / Performance
-- **容器监控页本地快照秒开**：将设备容器运行态快照持久化至本地 SQLite、复用远程连接池并改为 `one-shot` 并发采样，消除冷启动白屏等待并拆分独立的「所属设备」与「当前镜像」列 (`02fd42d`, `09f47ab`)
-- **Instant Container View via Local Snapshots**: Persisted host runtime snapshots in SQLite with pooled connections and concurrent `one-shot` stats sampling for instant cold loads, plus dedicated Device and Current Image columns (`02fd42d`, `09f47ab`)
+### Fixes
+- **Auth Session & Version Picker Fixes**: Fixed expired login sessions not redirecting proactively on `401`, and corrected SemVer descending sort and noisy variant filtering in the version picker (`2600492`, `782a01c`)
 
-### 问题修复 / Fixes
-- **认证与仓库兼容性增强**：主动探测过期会话并在 `401` 时自动跳转、保留飞牛 `docker.fnnas.com` 镜像加速源前缀、优化版本选择器 SemVer 倒序排列与变体过滤 (`2600492`, `08f614e`, `782a01c`)
-- **Auth & Registry Refinements**: Proactive expired-session redirection on `401`, preserved `docker.fnnas.com` mirror prefixes on tag upgrades, and improved SemVer sorting/filtering in the version picker (`2600492`, `08f614e`, `782a01c`)
+## [v0.1.0] - 2026-11-09
+
+### 新功能
+- **多设备远程直连容器更新检测**：支持通过本机 Unix Socket 与远程 SSH 只读扫描 Docker Compose 项目、群晖 Container Manager 项目及独立容器（被管设备无需安装客户端），直连远端镜像仓库执行 Digest 比对与镜像源归一化 (`52ea8c5`, `a84bdd3`)
+- **智能版本识别与风险分级**：支持语义化版本与 `latest` 等浮动标签的真实版本号反查，自动识别跨大版本升级、数据库/中间件组件与同标签重推镜像，将待更新服务拆分为「常规更新」与「谨慎更新」展示 (`52ea8c5`, `f578be7`)
+- **单二进制双语控制台与通知推送**：采用 Go 内嵌前端单二进制架构（SQLite 存储 + AES-GCM 凭据加密），内置管理员密码鉴权、版本忽略规则、定时巡检任务及 Webhook / Telegram / Bark 消息推送 (`d0a0102`, `52ea8c5`)
+
+---
+
+### Features
+- **Direct Multi-Host Update Detection**: Read-only discovery of Docker Compose projects, Synology Container Manager projects, and standalone containers via local Unix sockets and remote SSH without installing client daemons, with direct registry digest comparison and mirror normalization (`52ea8c5`, `a84bdd3`)
+- **Smart Version Resolution & Risk Classification**: Automatic version label resolution for SemVer and floating tags (such as `latest`), classifying major bumps, databases/middleware, and republished tags into Normal and Caution update groups (`52ea8c5`, `f578be7`)
+- **Single-Binary Bilingual Console & Notifications**: Self-contained Go binary with embedded web UI (SQLite storage + AES-GCM credential encryption), built-in admin authentication, ignore rules, scheduled scans, and Webhook / Telegram / Bark notifications (`d0a0102`, `52ea8c5`)
