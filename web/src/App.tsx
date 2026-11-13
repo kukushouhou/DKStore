@@ -4,12 +4,21 @@ import zhCN from 'antd/locale/zh_CN'
 import enUS from 'antd/locale/en_US'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider } from 'react-router'
+import { ApiError } from './api/client'
 import { router } from './router'
 import { buildTheme } from './theme'
 import { useUIStore } from './store/ui'
 
 const queryClient = new QueryClient({
-  defaultOptions: { queries: { retry: 1, refetchOnWindowFocus: false } },
+  defaultOptions: {
+    queries: {
+      retry: (failureCount, error) => {
+        if (error instanceof ApiError && error.status === 401) return false
+        return failureCount < 1
+      },
+      refetchOnWindowFocus: false,
+    },
+  },
 })
 
 function useSystemDark() {

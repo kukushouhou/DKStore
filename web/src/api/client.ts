@@ -1,3 +1,4 @@
+import { message } from 'antd'
 import { useUIStore } from '../store/ui'
 
 export class ApiError extends Error {
@@ -10,6 +11,25 @@ export class ApiError extends Error {
     this.code = code
     this.testResult = testResult
   }
+}
+
+type UnauthorizedListener = (err: ApiError) => void
+const unauthorizedListeners = new Set<UnauthorizedListener>()
+
+export function isAuthExpiredError(err: unknown): err is ApiError {
+  return err instanceof ApiError && err.status === 401 && err.code !== 'invalid_credentials'
+}
+
+export function onUnauthorized(listener: UnauthorizedListener): () => void {
+  unauthorizedListeners.add(listener)
+  return () => {
+    unauthorizedListeners.delete(listener)
+  }
+}
+
+export function showApiError(err: unknown): void {
+  if (isAuthExpiredError(err)) return
+  message.error((err as Error)?.message || 'Request failed')
 }
 
 export function gatewayPrefix(): string {
@@ -65,7 +85,23 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const body = await res.json().catch(() => null)
   if (!res.ok) {
     const err = body?.error
-    throw new ApiError(res.status, err?.code ?? 'http_error', err?.message ?? `HTTP ${res.status}`, body?.testResult)
+    const apiErr = new ApiError(
+      res.status,
+      err?.code ?? 'http_error',
+      err?.message ?? `HTTP ${res.status}`,
+      body?.testResult,
+    )
+    if (
+      isAuthExpiredError(apiErr) &&
+      path !== '/auth/login' &&
+      path !== '/auth/status' &&
+      path !== '/auth/logout'
+    ) {
+      for (const listener of unauthorizedListeners) {
+        listener(apiErr)
+      }
+    }
+    throw apiErr
   }
   return body as T
 }

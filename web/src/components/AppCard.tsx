@@ -21,6 +21,7 @@ import { ArrowRightOutlined, DownOutlined, SyncOutlined } from '@ant-design/icon
 import {
   api,
   resolveIconUrl,
+  showApiError,
   type AppCardItem,
   type ServiceItem,
   type UpdateJobItem,
@@ -204,7 +205,7 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
       }
       message.info(t.home.updating)
     } catch (e) {
-      message.error((e as Error).message)
+      showApiError(e)
     } finally {
       setUpdatingSvcKey('')
       setCautionTargetSvc(null)
@@ -278,7 +279,7 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
       message.success(t.ignoreModal.restored)
       onChanged()
     } catch (e) {
-      message.error((e as Error).message)
+      showApiError(e)
     } finally {
       setRestoring(false)
     }

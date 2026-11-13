@@ -17,7 +17,7 @@ import {
 } from 'antd'
 import { DeleteOutlined, GithubOutlined, PlusOutlined, ReloadOutlined, SendOutlined } from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type AppSettings, type RegistryCred } from '../api/client'
+import { api, showApiError, type AppSettings, type RegistryCred } from '../api/client'
 import { useI18n } from '../i18n'
 import { useUIStore, type Locale, type ThemeMode } from '../store/ui'
 
@@ -60,7 +60,7 @@ export default function SettingsPage() {
       message.success(t.settings.settingsSaved)
       qc.invalidateQueries({ queryKey: ['settings'] })
     } catch (e) {
-      message.error((e as Error).message)
+      showApiError(e)
     } finally {
       setSaving(false)
     }
@@ -74,7 +74,7 @@ export default function SettingsPage() {
       await api.testNotify(vals)
       message.success(t.settings.testSent)
     } catch (e) {
-      message.error((e as Error).message)
+      showApiError(e)
     } finally {
       setTestingNotify(false)
     }
@@ -88,7 +88,7 @@ export default function SettingsPage() {
       qc.invalidateQueries({ queryKey: ['regCreds'] })
       message.success(t.settings.settingsSaved)
     } catch (e) {
-      message.error((e as Error).message)
+      showApiError(e)
     }
   }
 
@@ -113,7 +113,7 @@ export default function SettingsPage() {
       qc.invalidateQueries({ queryKey: ['authStatus'] })
       message.success(t.settings.pwUpdated)
     } catch (e) {
-      message.error((e as Error).message)
+      showApiError(e)
     }
   }
 

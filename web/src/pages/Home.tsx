@@ -23,7 +23,7 @@ import {
 import { PlusOutlined, SyncOutlined } from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router'
-import { api, type AppCardItem, type FailedItem } from '../api/client'
+import { api, showApiError, type AppCardItem, type FailedItem } from '../api/client'
 import AppCard from '../components/AppCard'
 import UpdateQueuePanel from '../components/UpdateQueuePanel'
 import { useIsUltrawide, useOrderedQueueJobs } from '../hooks/useUpdateQueue'
@@ -107,7 +107,7 @@ export default function HomePage() {
       const p = await api.triggerCheck(hostFilter || undefined, true)
       setLiveProgress(p)
     } catch (e) {
-      message.error((e as Error).message)
+      showApiError(e)
     }
   }
 
@@ -129,7 +129,7 @@ export default function HomePage() {
       const p = await api.triggerCheck(hostFilter || undefined, true)
       setLiveProgress(p)
     } catch (e) {
-      message.error((e as Error).message)
+      showApiError(e)
     } finally {
       setHubSubmitting(false)
     }

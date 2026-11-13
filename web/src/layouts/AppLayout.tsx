@@ -29,7 +29,7 @@ import {
 } from '@ant-design/icons'
 import { Outlet, useLocation, useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ApiError, api } from '../api/client'
+import { ApiError, api, onUnauthorized, type AuthStatus } from '../api/client'
 import AuthToolbar from '../components/AuthToolbar'
 import DKStoreLogo from '../components/DKStoreLogo'
 import UpdateLogModal from '../components/UpdateLogModal'
@@ -40,6 +40,8 @@ import { useIsUltrawide, useOrderedQueueJobs } from '../hooks/useUpdateQueue'
 import { useI18n } from '../i18n'
 import SetupPage from '../pages/Setup'
 import { useUIStore, type Locale } from '../store/ui'
+
+const AUTH_EXPIRED_MSG_KEY = 'dkstore-auth-expired'
 
 export default function AppLayout() {
   const navigate = useNavigate()
@@ -67,6 +69,10 @@ export default function AppLayout() {
   const toggleQueueCollapsed = useUIStore((s) => s.toggleQueueCollapsed)
   const [popoverOpen, setPopoverOpen] = useState(false)
   const hydratedProgressStyleRef = useRef(false)
+  const wasAuthenticatedRef = useRef(false)
+  const manualLogoutRef = useRef(false)
+  const canSubscribeEventsRef = useRef(false)
+  const tRef = useRef(t)
 
   const canSubscribeEvents =
     Boolean(auth.data) &&
@@ -138,15 +144,89 @@ export default function AppLayout() {
     return () => clearTimeout(timer)
   }, [canSubscribeEvents, qc])
 
-  // 任一业务请求返回 401（会话过期 / 需要初始化 / 设备登录态失效）时重新获取访问状态，切换到对应页面
   useEffect(() => {
-    return qc.getQueryCache().subscribe((ev) => {
+    tRef.current = t
+  }, [t])
+
+  // 记录已登录状态；当从已登录非主动退回未登录（后台重启、SSE 断连探测、切回标签页重验）时，弹出唯一掉线提醒
+  useEffect(() => {
+    canSubscribeEventsRef.current = canSubscribeEvents
+    if (canSubscribeEvents) {
+      wasAuthenticatedRef.current = true
+      message.destroy(AUTH_EXPIRED_MSG_KEY)
+      return
+    }
+    if (auth.data && wasAuthenticatedRef.current && !manualLogoutRef.current) {
+      wasAuthenticatedRef.current = false
+      message.warning({
+        key: AUTH_EXPIRED_MSG_KEY,
+        content: tRef.current.auth.sessionExpired,
+      })
+    }
+  }, [auth.data, canSubscribeEvents])
+
+  // 任一业务请求（含直接调用的 api.* 与 React Query）返回 401 时，立即提示掉线并切回对应登录/初始化页
+  useEffect(() => {
+    const handleAuthExpired = (err: ApiError) => {
+      if (manualLogoutRef.current) return
+      if (wasAuthenticatedRef.current || canSubscribeEventsRef.current) {
+        wasAuthenticatedRef.current = false
+        message.warning({
+          key: AUTH_EXPIRED_MSG_KEY,
+          content: tRef.current.auth.sessionExpired,
+        })
+      }
+      qc.setQueryData<AuthStatus>(['authStatus'], (prev) => {
+        if (!prev) return prev
+        if (err.code === 'setup_required') {
+          return { ...prev, mode: 'setup_required', authenticated: false }
+        }
+        return {
+          ...prev,
+          mode: prev.mode === 'device' ? 'password' : prev.mode,
+          authenticated: false,
+        }
+      })
+      void qc.invalidateQueries({ queryKey: ['authStatus'] })
+    }
+
+    const unsubApi = onUnauthorized(handleAuthExpired)
+    const unsubCache = qc.getQueryCache().subscribe((ev) => {
       const err = ev.query.state.error
-      if (ev.type === 'updated' && err instanceof ApiError && err.status === 401 && ev.query.queryKey[0] !== 'authStatus') {
-        qc.invalidateQueries({ queryKey: ['authStatus'] })
+      if (
+        ev.type === 'updated' &&
+        err instanceof ApiError &&
+        err.status === 401 &&
+        err.code !== 'invalid_credentials' &&
+        ev.query.queryKey[0] !== 'authStatus'
+      ) {
+        handleAuthExpired(err)
       }
     })
+    return () => {
+      unsubApi()
+      unsubCache()
+    }
   }, [qc])
+
+  // 切回浏览器标签页或窗口获焦时静默核验一次登录态，无需等手动点击才发现掉线
+  useEffect(() => {
+    if (!canSubscribeEvents) return
+    let lastCheckedAt = 0
+    const checkNow = () => {
+      if (document.visibilityState === 'hidden') return
+      const now = Date.now()
+      if (now - lastCheckedAt < 3000) return
+      lastCheckedAt = now
+      void qc.invalidateQueries({ queryKey: ['authStatus'] })
+    }
+    document.addEventListener('visibilitychange', checkNow)
+    window.addEventListener('focus', checkNow)
+    return () => {
+      document.removeEventListener('visibilitychange', checkNow)
+      window.removeEventListener('focus', checkNow)
+    }
+  }, [canSubscribeEvents, qc])
 
   const items = [
     { key: '/', icon: <AppstoreOutlined />, label: t.nav.updates },
@@ -509,12 +589,18 @@ export default function AppLayout() {
               <Button
                 size="small"
                 onClick={async () => {
-                  await api.logout()
-                  qc.setQueryData(['authStatus'], (prev: typeof auth.data) =>
-                    prev ? { ...prev, authenticated: false } : prev,
-                  )
-                  qc.removeQueries({ predicate: (q) => q.queryKey[0] !== 'authStatus' })
-                  await qc.invalidateQueries({ queryKey: ['authStatus'] })
+                  manualLogoutRef.current = true
+                  wasAuthenticatedRef.current = false
+                  try {
+                    await api.logout()
+                    qc.setQueryData(['authStatus'], (prev: typeof auth.data) =>
+                      prev ? { ...prev, authenticated: false } : prev,
+                    )
+                    qc.removeQueries({ predicate: (q) => q.queryKey[0] !== 'authStatus' })
+                    await qc.invalidateQueries({ queryKey: ['authStatus'] })
+                  } finally {
+                    manualLogoutRef.current = false
+                  }
                 }}
               >
                 {t.nav.logout}

@@ -545,6 +545,7 @@ const zhCN = {
     setupFinishBtn: '完成并进入系统',
     themeSwitchLight: '切换为浅色模式',
     themeSwitchDark: '切换为深色模式',
+    sessionExpired: '登录状态已失效，请重新登录',
   },
   deleteModal: {
     titleContainer: '删除容器：{name}',
@@ -1134,6 +1135,7 @@ const enUS: Dict = {
     setupFinishBtn: 'Finish & Enter',
     themeSwitchLight: 'Switch to Light Mode',
     themeSwitchDark: 'Switch to Dark Mode',
+    sessionExpired: 'Session expired, please sign in again',
   },
   deleteModal: {
     titleContainer: 'Delete Container: {name}',

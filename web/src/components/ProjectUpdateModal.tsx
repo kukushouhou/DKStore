@@ -19,7 +19,7 @@ import {
 } from 'antd'
 import type { TextAreaRef } from 'antd/es/input/TextArea'
 import { ArrowRightOutlined, DownOutlined } from '@ant-design/icons'
-import { api, type AppCardItem, type ServiceItem } from '../api/client'
+import { api, showApiError, type AppCardItem, type ServiceItem } from '../api/client'
 import { useI18n } from '../i18n'
 import { useUIStore } from '../store/ui'
 import { detectComposeOverwriteRisks } from './composeGuard'
@@ -181,7 +181,7 @@ function ProjectUpdateModalBody({
       onUpdated()
       onClose()
     } catch (e) {
-      message.error((e as Error).message)
+      showApiError(e)
     } finally {
       setSubmittingDirect(false)
     }
@@ -225,7 +225,7 @@ function ProjectUpdateModalBody({
       onUpdated()
       onClose()
     } catch (e) {
-      message.error((e as Error).message)
+      showApiError(e)
     } finally {
       setSubmittingYaml(false)
     }

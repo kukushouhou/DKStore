@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Button, Flex, Modal, Radio, Space, Typography, message, theme } from 'antd'
-import { api, type IgnoreMode } from '../api/client'
+import { api, showApiError, type IgnoreMode } from '../api/client'
 import { useI18n } from '../i18n'
 import LockableVersionBar from './LockableVersionBar'
 import { parseNumericSegs, unwrapConcreteVersion } from './versionUtils'
@@ -75,7 +75,7 @@ function IgnorePolicyModalBody({
       onSuccess()
       onClose()
     } catch (e) {
-      message.error((e as Error).message)
+      showApiError(e)
     } finally {
       setSubmitting(false)
     }

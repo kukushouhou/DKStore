@@ -30,6 +30,7 @@ import {
 } from '@ant-design/icons'
 import {
   api,
+  showApiError,
   type AppCardItem,
   type ServiceEnvItem,
   type ServiceItem,
@@ -314,9 +315,10 @@ function VersionPickerModalBody({
         const atLatest = checkIsAtOrAboveLatest(initTag, hi, items)
         setSelectedTag(initTag)
         setPolicy(atLatest ? 'all' : 'skip_latest')
-      } catch {
+      } catch (e) {
         if (!cancelled) {
           setLocalTags([])
+          showApiError(e)
         }
       } finally {
         if (!cancelled) setLoading(false)
@@ -419,7 +421,7 @@ function VersionPickerModalBody({
       }
       setRemoteSearched(true)
     } catch (e) {
-      message.error((e as Error).message)
+      showApiError(e)
     } finally {
       setSearchingRemote(false)
     }
@@ -524,7 +526,7 @@ function VersionPickerModalBody({
       onUpdated?.()
       onClose()
     } catch (e) {
-      message.error((e as Error).message)
+      showApiError(e)
     } finally {
       setSubmitting(false)
     }
@@ -580,7 +582,7 @@ function VersionPickerModalBody({
         onUpdated?.()
         onClose()
       } catch (e) {
-        message.error((e as Error).message)
+        showApiError(e)
       } finally {
         setSubmittingConfig(false)
       }
@@ -636,7 +638,7 @@ function VersionPickerModalBody({
       onUpdated?.()
       onClose()
     } catch (e) {
-      message.error((e as Error).message)
+      showApiError(e)
     } finally {
       setSubmittingConfig(false)
     }

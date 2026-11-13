@@ -16,6 +16,7 @@ import {
 import { ExclamationCircleFilled } from '@ant-design/icons'
 import {
   api,
+  showApiError,
   type DeleteAppPreviewResponse,
   type DeleteFileItem,
 } from '../api/client'
@@ -159,7 +160,7 @@ function DeleteAppModalBody({
       onDeleted()
       onClose()
     } catch (e) {
-      message.error((e as Error).message)
+      showApiError(e)
     } finally {
       setSubmitting(false)
     }

@@ -41,7 +41,7 @@ import {
 } from '@ant-design/icons'
 import { useSearchParams } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, ApiError, type HostInput, type HostItem, type HostTestResult } from '../api/client'
+import { api, ApiError, showApiError, type HostInput, type HostItem, type HostTestResult } from '../api/client'
 import { useI18n } from '../i18n'
 
 type PlatformId = 'synology' | 'fnos' | 'openwrt' | 'linux' | 'local'
@@ -297,7 +297,7 @@ export default function HostsPage() {
         setOtpModalOpen(true)
         return
       }
-      message.error((e as Error).message)
+      showApiError(e)
     } finally {
       setTesting(false)
     }
@@ -309,7 +309,7 @@ export default function HostsPage() {
       form.setFieldsValue({ sshAuth: 'key', sshSecret: kp.privateKey })
       setGeneratedPubKey(kp.authorizedKey)
     } catch (e) {
-      message.error((e as Error).message)
+      showApiError(e)
     }
   }
 
@@ -352,7 +352,7 @@ export default function HostsPage() {
         setOtpModalOpen(true)
         return
       }
-      message.error((e as Error).message)
+      showApiError(e)
     } finally {
       setSaving(false)
     }
@@ -473,7 +473,7 @@ export default function HostsPage() {
                         await api.triggerCheck(h.id, true)
                         message.info(t.home.checking)
                       } catch (e) {
-                        message.error((e as Error).message)
+                        showApiError(e)
                       }
                     }}
                   >
@@ -499,7 +499,7 @@ export default function HostsPage() {
                         qc.invalidateQueries({ queryKey: ['overview'] })
                         qc.invalidateQueries({ queryKey: ['containers'] })
                       } catch (e) {
-                        message.error((e as Error).message)
+                        showApiError(e)
                       }
                     }}
                   >

@@ -19,7 +19,7 @@ import {
 } from 'antd'
 import { ArrowRightOutlined, RollbackOutlined } from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, type UpdateJobItem } from '../api/client'
+import { api, showApiError, type UpdateJobItem } from '../api/client'
 import { useI18n } from '../i18n'
 import { useUIStore } from '../store/ui'
 
@@ -78,7 +78,7 @@ export default function HistoryPage() {
       setDataWarning(res.dataWarning || '')
       setRollbackModalJob(job)
     } catch (e) {
-      message.error((e as Error).message)
+      showApiError(e)
     } finally {
       setVerifyingId(null)
     }
@@ -96,7 +96,7 @@ export default function HistoryPage() {
       setRollbackModalJob(null)
       qc.invalidateQueries({ queryKey: ['updates'] })
     } catch (e) {
-      message.error((e as Error).message)
+      showApiError(e)
     } finally {
       setRollingBack(false)
     }
