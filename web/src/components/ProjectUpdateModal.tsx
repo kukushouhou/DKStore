@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Alert,
   Badge,
@@ -17,7 +17,6 @@ import {
   message,
   theme,
 } from 'antd'
-import type { TextAreaRef } from 'antd/es/input/TextArea'
 import { ArrowRightOutlined, DownOutlined } from '@ant-design/icons'
 import { api, showApiError, type AppCardItem, type ServiceItem } from '../api/client'
 import { useI18n } from '../i18n'
@@ -79,7 +78,6 @@ function ProjectUpdateModalBody({
   const { token } = theme.useToken()
   const { t } = useI18n()
   const upsertUpdateJob = useUIStore((s) => s.upsertUpdateJob)
-  const textareaRef = useRef<TextAreaRef | null>(null)
 
   const services = useMemo(
     () => (app.allServices && app.allServices.length > 0 ? app.allServices : app.services),
@@ -185,24 +183,6 @@ function ProjectUpdateModalBody({
     } finally {
       setSubmittingDirect(false)
     }
-  }
-
-  const handleClearAndPaste = async () => {
-    try {
-      if (navigator.clipboard?.readText) {
-        const clip = await navigator.clipboard.readText()
-        if (clip && clip.trim()) {
-          setYamlText(clip)
-          textareaRef.current?.focus()
-          return
-        }
-      }
-    } catch {
-      // 剪贴板未授权时降级为清空并聚焦输入框
-    }
-    setYamlText('')
-    textareaRef.current?.focus()
-    message.info(t.projectUpdate.clearedPasteTip)
   }
 
   const handleYamlSubmit = async () => {
@@ -535,39 +515,6 @@ function ProjectUpdateModalBody({
         ) : (
           /* 按官方新版配置更新模式 */
           <Flex vertical gap={14}>
-            <Alert
-              type="info"
-              showIcon
-              title={<strong>{t.projectUpdate.yamlGuideTitle}</strong>}
-              description={
-                <ul
-                  style={{
-                    margin: '4px 0 0',
-                    paddingLeft: 18,
-                    fontSize: token.fontSizeSM,
-                    color: token.colorTextSecondary,
-                  }}
-                >
-                  <li>
-                    <strong style={{ color: token.colorText }}>
-                      {t.projectUpdate.yamlBullet1Bold}
-                    </strong>
-                    {t.projectUpdate.yamlBullet1Text}
-                  </li>
-                  <li>
-                    <strong style={{ color: token.colorText }}>
-                      {t.projectUpdate.yamlBullet2Bold}
-                    </strong>
-                    {t.projectUpdate.yamlBullet2Before}
-                    <strong style={{ color: token.colorText }}>
-                      {t.projectUpdate.yamlBullet2Strong}
-                    </strong>
-                    {t.projectUpdate.yamlBullet2After}
-                  </li>
-                </ul>
-              }
-            />
-
             {loadingYaml ? (
               <Flex align="center" justify="center" gap={8} style={{ height: 200 }}>
                 <Spin size="small" />
@@ -583,26 +530,30 @@ function ProjectUpdateModalBody({
               />
             ) : (
               <>
+                <Alert
+                  type="info"
+                  showIcon
+                  title={
+                    <Typography.Text style={{ fontSize: token.fontSizeSM }}>
+                      {t.projectUpdate.yamlGuide}
+                    </Typography.Text>
+                  }
+                />
+
                 <Flex wrap="wrap" align="center" justify="space-between" gap={8}>
                   <Typography.Text strong style={{ fontSize: token.fontSizeSM }}>
                     {t.projectUpdate.yamlContentLabel}
                   </Typography.Text>
-                  <Space size={8}>
-                    <Button size="small" type="primary" ghost onClick={handleClearAndPaste}>
-                      {t.projectUpdate.clearAndPasteBtn}
-                    </Button>
-                    <Button
-                      size="small"
-                      onClick={() => setYamlText(origYaml)}
-                      disabled={yamlText === origYaml}
-                    >
-                      {t.projectUpdate.restoreOrigBtn}
-                    </Button>
-                  </Space>
+                  <Button
+                    size="small"
+                    onClick={() => setYamlText(origYaml)}
+                    disabled={yamlText === origYaml}
+                  >
+                    {t.projectUpdate.restoreOrigBtn}
+                  </Button>
                 </Flex>
 
                 <Input.TextArea
-                  ref={textareaRef}
                   rows={10}
                   spellCheck={false}
                   value={yamlText}

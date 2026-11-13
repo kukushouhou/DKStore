@@ -21,7 +21,6 @@ import {
   message,
   theme,
 } from 'antd'
-import type { TextAreaRef } from 'antd/es/input/TextArea'
 import {
   ArrowRightOutlined,
   CheckOutlined,
@@ -196,7 +195,6 @@ function VersionPickerModalBody({
   const { t } = useI18n()
   const screens = Grid.useBreakpoint()
   const upsertUpdateJob = useUIStore((s) => s.upsertUpdateJob)
-  const textareaRef = useRef<TextAreaRef | null>(null)
   const nextRowIdRef = useRef<number>(1)
 
   const canShowConfigTab = Boolean(!onPickOnly && app && app.source !== 'vendor_managed')
@@ -530,24 +528,6 @@ function VersionPickerModalBody({
     } finally {
       setSubmitting(false)
     }
-  }
-
-  const handleClearAndPaste = async () => {
-    try {
-      if (navigator.clipboard?.readText) {
-        const clip = await navigator.clipboard.readText()
-        if (clip && clip.trim()) {
-          setYamlText(replaceComposeImageTag(clip, service.imageRef, selectedTag))
-          textareaRef.current?.focus()
-          return
-        }
-      }
-    } catch {
-      // 剪贴板未授权时降级为清空并聚焦输入框
-    }
-    setYamlText('')
-    textareaRef.current?.focus()
-    message.info(t.projectUpdate.clearedPasteTip)
   }
 
   const handleSubmitConfig = async () => {
@@ -1094,38 +1074,15 @@ function VersionPickerModalBody({
               }
             />
           ) : !isStandaloneConfigMode ? (
-            /* Case A：单容器 YAML 项目（完整操作指引 + 清空粘贴 + 恢复原配置 + 防误覆盖保护） */
+            /* Case A：单容器 YAML 项目（精简操作说明 + 恢复原配置 + 防误覆盖保护） */
             <>
               <Alert
                 type="info"
                 showIcon
-                title={<strong>{t.projectUpdate.yamlGuideTitle}</strong>}
-                description={
-                  <ul
-                    style={{
-                      margin: '4px 0 0',
-                      paddingLeft: 18,
-                      fontSize: token.fontSizeSM,
-                      color: token.colorTextSecondary,
-                    }}
-                  >
-                    <li>
-                      <strong style={{ color: token.colorText }}>
-                        {t.projectUpdate.yamlBullet1Bold}
-                      </strong>
-                      {t.projectUpdate.yamlBullet1Text}
-                    </li>
-                    <li>
-                      <strong style={{ color: token.colorText }}>
-                        {t.projectUpdate.yamlBullet2Bold}
-                      </strong>
-                      {t.projectUpdate.yamlBullet2Before}
-                      <strong style={{ color: token.colorText }}>
-                        {t.projectUpdate.yamlBullet2Strong}
-                      </strong>
-                      {t.projectUpdate.yamlBullet2After}
-                    </li>
-                  </ul>
+                title={
+                  <Typography.Text style={{ fontSize: token.fontSizeSM }}>
+                    {t.projectUpdate.yamlGuide}
+                  </Typography.Text>
                 }
               />
 
@@ -1133,22 +1090,16 @@ function VersionPickerModalBody({
                 <Typography.Text strong style={{ fontSize: token.fontSizeSM }}>
                   {t.projectUpdate.yamlContentLabel}
                 </Typography.Text>
-                <Space size={8}>
-                  <Button size="small" type="primary" ghost onClick={handleClearAndPaste}>
-                    {t.projectUpdate.clearAndPasteBtn}
-                  </Button>
-                  <Button
-                    size="small"
-                    onClick={() => setYamlText(syncedOrigYaml)}
-                    disabled={yamlText === syncedOrigYaml}
-                  >
-                    {t.projectUpdate.restoreOrigBtn}
-                  </Button>
-                </Space>
+                <Button
+                  size="small"
+                  onClick={() => setYamlText(syncedOrigYaml)}
+                  disabled={yamlText === syncedOrigYaml}
+                >
+                  {t.projectUpdate.restoreOrigBtn}
+                </Button>
               </Flex>
 
               <Input.TextArea
-                ref={textareaRef}
                 rows={10}
                 spellCheck={false}
                 value={yamlText}
