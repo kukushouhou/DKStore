@@ -28,6 +28,8 @@ const (
 	MsgUpdateTagNotFound     = "update.tag_not_found"     // 仓库中未找到标签: %s
 	MsgComposeInvalidYAML    = "compose.invalid_yaml"     // Compose YAML 格式无效: %s
 	MsgComposeNotEditable    = "compose.not_editable"     // 当前项目不支持直接编辑配置
+	MsgDeleteAppNotFound     = "delete.app_not_found"     // 未找到目标应用: %s
+	MsgDeleteUnsupported     = "delete.unsupported"       // 当前设备连接方式不支持删除操作
 
 	// Docker 引擎更新执行（platform/docker）
 	MsgDockerContainerNotFound = "docker.container_not_found" // 未找到目标服务容器 (%s/%s)
@@ -93,6 +95,8 @@ var engineMessages = map[string][2]string{
 	MsgUpdateTagNotFound:     {"在镜像仓库中未找到指定版本标签：%s", "Specified version tag %s was not found in the image repository"},
 	MsgComposeInvalidYAML:    {"Compose 配置格式不正确：%s", "Invalid Compose YAML configuration: %s"},
 	MsgComposeNotEditable:    {"当前应用不支持直接编辑 Compose 配置", "Direct Compose configuration editing is not supported for this app"},
+	MsgDeleteAppNotFound:     {"未找到目标容器或项目：%s", "Target container or project not found: %s"},
+	MsgDeleteUnsupported:     {"当前设备的连接方式暂不支持执行删除操作", "The current connection mode of this device does not support deletion"},
 
 	MsgDockerContainerNotFound: {"未找到目标服务容器（%s/%s）", "Target service container not found (%s/%s)"},
 	MsgDockerNoContainerName:   {"无法读取原容器名称", "Unable to read the original container name"},

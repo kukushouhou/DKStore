@@ -335,6 +335,40 @@ export interface UpdateAppComposePayload {
   skipTargetTag?: string
 }
 
+export interface DeleteFileItem {
+  id: string
+  kind: 'project_dir' | 'volume' | 'bind_mount'
+  path: string
+  target?: string
+  defaultSelect: boolean
+  protected: boolean
+  reason?: string
+}
+
+export interface DeleteAppPreviewResponse {
+  appKey: string
+  appName: string
+  source: 'standalone' | 'compose' | 'dsm_project' | 'vendor_managed'
+  isProject: boolean
+  containers: string[]
+  images: string[]
+  files: DeleteFileItem[]
+}
+
+export interface DeleteAppPayload {
+  appKey: string
+  deleteImages: boolean
+  fileIds: string[]
+}
+
+export interface DeleteAppResult {
+  removedContainers: number
+  removedImages: number
+  skippedImages?: string[]
+  removedFiles: number
+  warnings?: string[]
+}
+
 export interface ServiceEnvItem {
   key: string
   value: string
@@ -530,6 +564,13 @@ export const api = {
     request<AppComposeResponse>(`/apps/compose?key=${encodeURIComponent(appKey)}`),
   updateAppCompose: (payload: UpdateAppComposePayload) =>
     request<{ ok: boolean; job?: UpdateJobItem; items?: UpdateJobItem[] }>('/apps/compose-update', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  previewDeleteApp: (appKey: string) =>
+    request<DeleteAppPreviewResponse>(`/apps/delete-preview?key=${encodeURIComponent(appKey)}`),
+  deleteApp: (payload: DeleteAppPayload) =>
+    request<{ ok: boolean; result: DeleteAppResult }>('/apps/delete', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),

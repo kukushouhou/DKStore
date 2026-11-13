@@ -25,6 +25,7 @@ interface DetailDrawerProps {
   onClose: () => void
   onOpenVersionPicker: (svc: ServiceItem) => void
   onOpenComposeYaml: () => void
+  onOpenDelete?: () => void
 }
 
 function formatDateTime(ts?: number): string {
@@ -67,6 +68,7 @@ export default function DetailDrawer({
   onClose,
   onOpenVersionPicker,
   onOpenComposeYaml,
+  onOpenDelete,
 }: DetailDrawerProps) {
   const { token } = theme.useToken()
   const { t } = useI18n()
@@ -430,7 +432,16 @@ export default function DetailDrawer({
           </>
         )}
 
-        <Flex justify="flex-end" style={{ paddingTop: 4 }}>
+        <Flex justify="space-between" align="center" style={{ paddingTop: 4 }}>
+          <div>
+            {onOpenDelete && app.source !== 'vendor_managed' && (
+              <Button danger onClick={onOpenDelete}>
+                {app.source === 'compose' || app.source === 'dsm_project' || totalCount > 1
+                  ? t.home.deleteProjectMenu
+                  : t.home.deleteContainerMenu}
+              </Button>
+            )}
+          </div>
           <Button onClick={onClose}>{t.detail.closeBtn}</Button>
         </Flex>
       </Flex>

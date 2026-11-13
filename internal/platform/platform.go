@@ -194,6 +194,63 @@ type StandaloneConfigAdapter interface {
 	UpdateStandaloneConfig(ctx context.Context, req StandaloneUpdateRequest, onProgress func(PullProgress)) (*UpdateResult, error)
 }
 
+// DeleteFileKind 标识可随应用清理的关联文件或卷类型。
+type DeleteFileKind string
+
+const (
+	DeleteFileProjectDir DeleteFileKind = "project_dir" // Compose 项目配置目录或配置文件
+	DeleteFileVolume     DeleteFileKind = "volume"      // Docker 命名或匿名数据卷
+	DeleteFileBindMount  DeleteFileKind = "bind_mount"  // 宿主机挂载目录或文件
+)
+
+// DeleteFileItem 描述单个关联路径或数据卷项。
+type DeleteFileItem struct {
+	ID            string         `json:"id"`
+	Kind          DeleteFileKind `json:"kind"`
+	Path          string         `json:"path"`
+	Target        string         `json:"target,omitempty"`
+	DefaultSelect bool           `json:"defaultSelect"`
+	Protected     bool           `json:"protected"`
+	Reason        string         `json:"reason,omitempty"` // system_protected | external_bind | readonly_bind | dsm_api_host_path_unsupported
+}
+
+// DeleteAppPreview 是删除容器或整项目前展示的关联资源预览。
+type DeleteAppPreview struct {
+	AppKey     string           `json:"appKey"`
+	AppName    string           `json:"appName"`
+	Source     SourceKind       `json:"source"`
+	IsProject  bool             `json:"isProject"`
+	Containers []string         `json:"containers"`
+	Images     []string         `json:"images"`
+	Files      []DeleteFileItem `json:"files"`
+}
+
+// DeleteAppRequest 是删除单个独立容器或整个项目的执行请求。
+type DeleteAppRequest struct {
+	AppKey       string
+	AppName      string
+	Source       SourceKind
+	Project      *ProjectInfo
+	DeleteImages bool
+	FileIDs      []string
+}
+
+// DeleteAppResult 汇总删除容器/项目及清理镜像、关联文件的执行结果。
+type DeleteAppResult struct {
+	RemovedContainers int      `json:"removedContainers"`
+	RemovedImages     int      `json:"removedImages"`
+	SkippedImages     []string `json:"skippedImages,omitempty"`
+	RemovedFiles      int      `json:"removedFiles"`
+	Warnings          []string `json:"warnings,omitempty"`
+}
+
+// AppDeleteAdapter 扩展 Adapter，提供独立容器与整项目的删除预览及执行能力。
+type AppDeleteAdapter interface {
+	Adapter
+	PreviewDeleteApp(ctx context.Context, appName string, source SourceKind, project *ProjectInfo) (*DeleteAppPreview, error)
+	DeleteApp(ctx context.Context, req DeleteAppRequest) (*DeleteAppResult, error)
+}
+
 // UpdateRequest 是对单个服务执行升级或回退的输入参数。
 type UpdateRequest struct {
 	AppName         string

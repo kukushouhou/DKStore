@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/kukushouhou/DKStore/internal/i18n"
+	"github.com/kukushouhou/DKStore/internal/platform"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -66,6 +67,13 @@ type StreamingComposeTransport interface {
 	ExecutableTransport
 	ExecComposeServiceStream(ctx context.Context, workDir string, configFiles, envFiles []string, projectName, serviceName string, startContainer bool, onChunk func(string)) (string, error)
 	ExecComposeProjectStream(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, pullAndRemoveOrphans bool, onChunk func(string)) (string, error)
+}
+
+// CleanupTransport 扩展 ExecutableTransport，提供 Compose 整项目下线与受保护的宿主机路径清理能力。
+type CleanupTransport interface {
+	ExecutableTransport
+	ExecComposeDown(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, removeVolumes bool) (string, error)
+	RemoveHostPaths(ctx context.Context, paths []string) error
 }
 
 const maxFileSize = 2 << 20 // 2 MiB
@@ -270,6 +278,55 @@ func (l *LocalTransport) ExecComposeProjectStream(ctx context.Context, workDir s
 		return strings.Join(outputs, "\n"), nil
 	}
 	return runSub("up", "-d")
+}
+
+func (l *LocalTransport) ExecComposeDown(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, removeVolumes bool) (string, error) {
+	baseFlags := buildComposeBaseFlags(workDir, configFiles, envFiles, projectName)
+	downArgs := []string{"down", "--remove-orphans"}
+	if removeVolumes {
+		downArgs = append(downArgs, "-v")
+	}
+	full := append(append([]string(nil), baseFlags...), downArgs...)
+	env := append(os.Environ(), "PATH="+os.Getenv("PATH")+":/usr/local/bin:/var/packages/ContainerManager/target/usr/bin:/var/packages/Docker/target/usr/bin")
+	newCmd := func(name string, a ...string) *exec.Cmd {
+		c := exec.CommandContext(ctx, name, a...)
+		if workDir != "" {
+			if st, err := os.Stat(workDir); err == nil && st.IsDir() {
+				c.Dir = workDir
+			}
+		}
+		c.Env = env
+		return c
+	}
+	name, cmdArgs := "docker", append([]string{"compose"}, full...)
+	if newCmd("docker", "compose", "version").Run() != nil {
+		if _, lerr := exec.LookPath("docker-compose"); lerr == nil {
+			name, cmdArgs = "docker-compose", full
+		}
+	}
+	cmd := newCmd(name, cmdArgs...)
+	var buf syncBuffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	err := cmd.Run()
+	outStr := strings.TrimSpace(string(buf.Bytes()))
+	if err != nil {
+		return outStr, fmt.Errorf("%s compose down: %w (%s)", name, err, outStr)
+	}
+	return outStr, nil
+}
+
+func (l *LocalTransport) RemoveHostPaths(_ context.Context, paths []string) error {
+	for _, raw := range paths {
+		cleaned := platform.NormalizeHostPath(raw)
+		if cleaned == "" || platform.IsProtectedHostPath(cleaned) {
+			return i18n.NewEngineError(i18n.MsgTransportInvalidPath)
+		}
+		if err := os.RemoveAll(filepath.FromSlash(cleaned)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (l *LocalTransport) Close() error {
@@ -735,6 +792,75 @@ func (t *SSHTransport) ExecSynoWebAPIProjectList(ctx context.Context) ([]byte, e
 	}
 	const cmd = "/usr/syno/bin/synowebapi --exec api=SYNO.Docker.Project version=1 method=list"
 	return t.runReadOnlyCmd(ctx, cmd, 0)
+}
+
+// ExecSynoWebAPIProjectDelete 在群晖 SSH 模式下同步清理并删除 Container Manager 原生项目注册记录。
+func (t *SSHTransport) ExecSynoWebAPIProjectDelete(ctx context.Context, projectID string) error {
+	id := strings.TrimSpace(projectID)
+	if id == "" {
+		return nil
+	}
+	if err := t.ensureClient(ctx); err != nil {
+		return err
+	}
+	idJSON, _ := fmt.Sprintf("%q", id), error(nil)
+	cleanCmd := fmt.Sprintf("/usr/syno/bin/synowebapi --exec api=SYNO.Docker.Project version=1 method=clean_stream id=%s >/dev/null 2>&1 || true; /usr/syno/bin/synowebapi --exec api=SYNO.Docker.Project version=1 method=delete id=%s",
+		shellQuote(idJSON), shellQuote(idJSON))
+	_, err := t.runPrivilegedCmd(ctx, "sh -c "+shellQuote(cleanCmd), nil)
+	return err
+}
+
+func (t *SSHTransport) ExecComposeDown(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, removeVolumes bool) (string, error) {
+	if err := t.ensureClient(ctx); err != nil {
+		return "", err
+	}
+	baseFlags := buildComposeBaseFlags(workDir, configFiles, envFiles, projectName)
+	downArgs := append(append([]string(nil), baseFlags...), "down", "--remove-orphans")
+	if removeVolumes {
+		downArgs = append(downArgs, "-v")
+	}
+	// 若宿主机目录已不存在，不强制 cd 失败，回退直接在任意目录按 -p projectName 执行
+	script := composeShellScript(workDir, downArgs)
+	if workDir != "" {
+		fallbackScript := composeShellScript("", append([]string{"-p", projectName, "down", "--remove-orphans"}, func() []string {
+			if removeVolumes {
+				return []string{"-v"}
+			}
+			return nil
+		}()...))
+		script = fmt.Sprintf("if [ -d %s ]; then %s; else %s; fi", shellQuote(workDir), script, fallbackScript)
+	}
+	out, err := t.runPrivilegedCmd(ctx, "sh -c "+shellQuote(script), nil)
+	if err != nil {
+		return strings.TrimSpace(string(out)), fmt.Errorf("remote docker compose down: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (t *SSHTransport) RemoveHostPaths(ctx context.Context, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	if err := t.ensureClient(ctx); err != nil {
+		return err
+	}
+	quoted := make([]string, 0, len(paths))
+	for _, raw := range paths {
+		cleaned := platform.NormalizeHostPath(raw)
+		if cleaned == "" || platform.IsProtectedHostPath(cleaned) {
+			return i18n.NewEngineError(i18n.MsgTransportInvalidPath)
+		}
+		quoted = append(quoted, shellQuote(cleaned))
+	}
+	cmd := "rm -rf -- " + strings.Join(quoted, " ")
+	out, err := t.runPrivilegedCmd(ctx, "sh -c "+shellQuote(cmd), nil)
+	if err != nil {
+		if msg := strings.TrimSpace(string(out)); msg != "" {
+			return fmt.Errorf("%w (%s)", err, msg)
+		}
+		return err
+	}
+	return nil
 }
 
 // runSession 在新 SSH 会话中执行命令。stdin 可为空；limit>0 时只读取前 limit 字节的标准输出（达到上限后结束会话）；

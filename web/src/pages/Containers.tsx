@@ -30,6 +30,7 @@ import {
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router'
 import { api, type AppRuntimeTree, type ContainerRuntimeStat } from '../api/client'
+import DeleteAppModal from '../components/DeleteAppModal'
 import { useI18n } from '../i18n'
 
 const TAG_COLORS = ['purple', 'blue', 'cyan', 'magenta', 'orange', 'green'] as const
@@ -104,6 +105,7 @@ export default function ContainersPage() {
   const [stateFilter, setStateFilter] = useState<'all' | 'running' | 'stopped'>('all')
   const [keyword, setKeyword] = useState('')
   const [collapsedKeys, setCollapsedKeys] = useState<Record<string, boolean>>({})
+  const [deletingApp, setDeletingApp] = useState<AppRuntimeTree | null>(null)
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
 
   useEffect(() => {
@@ -178,20 +180,22 @@ export default function ContainersPage() {
 
   const colSpan = showHostCol
     ? {
-        name: { xs: 10, md: 7 },
-        host: { xs: 5, md: 3 },
-        state: { xs: 5, md: 3 },
+        name: { xs: 9, md: 6 },
+        host: { xs: 4, md: 3 },
+        state: { xs: 4, md: 3 },
         uptime: { xs: 0, md: 3 },
         resource: { xs: 4, md: 3 },
-        image: { xs: 0, md: 5 },
+        image: { xs: 0, md: 4 },
+        action: { xs: 3, md: 2 },
       }
     : {
-        name: { xs: 12, md: 8 },
+        name: { xs: 10, md: 8 },
         host: { xs: 0, md: 0 },
-        state: { xs: 6, md: 3 },
+        state: { xs: 5, md: 3 },
         uptime: { xs: 0, md: 3 },
-        resource: { xs: 6, md: 4 },
-        image: { xs: 0, md: 6 },
+        resource: { xs: 5, md: 3 },
+        image: { xs: 0, md: 5 },
+        action: { xs: 4, md: 2 },
       }
 
   const counts = useMemo(() => {
@@ -262,6 +266,7 @@ export default function ContainersPage() {
   }
 
   const handleRefresh = () => {
+    void cachedQuery.refetch()
     void fastQuery.refetch()
     void statsQuery.refetch()
   }
@@ -523,6 +528,9 @@ export default function ContainersPage() {
             <Col {...colSpan.uptime}>{t.containers.colUptime}</Col>
             <Col {...colSpan.resource}>{t.containers.colResource}</Col>
             <Col {...colSpan.image}>{t.containers.colImage}</Col>
+            <Col {...colSpan.action} style={{ textAlign: 'right' }}>
+              {t.containers.colActions}
+            </Col>
           </Row>
 
           {/* 树状行列表 */}
@@ -599,6 +607,25 @@ export default function ContainersPage() {
                     )}
                   </Col>
                   <Col {...colSpan.image}>{renderImageCell(c.image)}</Col>
+                  <Col {...colSpan.action} style={{ textAlign: 'right' }}>
+                    {app.source === 'vendor_managed' ? (
+                      <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                        -
+                      </Typography.Text>
+                    ) : (
+                      <Button
+                        type="link"
+                        danger
+                        size="small"
+                        style={{ paddingInline: 4 }}
+                        onClick={() => setDeletingApp(app)}
+                      >
+                        {app.source === 'compose' || app.source === 'dsm_project'
+                          ? t.containers.deleteProjectBtn
+                          : t.containers.deleteContainerBtn}
+                      </Button>
+                    )}
+                  </Col>
                 </Row>
               )
             }
@@ -721,6 +748,26 @@ export default function ContainersPage() {
                       </Tooltip>
                     )}
                   </Col>
+                  <Col {...colSpan.action} style={{ textAlign: 'right' }}>
+                    {app.source === 'vendor_managed' ? (
+                      <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                        -
+                      </Typography.Text>
+                    ) : (
+                      <Button
+                        type="link"
+                        danger
+                        size="small"
+                        style={{ paddingInline: 4 }}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setDeletingApp(app)
+                        }}
+                      >
+                        {t.containers.deleteProjectBtn}
+                      </Button>
+                    )}
+                  </Col>
                 </Row>
 
                 {/* 展开的子容器行 */}
@@ -785,6 +832,11 @@ export default function ContainersPage() {
                           )}
                         </Col>
                         <Col {...colSpan.image}>{renderImageCell(c.image)}</Col>
+                        <Col {...colSpan.action} style={{ textAlign: 'right' }}>
+                          <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                            -
+                          </Typography.Text>
+                        </Col>
                       </Row>
                     )
                   })}
@@ -793,6 +845,22 @@ export default function ContainersPage() {
           })}
         </Card>
       )}
+
+      <DeleteAppModal
+        open={Boolean(deletingApp)}
+        appKey={deletingApp?.key ?? ''}
+        appName={deletingApp?.name ?? ''}
+        hostName={deletingApp?.hostName ?? ''}
+        source={deletingApp?.source ?? 'standalone'}
+        isProjectHint={
+          Boolean(deletingApp) &&
+          (deletingApp!.source === 'compose' ||
+            deletingApp!.source === 'dsm_project' ||
+            deletingApp!.containers.length > 1)
+        }
+        onClose={() => setDeletingApp(null)}
+        onDeleted={handleRefresh}
+      />
     </Space>
   )
 }

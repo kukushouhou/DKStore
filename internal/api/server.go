@@ -81,6 +81,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/apps/compose", s.requireAuth(s.handleGetAppCompose))
 	mux.HandleFunc("POST /api/v1/apps/compose-update", s.requireAuth(s.handleUpdateAppCompose))
 	mux.HandleFunc("PUT /api/v1/apps/compose", s.requireAuth(s.handleUpdateAppCompose))
+	mux.HandleFunc("GET /api/v1/apps/delete-preview", s.requireAuth(s.handlePreviewDeleteApp))
+	mux.HandleFunc("POST /api/v1/apps/delete", s.requireAuth(s.handleDeleteApp))
 	mux.HandleFunc("GET /api/v1/services/tags", s.requireAuth(s.handleSearchServiceTags))
 	mux.HandleFunc("GET /api/v1/services/{key}/tags", s.requireAuth(s.handleSearchServiceTags))
 	mux.HandleFunc("GET /api/v1/services/config", s.requireAuth(s.handleGetServiceConfig))
@@ -801,6 +803,61 @@ func (s *Server) handleUpdateServiceConfig(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "job": job})
+}
+
+func (s *Server) handlePreviewDeleteApp(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
+	if s.d.Updater == nil {
+		writeError(w, lang, http.StatusInternalServerError, "updater_unavailable", "")
+		return
+	}
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	if key == "" {
+		key = strings.TrimSpace(r.URL.Query().Get("appKey"))
+	}
+	if key == "" {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", "missing key")
+		return
+	}
+	prev, err := s.d.Updater.PreviewDeleteApp(r.Context(), key, lang)
+	if err != nil {
+		var ee *i18n.EngineError
+		if errors.As(err, &ee) && ee.Key == i18n.MsgDeleteAppNotFound {
+			writeError(w, lang, http.StatusNotFound, "not_found", i18n.LocalizeError(lang, err))
+			return
+		}
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, prev)
+}
+
+func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
+	if s.d.Updater == nil {
+		writeError(w, lang, http.StatusInternalServerError, "updater_unavailable", "")
+		return
+	}
+	var req updater.AppDeleteSubmitRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if strings.TrimSpace(req.AppKey) == "" {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", "missing appKey")
+		return
+	}
+	res, err := s.d.Updater.DeleteApp(r.Context(), req, lang)
+	if err != nil {
+		var ee *i18n.EngineError
+		if errors.As(err, &ee) && ee.Key == i18n.MsgDeleteAppNotFound {
+			writeError(w, lang, http.StatusNotFound, "not_found", i18n.LocalizeError(lang, err))
+			return
+		}
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": res})
 }
 
 func (s *Server) handleGetUpdateJob(w http.ResponseWriter, r *http.Request) {

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import {
   Alert,
   Avatar,
@@ -27,6 +27,7 @@ import {
 } from '../api/client'
 import { useI18n } from '../i18n'
 import { useUIStore } from '../store/ui'
+import DeleteAppModal from './DeleteAppModal'
 import DetailDrawer from './DetailDrawer'
 import IgnorePolicyModal from './IgnorePolicyModal'
 import ProjectUpdateModal from './ProjectUpdateModal'
@@ -86,6 +87,7 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
   const [projectModalOpen, setProjectModalOpen] = useState(false)
   const [projectInitialTab, setProjectInitialTab] = useState<'direct' | 'yaml'>('direct')
   const [detailOpen, setDetailOpen] = useState(false)
+  const [deleteOpen, setDeleteOpen] = useState(false)
   const [cautionTargetSvc, setCautionTargetSvc] = useState<ServiceItem | null>(null)
   const [updatingSvcKey, setUpdatingSvcKey] = useState('')
   const [restoring, setRestoring] = useState(false)
@@ -107,6 +109,8 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
   const totalServiceCount =
     app.totalServiceCount ?? app.allServices?.length ?? app.services.length
   const isMultiContainer = totalServiceCount >= 2
+  const isProjectApp =
+    app.source === 'compose' || app.source === 'dsm_project' || isMultiContainer
 
   const projectName = app.projectName || (isMultiContainer ? app.appName : undefined)
   const subtitle = isMultiContainer
@@ -224,7 +228,7 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
     triggerSingleServiceUpdate(primaryService)
   }
 
-  const handleUpdateByConfigClick = () => {
+  const handleUpdateByConfigClick = useCallback(() => {
     if (isMultiContainer) {
       setProjectInitialTab('yaml')
       setProjectModalOpen(true)
@@ -234,7 +238,31 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
       setPickerInitialTab('config')
       setPickerSvc(primaryService)
     }
-  }
+  }, [isMultiContainer, primaryService])
+
+  const deleteMenuLabel = isProjectApp ? t.home.deleteProjectMenu : t.home.deleteContainerMenu
+  const canEditConfig = isMultiContainer || Boolean(primaryService)
+  const extendedMenuItems = useMemo(
+    () => [
+      ...(canEditConfig
+        ? [
+            {
+              key: 'by-config',
+              label: t.home.updateByNewConfigMenu,
+              onClick: handleUpdateByConfigClick,
+            },
+            { type: 'divider' as const },
+          ]
+        : []),
+      {
+        key: 'delete',
+        label: deleteMenuLabel,
+        danger: true,
+        onClick: () => setDeleteOpen(true),
+      },
+    ],
+    [canEditConfig, deleteMenuLabel, handleUpdateByConfigClick, t.home.updateByNewConfigMenu],
+  )
 
   const handleRestoreReminder = async () => {
     setRestoring(true)
@@ -647,19 +675,6 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
           {/* 底栏右侧：按分组渲染操作按钮 */}
           {isNoUpdate ? (
             <Space size={8} style={{ flexShrink: 0 }}>
-              {app.source !== 'vendor_managed' &&
-                primaryService &&
-                primaryService.kind !== 'uncomparable' && (
-                  <Button
-                    size="small"
-                    onClick={() => {
-                      setPickerInitialTab('version')
-                      setPickerSvc(primaryService)
-                    }}
-                  >
-                    {t.home.switchVersion}
-                  </Button>
-                )}
               {isIgnored && (
                 <Button
                   size="small"
@@ -671,6 +686,46 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
                   {t.home.restoreReminder}
                 </Button>
               )}
+              {app.source !== 'vendor_managed' &&
+                (primaryService && primaryService.kind !== 'uncomparable' ? (
+                  <Space.Compact size="small">
+                    <Button
+                      disabled={updatingNow}
+                      onClick={() => {
+                        setPickerInitialTab('version')
+                        setPickerSvc(primaryService)
+                      }}
+                    >
+                      {t.home.switchVersion}
+                    </Button>
+                    <Dropdown
+                      trigger={['click']}
+                      placement="bottomRight"
+                      disabled={updatingNow}
+                      menu={{ items: extendedMenuItems }}
+                    >
+                      <Button
+                        disabled={updatingNow}
+                        aria-label={t.home.moreActionsAria}
+                        icon={<DownOutlined />}
+                      />
+                    </Dropdown>
+                  </Space.Compact>
+                ) : (
+                  <Dropdown
+                    trigger={['click']}
+                    placement="bottomRight"
+                    disabled={updatingNow}
+                    menu={{ items: extendedMenuItems }}
+                  >
+                    <Button
+                      size="small"
+                      disabled={updatingNow}
+                      aria-label={t.home.moreActionsAria}
+                      icon={<DownOutlined />}
+                    />
+                  </Dropdown>
+                ))}
             </Space>
           ) : (
             <Space size={8} style={{ flexShrink: 0 }}>
@@ -699,20 +754,12 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
                       trigger={['click']}
                       placement="bottomRight"
                       disabled={updatingNow}
-                      menu={{
-                        items: [
-                          {
-                            key: 'by-config',
-                            label: t.home.updateByNewConfigMenu,
-                            onClick: handleUpdateByConfigClick,
-                          },
-                        ],
-                      }}
+                      menu={{ items: extendedMenuItems }}
                     >
                       <Button
                         type="primary"
                         disabled={updatingNow}
-                        aria-label={t.home.updateByNewConfigMenu}
+                        aria-label={t.home.moreActionsAria}
                         icon={<DownOutlined />}
                       />
                     </Dropdown>
@@ -792,6 +839,26 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
           setDetailOpen(false)
           handleUpdateByConfigClick()
         }}
+        onOpenDelete={
+          app.source !== 'vendor_managed'
+            ? () => {
+                setDetailOpen(false)
+                setDeleteOpen(true)
+              }
+            : undefined
+        }
+      />
+
+      {/* 删除容器 / 整项目确认弹窗 */}
+      <DeleteAppModal
+        open={deleteOpen}
+        appKey={app.key}
+        appName={isProjectApp ? projectName || app.appName || app.name : app.name}
+        hostName={app.hostName}
+        source={app.source}
+        isProjectHint={isProjectApp}
+        onClose={() => setDeleteOpen(false)}
+        onDeleted={onChanged}
       />
     </>
   )
