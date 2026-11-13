@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   Alert,
-  Badge,
   Button,
   Card,
   Col,
@@ -16,9 +15,7 @@ import {
   Row,
   Segmented,
   Space,
-  Tag,
   Timeline,
-  Tooltip,
   Typography,
   message,
   theme,
@@ -27,6 +24,7 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   CloudServerOutlined,
+  CodeOutlined,
   CopyOutlined,
   DesktopOutlined,
   DisconnectOutlined,
@@ -34,14 +32,21 @@ import {
   HddOutlined,
   KeyOutlined,
   PlusOutlined,
-  SafetyCertificateOutlined,
   SyncOutlined,
   WarningOutlined,
   WifiOutlined,
 } from '@ant-design/icons'
 import { useSearchParams } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, ApiError, showApiError, type HostInput, type HostItem, type HostTestResult } from '../api/client'
+import {
+  api,
+  ApiError,
+  showApiError,
+  type HostInfo,
+  type HostInput,
+  type HostItem,
+  type HostTestResult,
+} from '../api/client'
 import { useI18n } from '../i18n'
 
 type PlatformId = 'synology' | 'fnos' | 'openwrt' | 'linux' | 'local'
@@ -371,6 +376,98 @@ export default function HostsPage() {
   const authVal = Form.useWatch('sshAuth', form)
   const currentSpec = PLATFORM_SPECS.find((p) => p.id === platformId) ?? PLATFORM_SPECS[0]
 
+  const effectiveTransport = transportVal || editing?.transport || currentSpec.defaultTransport
+  const effectiveSshAuth = authVal || editing?.sshAuth || 'password'
+  const canKeepDsmSecret = Boolean(editing && editing.transport === 'dsm_api')
+  const canKeepSshPassword = Boolean(
+    editing && editing.transport === 'ssh' && (editing.sshAuth || 'password') === 'password',
+  )
+  const canKeepSshKey = Boolean(
+    editing && editing.transport === 'ssh' && editing.sshAuth === 'key' && !generatedPubKey,
+  )
+  const canKeepCurrentCred =
+    effectiveTransport === 'dsm_api'
+      ? canKeepDsmSecret
+      : effectiveTransport === 'ssh'
+        ? effectiveSshAuth === 'key'
+          ? canKeepSshKey
+          : canKeepSshPassword
+        : false
+
+  const formatCpuArch = (info?: HostInfo) => {
+    const arch = (info?.arch || '').toLowerCase().trim()
+    const variant = (info?.variant || '').toLowerCase().trim()
+    if (!arch) return t.hosts.archUnknown
+    if (arch === 'amd64' || arch === 'x86_64') return 'x86_64 (amd64)'
+    if (arch === 'arm64' || arch === 'aarch64') return 'ARM64 (arm64)'
+    if (arch === 'arm') {
+      return variant ? `${t.hosts.archArm32} (arm/${variant})` : `${t.hosts.archArm32} (arm)`
+    }
+    if (arch === '386' || arch === 'i386' || arch === 'x86') {
+      return `${t.hosts.archX8632} (386)`
+    }
+    return variant ? `${arch}/${variant}` : arch
+  }
+
+  const formatSystemEnv = (info?: HostInfo) => {
+    if (!info) return '—'
+    const osPart = (info.platformVersion || info.os || '').trim()
+    const dk = (info.dockerVersion || '').trim()
+    const dockerPart =
+      dk && !dk.includes('DSM WebAPI')
+        ? /^(docker|container)/i.test(dk)
+          ? dk
+          : `Docker ${dk}`
+        : ''
+    return [osPart, dockerPart].filter(Boolean).join(' · ') || '—'
+  }
+
+  const getHostCardMeta = (h: HostItem) => {
+    const transportTitle =
+      h.transport === 'local'
+        ? t.hosts.localSocket
+        : h.transport === 'dsm_api'
+          ? t.hosts.dsmWebApi
+          : t.hosts.sshRemote
+
+    if (h.kind === 'synology') {
+      return {
+        icon: <HddOutlined style={{ fontSize: 18, color: token.colorPrimary }} />,
+        iconBg: token.colorPrimaryBg,
+        subtitle: `${t.hosts.platformSynology} · ${transportTitle}`,
+      }
+    }
+    if (h.kind === 'fnos') {
+      return {
+        icon: <HddOutlined style={{ fontSize: 18, color: '#13c2c2' }} />,
+        iconBg: 'rgba(19, 194, 194, 0.12)',
+        subtitle: `${t.hosts.platformFnos} · ${transportTitle}`,
+      }
+    }
+    if (h.kind === 'openwrt') {
+      const openwrtName = h.info?.platformVersion?.toLowerCase().includes('istoreos')
+        ? t.hosts.tagIstoreos
+        : t.hosts.tagOpenwrt
+      return {
+        icon: <WifiOutlined style={{ fontSize: 18, color: '#fa8c16' }} />,
+        iconBg: 'rgba(250, 140, 22, 0.12)',
+        subtitle: `${openwrtName} · ${transportTitle}`,
+      }
+    }
+    if (h.transport === 'local') {
+      return {
+        icon: <DesktopOutlined style={{ fontSize: 18, color: token.colorPrimary }} />,
+        iconBg: token.colorPrimaryBg,
+        subtitle: `${t.hosts.localDefaultName} · ${transportTitle}`,
+      }
+    }
+    return {
+      icon: <CodeOutlined style={{ fontSize: 18, color: '#6366f1' }} />,
+      iconBg: 'rgba(99, 102, 241, 0.12)',
+      subtitle: `${t.hosts.platformLinux} · ${transportTitle}`,
+    }
+  }
+
   const platformMeta = (id: PlatformId) => {
     switch (id) {
       case 'synology':
@@ -423,166 +520,286 @@ export default function HostsPage() {
         </Card>
       ) : (
         <Row gutter={[16, 16]}>
-          {hosts.map((h) => (
-            <Col key={h.id} xs={24} md={12}>
-              <Card
-                title={
-                  <Space>
-                    <CloudServerOutlined />
-                    <span>{h.name}</span>
-                  </Space>
-                }
-                extra={
-                  <Space size={8}>
-                    {h.sshHostKey && !h.sshHostKeyChangedAt && (
-                      <Tooltip title={`${t.hosts.fingerprintTitle}: ${h.sshHostKey}`}>
-                        <Tag
-                          icon={<SafetyCertificateOutlined />}
-                          style={{ cursor: 'pointer', margin: 0 }}
+          {hosts.map((h) => {
+            const cardMeta = getHostCardMeta(h)
+            const statusStyle =
+              h.status === 'online'
+                ? {
+                    fg: token.colorSuccess,
+                    bg: token.colorSuccessBg,
+                    dot: token.colorSuccess,
+                    label: t.hosts.online,
+                  }
+                : h.status === 'offline'
+                  ? {
+                      fg: token.colorError,
+                      bg: token.colorErrorBg,
+                      dot: token.colorError,
+                      label: t.hosts.offline,
+                    }
+                  : {
+                      fg: token.colorTextSecondary,
+                      bg: token.colorFillSecondary,
+                      dot: token.colorTextQuaternary,
+                      label: t.hosts.unknown,
+                    }
+            const cleanDsmAddr = (h.dsmUrl || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '')
+            const sysEnvText = formatSystemEnv(h.info)
+
+            return (
+              <Col key={h.id} xs={24} md={12}>
+                <Card
+                  styles={{ body: { padding: 18 } }}
+                  actions={[
+                    <Button
+                      key="edit"
+                      type="text"
+                      size="small"
+                      icon={<EditOutlined />}
+                      onClick={() => openEdit(h)}
+                    >
+                      {t.hosts.editHost}
+                    </Button>,
+                    <Popconfirm
+                      key="del"
+                      title={t.hosts.deleteConfirm}
+                      description={t.hosts.deleteConfirmDesc}
+                      okText={t.hosts.unbindOkBtn}
+                      cancelText={t.ignoreModal.cancel}
+                      okButtonProps={{ danger: true }}
+                      onConfirm={async () => {
+                        try {
+                          await api.deleteHost(h.id)
+                          message.success(t.hosts.deleted)
+                          qc.invalidateQueries({ queryKey: ['hosts'] })
+                          qc.invalidateQueries({ queryKey: ['overview'] })
+                          qc.invalidateQueries({ queryKey: ['containers'] })
+                        } catch (e) {
+                          showApiError(e)
+                        }
+                      }}
+                    >
+                      <Button type="text" danger size="small" icon={<DisconnectOutlined />}>
+                        {t.hosts.unbindHost}
+                      </Button>
+                    </Popconfirm>,
+                  ]}
+                >
+                  <Space direction="vertical" size={14} style={{ width: '100%' }}>
+                    <Flex justify="space-between" align="flex-start" gap={12}>
+                      <Flex align="center" gap={12} style={{ minWidth: 0, flex: 1 }}>
+                        <div
+                          style={{
+                            width: 38,
+                            height: 38,
+                            borderRadius: token.borderRadiusLG,
+                            background: cardMeta.iconBg,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            flexShrink: 0,
+                          }}
                         >
-                          SSH
-                        </Tag>
-                      </Tooltip>
-                    )}
-                    <Badge
-                      status={
-                        h.status === 'online'
-                          ? 'success'
-                          : h.status === 'offline'
-                            ? 'error'
-                            : 'default'
-                      }
-                      text={
-                        h.status === 'online'
-                          ? t.hosts.online
-                          : h.status === 'offline'
-                            ? t.hosts.offline
-                            : t.hosts.unknown
-                      }
-                    />
-                  </Space>
-                }
-                actions={[
-                  <Button
-                    key="scan"
-                    type="text"
-                    size="small"
-                    icon={<SyncOutlined />}
-                    onClick={async () => {
-                      try {
-                        await api.triggerCheck(h.id, true)
-                        message.info(t.home.checking)
-                      } catch (e) {
-                        showApiError(e)
-                      }
-                    }}
-                  >
-                    {t.hosts.scanHost}
-                  </Button>,
-                  <Button
-                    key="edit"
-                    type="text"
-                    size="small"
-                    icon={<EditOutlined />}
-                    onClick={() => openEdit(h)}
-                  >
-                    {t.hosts.editHost}
-                  </Button>,
-                  <Popconfirm
-                    key="del"
-                    title={t.hosts.deleteConfirm}
-                    description={t.hosts.deleteConfirmDesc}
-                    okText={t.hosts.unbindOkBtn}
-                    cancelText={t.ignoreModal.cancel}
-                    okButtonProps={{ danger: true }}
-                    onConfirm={async () => {
-                      try {
-                        await api.deleteHost(h.id)
-                        message.success(t.hosts.deleted)
-                        qc.invalidateQueries({ queryKey: ['hosts'] })
-                        qc.invalidateQueries({ queryKey: ['overview'] })
-                        qc.invalidateQueries({ queryKey: ['containers'] })
-                      } catch (e) {
-                        showApiError(e)
-                      }
-                    }}
-                  >
-                    <Button type="text" danger size="small" icon={<DisconnectOutlined />}>
-                      {t.hosts.unbindHost}
-                    </Button>
-                  </Popconfirm>,
-                ]}
-              >
-                <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                  <Space wrap>
-                    {h.kind === 'synology' && <Tag color="geekblue">Synology DSM</Tag>}
-                    {h.kind === 'fnos' && <Tag color="cyan">{t.hosts.tagFnos}</Tag>}
-                    {h.kind === 'openwrt' && (
-                      <Tag color="orange">
-                        {h.info?.platformVersion?.toLowerCase().includes('istoreos')
-                          ? t.hosts.tagIstoreos
-                          : t.hosts.tagOpenwrt}
-                      </Tag>
-                    )}
-                    <Tag>
-                      {h.transport === 'local'
-                        ? t.hosts.localSocket
-                        : h.transport === 'dsm_api'
-                          ? t.hosts.dsmWebApi
-                          : t.hosts.sshRemote}
-                    </Tag>
-                    {h.transport === 'dsm_api' && h.dsmUrl && (
-                      <Typography.Text code>
-                        {h.dsmUser}@{h.dsmUrl}
-                      </Typography.Text>
-                    )}
-                    {h.transport === 'ssh' && h.address && (
-                      <Typography.Text code>
-                        {h.sshUser}@{h.address}:{h.port || 22}
-                      </Typography.Text>
-                    )}
-                  </Space>
-                  {h.info && (
-                    <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-                      Docker {h.info.dockerVersion} · {h.info.platformVersion || h.info.os} ({h.info.os}/{h.info.arch || t.hosts.archUnknown})
-                    </Typography.Text>
-                  )}
-                  {h.transport === 'ssh' && Boolean(h.sshHostKeyChangedAt) && (
-                    <Alert
-                      type="warning"
-                      showIcon
-                      icon={<WarningOutlined />}
-                      style={{ marginTop: 4 }}
-                      title={
-                        <span style={{ fontSize: token.fontSizeSM }}>
-                          {t.hosts.fingerprintChanged}
-                          {h.sshHostKeyChangedAt
-                            ? ` · ${new Date(h.sshHostKeyChangedAt * 1000).toLocaleString(locale)}`
-                            : ''}
-                        </span>
-                      }
-                      description={
-                        h.sshPrevHostKey ? (
+                          {cardMeta.icon}
+                        </div>
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <Typography.Text
+                            strong
+                            ellipsis={{ tooltip: h.name }}
+                            style={{ display: 'block', fontSize: 15, lineHeight: 1.35 }}
+                          >
+                            {h.name}
+                          </Typography.Text>
                           <Typography.Text
                             type="secondary"
-                            style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
+                            ellipsis={{ tooltip: cardMeta.subtitle }}
+                            style={{ display: 'block', fontSize: token.fontSizeSM, marginTop: 2 }}
                           >
-                            {t.hosts.fingerprintPrevious}: {h.sshPrevHostKey}
+                            {cardMeta.subtitle}
                           </Typography.Text>
-                        ) : undefined
-                      }
-                    />
-                  )}
-                </Space>
-              </Card>
-            </Col>
-          ))}
+                        </div>
+                      </Flex>
+
+                      <span
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 6,
+                          padding: '2px 10px',
+                          borderRadius: 999,
+                          fontSize: token.fontSizeSM,
+                          fontWeight: 500,
+                          color: statusStyle.fg,
+                          background: statusStyle.bg,
+                          flexShrink: 0,
+                        }}
+                      >
+                        <span
+                          style={{
+                            width: 6,
+                            height: 6,
+                            borderRadius: '50%',
+                            background: statusStyle.dot,
+                          }}
+                        />
+                        {statusStyle.label}
+                      </span>
+                    </Flex>
+
+                    <div
+                      style={{
+                        background: token.colorFillAlter,
+                        borderRadius: token.borderRadiusLG,
+                        padding: '10px 14px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 6,
+                        fontSize: token.fontSizeSM,
+                      }}
+                    >
+                      <Flex justify="space-between" align="center" gap={12}>
+                        <Typography.Text
+                          type="secondary"
+                          style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}
+                        >
+                          {t.hosts.cardConnAddr}
+                        </Typography.Text>
+                        <Typography.Text
+                          ellipsis={{
+                            tooltip:
+                              h.transport === 'dsm_api'
+                                ? `${h.dsmUrl || ''} (${h.dsmUser || ''})`
+                                : h.transport === 'ssh'
+                                  ? `${h.address}:${h.port || 22} (${h.sshUser || ''})`
+                                  : '/var/run/docker.sock',
+                          }}
+                          style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
+                        >
+                          {h.transport === 'dsm_api' ? (
+                            <>
+                              {cleanDsmAddr}
+                              {h.dsmUser && (
+                                <span
+                                  style={{
+                                    color: token.colorTextSecondary,
+                                    fontFamily: token.fontFamily,
+                                    marginLeft: 4,
+                                  }}
+                                >
+                                  ({h.dsmUser})
+                                </span>
+                              )}
+                            </>
+                          ) : h.transport === 'ssh' ? (
+                            <>
+                              {h.address}:{h.port || 22}
+                              {h.sshUser && (
+                                <span
+                                  style={{
+                                    color: token.colorTextSecondary,
+                                    fontFamily: token.fontFamily,
+                                    marginLeft: 4,
+                                  }}
+                                >
+                                  ({h.sshUser})
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            '/var/run/docker.sock'
+                          )}
+                        </Typography.Text>
+                      </Flex>
+
+                      <Flex justify="space-between" align="center" gap={12}>
+                        <Typography.Text
+                          type="secondary"
+                          style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}
+                        >
+                          {t.hosts.cardCpuArch}
+                        </Typography.Text>
+                        <Typography.Text
+                          strong
+                          style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
+                        >
+                          {formatCpuArch(h.info)}
+                        </Typography.Text>
+                      </Flex>
+
+                      <Flex justify="space-between" align="center" gap={12}>
+                        <Typography.Text
+                          type="secondary"
+                          style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}
+                        >
+                          {t.hosts.cardSysEnv}
+                        </Typography.Text>
+                        <Typography.Text
+                          ellipsis={{ tooltip: sysEnvText !== '—' ? sysEnvText : undefined }}
+                          style={{ fontSize: token.fontSizeSM }}
+                        >
+                          {sysEnvText}
+                        </Typography.Text>
+                      </Flex>
+                    </div>
+
+                    {h.transport === 'ssh' && Boolean(h.sshHostKeyChangedAt) && (
+                      <Alert
+                        type="warning"
+                        showIcon
+                        icon={<WarningOutlined />}
+                        title={
+                          <span style={{ fontSize: token.fontSizeSM }}>
+                            {t.hosts.fingerprintChanged}
+                            {h.sshHostKeyChangedAt
+                              ? ` · ${new Date(h.sshHostKeyChangedAt * 1000).toLocaleString(locale)}`
+                              : ''}
+                          </span>
+                        }
+                        description={
+                          h.sshPrevHostKey ? (
+                            <Typography.Text
+                              type="secondary"
+                              style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
+                            >
+                              {t.hosts.fingerprintPrevious}: {h.sshPrevHostKey}
+                            </Typography.Text>
+                          ) : undefined
+                        }
+                      />
+                    )}
+                  </Space>
+                </Card>
+              </Col>
+            )
+          })}
         </Row>
       )}
 
       <Modal
         open={modalOpen}
-        title={editing ? t.hosts.editHost : t.hosts.addHost}
+        title={
+          editing ? (
+            <Flex align="center" justify="space-between" wrap gap={8} style={{ paddingRight: 28 }}>
+              <span>{t.hosts.editHostTitle.replace('{name}', editing.name)}</span>
+              {effectiveTransport !== 'local' && (
+                <span
+                  style={{
+                    fontSize: token.fontSizeSM,
+                    fontWeight: 500,
+                    padding: '2px 10px',
+                    borderRadius: 999,
+                    color: canKeepCurrentCred ? token.colorSuccess : token.colorWarning,
+                    background: canKeepCurrentCred ? token.colorSuccessBg : token.colorWarningBg,
+                  }}
+                >
+                  {canKeepCurrentCred ? t.hosts.credSavedPill : t.hosts.credSwitchedPill}
+                </span>
+              )}
+            </Flex>
+          ) : (
+            t.hosts.addHost
+          )
+        }
         width={620}
         onCancel={() => setModalOpen(false)}
         footer={
@@ -746,10 +963,33 @@ export default function HostsPage() {
                   <Col xs={24} sm={12}>
                     <Form.Item
                       name="dsmSecret"
-                      label={t.hosts.dsmSecretLabel}
-                      rules={[{ required: !editing }]}
+                      label={
+                        canKeepDsmSecret ? (
+                          <span>
+                            {t.hosts.dsmSecretLabel}
+                            <Typography.Text
+                              type="secondary"
+                              style={{ fontWeight: 400, marginLeft: 4 }}
+                            >
+                              {t.hosts.optionalKeepSuffix}
+                            </Typography.Text>
+                          </span>
+                        ) : (
+                          t.hosts.dsmSecretLabel
+                        )
+                      }
+                      extra={canKeepDsmSecret ? t.hosts.keepPasswordHint : undefined}
+                      rules={[
+                        { required: !canKeepDsmSecret, message: t.hosts.passwordRequiredMsg },
+                      ]}
                     >
-                      <Input.Password />
+                      <Input.Password
+                        placeholder={
+                          canKeepDsmSecret
+                            ? t.hosts.keepPasswordPlaceholder
+                            : t.hosts.enterPasswordPlaceholder
+                        }
+                      />
                     </Form.Item>
                   </Col>
                 </Row>
@@ -781,7 +1021,9 @@ export default function HostsPage() {
                   </Col>
                   <Col xs={24} sm={12}>
                     <Form.Item name="sshAuth" label={t.hosts.authTypeLabel}>
-                      <Radio.Group>
+                      <Radio.Group
+                        onChange={() => form.setFields([{ name: 'sshSecret', errors: [] }])}
+                      >
                         <Radio value="password">{t.hosts.authPassword}</Radio>
                         <Radio value="key">{t.hosts.authKey}</Radio>
                       </Radio.Group>
@@ -822,20 +1064,79 @@ export default function HostsPage() {
                         }
                       />
                     )}
-                    <Form.Item name="sshSecret" label={t.hosts.privateKeyLabel}>
+                    <Form.Item
+                      name="sshSecret"
+                      label={
+                        canKeepSshKey ? (
+                          <span>
+                            {t.hosts.privateKeyLabel}
+                            <Typography.Text
+                              type="secondary"
+                              style={{ fontWeight: 400, marginLeft: 4 }}
+                            >
+                              {t.hosts.optionalKeepSuffix}
+                            </Typography.Text>
+                          </span>
+                        ) : (
+                          t.hosts.privateKeyLabel
+                        )
+                      }
+                      extra={canKeepSshKey ? t.hosts.keepPrivateKeyHint : undefined}
+                      rules={[
+                        { required: !canKeepSshKey, message: t.hosts.privateKeyRequiredMsg },
+                      ]}
+                    >
                       <Input.TextArea
                         rows={3}
-                        placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                        placeholder={
+                          canKeepSshKey
+                            ? t.hosts.keepPrivateKeyPlaceholder
+                            : '-----BEGIN OPENSSH PRIVATE KEY-----'
+                        }
                         style={{ fontFamily: token.fontFamilyCode }}
                       />
                     </Form.Item>
-                    <Form.Item name="sshPassphrase" label={t.hosts.passphraseLabel} style={{ marginBottom: 4 }}>
-                      <Input.Password />
+                    <Form.Item
+                      name="sshPassphrase"
+                      label={t.hosts.passphraseLabel}
+                      style={{ marginBottom: 4 }}
+                    >
+                      <Input.Password
+                        placeholder={canKeepSshKey ? t.hosts.keepPassphrasePlaceholder : undefined}
+                      />
                     </Form.Item>
                   </>
                 ) : (
-                  <Form.Item name="sshSecret" label={t.hosts.passwordLabel} style={{ marginBottom: 4 }}>
-                    <Input.Password />
+                  <Form.Item
+                    name="sshSecret"
+                    label={
+                      canKeepSshPassword ? (
+                        <span>
+                          {t.hosts.passwordLabel}
+                          <Typography.Text
+                            type="secondary"
+                            style={{ fontWeight: 400, marginLeft: 4 }}
+                          >
+                            {t.hosts.optionalKeepSuffix}
+                          </Typography.Text>
+                        </span>
+                      ) : (
+                        t.hosts.passwordLabel
+                      )
+                    }
+                    extra={canKeepSshPassword ? t.hosts.keepPasswordHint : undefined}
+                    rules={[
+                      { required: !canKeepSshPassword, message: t.hosts.passwordRequiredMsg },
+                    ]}
+                    style={{ marginBottom: 4 }}
+                  >
+                    <Input.Password
+                      placeholder={
+                        canKeepSshPassword
+                          ? t.hosts.keepPasswordPlaceholder
+                          : t.hosts.enterPasswordPlaceholder
+                      }
+                    />
                   </Form.Item>
                 )}
               </>
