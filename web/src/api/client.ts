@@ -553,12 +553,23 @@ export const api = {
     request<HostTestResult>('/hosts/test', { method: 'POST', body: JSON.stringify(input) }),
   keygen: () => request<{ privateKey: string; authorizedKey: string }>('/hosts/keygen', { method: 'POST' }),
 
-  listContainers: (hostId?: string, withStats = true) => {
+  listContainers: (
+    hostId?: string,
+    opts?: boolean | { withStats?: boolean; cached?: boolean },
+  ) => {
     const params = new URLSearchParams()
     if (hostId) params.set('hostId', hostId)
-    if (!withStats) params.set('stats', '0')
+    const withStats = typeof opts === 'boolean' ? opts : (opts?.withStats ?? true)
+    const cached = typeof opts === 'object' && Boolean(opts?.cached)
+    if (cached) {
+      params.set('cached', '1')
+    } else if (!withStats) {
+      params.set('stats', '0')
+    }
     const qs = params.toString()
-    return request<{ items: AppRuntimeTree[] }>(qs ? `/containers?${qs}` : '/containers')
+    return request<{ items: AppRuntimeTree[]; cached?: boolean }>(
+      qs ? `/containers?${qs}` : '/containers',
+    )
   },
 
   getSettings: () => request<AppSettings>('/settings'),

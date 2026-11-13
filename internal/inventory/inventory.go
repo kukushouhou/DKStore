@@ -43,6 +43,7 @@ func (s *Service) SyncHost(ctx context.Context, hostID string) ([]platform.App, 
 	if err := s.saveHostInventory(ctx, hostID, info, apps); err != nil {
 		return nil, info, err
 	}
+	s.hosts.RefreshRuntimeAsync(hostID)
 	return apps, info, nil
 }
 

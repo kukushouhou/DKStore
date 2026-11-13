@@ -64,6 +64,7 @@ func run() error {
 	hostReg := host.NewRegistry(st, box)
 	defer hostReg.Close()
 	_ = hostReg.EnsureLocalHost(ctx)
+	hostReg.EnableBackgroundCollector(ctx)
 
 	invSvc := inventory.New(st, hostReg)
 	regCli := registry.New(st, box)

@@ -8,8 +8,10 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kukushouhou/DKStore/internal/i18n"
+	"github.com/kukushouhou/DKStore/internal/platform"
 	"github.com/kukushouhou/DKStore/internal/secret"
 	"github.com/kukushouhou/DKStore/internal/store"
 	"github.com/kukushouhou/DKStore/internal/transport"
@@ -264,5 +266,63 @@ func TestListRuntimeContainers_ReusesAdapterSessionAcrossPolls(t *testing.T) {
 	f.mu.Unlock()
 	if didAfter-didBefore != 1 {
 		t.Fatalf("expected pooled runtime adapter to login once across 3 calls, got %d logins", didAfter-didBefore)
+	}
+}
+
+func TestListCachedRuntimeContainers_InventoryFallbackAndSnapshotPersistence(t *testing.T) {
+	ctx := context.Background()
+	r := newTestRegistry(t)
+	defer r.Close()
+
+	now := time.Now().Unix()
+	_, err := r.st.DB.ExecContext(ctx, `INSERT INTO host(id, name, kind, transport, address, port, ssh_user, status, created_at) VALUES ('h-ssh', '客厅软路由', 'docker', 'ssh', '192.0.2.99', 22, 'root', 'online', ?)`, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = r.st.DB.ExecContext(ctx, `INSERT INTO app(key, host_id, name, source, updated_at) VALUES ('h-ssh/compose/homebox', 'h-ssh', 'homebox', 'compose', ?)`, now)
+	_, _ = r.st.DB.ExecContext(ctx, `INSERT INTO service(key, app_key, name, image_ref, state, updated_at) VALUES ('h-ssh/compose/homebox/web', 'h-ssh/compose/homebox', 'web', 'ghcr.io/sysadminsmedia/homebox:latest', 'running', ?)`, now)
+	_, _ = r.st.DB.ExecContext(ctx, `INSERT INTO service(key, app_key, name, image_ref, state, updated_at) VALUES ('h-ssh/compose/homebox/db', 'h-ssh/compose/homebox', 'db', 'postgres:16-alpine', 'running', ?)`, now)
+
+	// 1. Before any runtime snapshot exists, ListCachedRuntimeContainers falls back to SQLite app/service instantly (0 network IO even to unreachable 192.0.2.99)
+	t0 := time.Now()
+	fallbackItems, err := r.ListCachedRuntimeContainers(ctx, "")
+	if err != nil {
+		t.Fatalf("ListCachedRuntimeContainers fallback failed: %v", err)
+	}
+	if time.Since(t0) > 200*time.Millisecond {
+		t.Fatalf("ListCachedRuntimeContainers must not do network IO, took %v", time.Since(t0))
+	}
+	if len(fallbackItems) != 1 || fallbackItems[0].HostName != "客厅软路由" || len(fallbackItems[0].Containers) != 2 || fallbackItems[0].StatsReady {
+		t.Fatalf("unexpected inventory fallback items: %+v", fallbackItems)
+	}
+
+	// 2. Save a fresh runtime snapshot with stats and verify instant retrieval
+	r.saveHostRuntimeSnapshot(ctx, "h-ssh", true, []platform.AppRuntimeTree{
+		{
+			Key:          "h-ssh/compose/homebox",
+			Name:         "homebox",
+			Source:       platform.SourceCompose,
+			RunningCount: 2,
+			TotalCount:   2,
+			CPUPercent:   12.5,
+			MemUsage:     256 * 1024 * 1024,
+			StatsReady:   true,
+			Containers: []platform.ContainerRuntimeStat{
+				{ID: "c1", Name: "homebox-web-1", Service: "web", Image: "ghcr.io/sysadminsmedia/homebox:latest", State: "running", Uptime: "Up 10 minutes", StartedAt: now - 600, CPUPercent: 8.5, MemUsage: 128 * 1024 * 1024},
+				{ID: "c2", Name: "homebox-db-1", Service: "db", Image: "postgres:16-alpine", State: "running", Uptime: "Up 10 minutes", StartedAt: now - 600, CPUPercent: 4.0, MemUsage: 128 * 1024 * 1024},
+			},
+		},
+	})
+
+	freshSnap, err := r.ListCachedRuntimeContainers(ctx, "h-ssh")
+	if err != nil || len(freshSnap) != 1 || !freshSnap[0].StatsReady || freshSnap[0].CPUPercent != 12.5 {
+		t.Fatalf("expected fresh snapshot with statsReady=true, got %+v err=%v", freshSnap, err)
+	}
+
+	// 3. Age out snapshot (> 60s): container tree still renders instantly, while stale CPU/Mem and literal Uptime string are cleared
+	_, _ = r.st.DB.ExecContext(ctx, `UPDATE host_runtime_snapshot SET updated_at=? WHERE host_id='h-ssh'`, now-120)
+	agedSnap, err := r.ListCachedRuntimeContainers(ctx, "h-ssh")
+	if err != nil || len(agedSnap) != 1 || agedSnap[0].StatsReady || agedSnap[0].Containers[0].Uptime != "" {
+		t.Fatalf("expected aged snapshot to mark StatsReady=false and clear stale literal Uptime, got %+v err=%v", agedSnap, err)
 	}
 }

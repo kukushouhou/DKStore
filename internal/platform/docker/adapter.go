@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -384,6 +385,41 @@ func computeStats(st dockerContainerStats) (cpuPct float64, memUsage int64, memL
 	return
 }
 
+var reDockerUpDuration = regexp.MustCompile(`(?i)^up\s+(?:about\s+)?(\d+|an|a)\s+(second|minute|hour|day|week|month|year)s?`)
+
+func startedAtFromDockerStatus(status string, created int64, nowUnix int64) int64 {
+	s := strings.TrimSpace(status)
+	ls := strings.ToLower(s)
+	if strings.HasPrefix(ls, "up less than a second") {
+		return nowUnix
+	}
+	if m := reDockerUpDuration.FindStringSubmatch(s); len(m) == 3 {
+		n := int64(1)
+		if m[1] != "a" && m[1] != "an" && m[1] != "A" && m[1] != "An" {
+			if parsed, err := strconv.ParseInt(m[1], 10, 64); err == nil && parsed > 0 {
+				n = parsed
+			}
+		}
+		var unitSec int64 = 1
+		switch strings.ToLower(m[2]) {
+		case "minute":
+			unitSec = 60
+		case "hour":
+			unitSec = 3600
+		case "day":
+			unitSec = 86400
+		case "week":
+			unitSec = 7 * 86400
+		case "month":
+			unitSec = 30 * 86400
+		case "year":
+			unitSec = 365 * 86400
+		}
+		return nowUnix - n*unitSec
+	}
+	return created
+}
+
 func parseHealthFromStatus(status string) string {
 	s := strings.ToLower(status)
 	switch {
@@ -541,6 +577,7 @@ func (a *Adapter) ListRuntimeAppsWithOptions(ctx context.Context, withStats bool
 
 	composeMap := make(map[string]*platform.AppRuntimeTree)
 	var standaloneApps []platform.AppRuntimeTree
+	nowUnix := time.Now().Unix()
 
 	for _, cs := range filtered {
 		cName := ""
@@ -563,7 +600,7 @@ func (a *Adapter) ListRuntimeAppsWithOptions(ctx context.Context, withStats bool
 			State:      state,
 			Health:     parseHealthFromStatus(cs.Status),
 			Uptime:     cs.Status,
-			StartedAt:  cs.Created,
+			StartedAt:  startedAtFromDockerStatus(cs.Status, cs.Created, nowUnix),
 			CPUPercent: sv.cpu,
 			MemUsage:   sv.memUsage,
 			MemLimit:   sv.memLimit,

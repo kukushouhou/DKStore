@@ -25,6 +25,7 @@ import {
   RightOutlined,
   SearchOutlined,
   ShrinkOutlined,
+  SyncOutlined,
 } from '@ant-design/icons'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router'
@@ -115,33 +116,53 @@ export default function ContainersPage() {
     queryFn: api.listHosts,
   })
 
-  // 首屏快速列表（跳过慢速 stats 采样，毫秒级返回结构与运行状态）
+  // 本地已收录快照（纯 SQLite 读取，零远程连接等待，首次进入毫秒级直出）
+  const cachedQuery = useQuery({
+    queryKey: ['containers-cached', hostFilter],
+    queryFn: () => api.listContainers(hostFilter || undefined, { cached: true }),
+    staleTime: 30000,
+  })
+
+  // 实时快速列表（跳过慢速 stats 采样，更新最新启停状态）
   const fastQuery = useQuery({
     queryKey: ['containers-fast', hostFilter],
-    queryFn: () => api.listContainers(hostFilter || undefined, false),
+    queryFn: () => api.listContainers(hostFilter || undefined, { withStats: false }),
     staleTime: 10000,
   })
 
-  // 完整实时资源占用轮询（异步补齐 CPU / 内存并在后台定时刷新）
+  // 完整实时资源占用轮询（异步补齐 CPU / 内存并在后台定时刷新，同时写回本地快照）
   const statsQuery = useQuery({
     queryKey: ['containers', hostFilter],
-    queryFn: () => api.listContainers(hostFilter || undefined, true),
+    queryFn: () => api.listContainers(hostFilter || undefined, { withStats: true }),
     refetchInterval: 10000,
   })
 
   const hosts = useMemo(() => hostsQuery.data?.items ?? [], [hostsQuery.data?.items])
 
-  const rawTrees = useMemo(() => {
+  const { rawTrees, isShowingCached } = useMemo(() => {
     const statsItems = statsQuery.data?.items
     const fastItems = fastQuery.data?.items
+    const cachedItems = cachedQuery.data?.items
     if (statsItems && (!fastItems || statsQuery.dataUpdatedAt >= fastQuery.dataUpdatedAt)) {
-      return statsItems
+      return { rawTrees: statsItems, isShowingCached: false }
     }
     if (fastItems) {
-      return mergeFastWithCachedStats(fastItems, statsItems)
+      return {
+        rawTrees: mergeFastWithCachedStats(fastItems, statsItems ?? cachedItems),
+        isShowingCached: false,
+      }
     }
-    return statsItems ?? []
-  }, [fastQuery.data?.items, fastQuery.dataUpdatedAt, statsQuery.data?.items, statsQuery.dataUpdatedAt])
+    if (cachedItems && cachedItems.length > 0) {
+      return { rawTrees: cachedItems, isShowingCached: true }
+    }
+    return { rawTrees: statsItems ?? cachedItems ?? [], isShowingCached: false }
+  }, [
+    cachedQuery.data?.items,
+    fastQuery.data?.items,
+    fastQuery.dataUpdatedAt,
+    statsQuery.data?.items,
+    statsQuery.dataUpdatedAt,
+  ])
 
   const distinctHostCount = useMemo(() => {
     const ids = new Set<string>()
@@ -245,8 +266,9 @@ export default function ContainersPage() {
     void statsQuery.refetch()
   }
 
-  const isInitialLoading = fastQuery.isPending && statsQuery.isPending
   const isRefreshing = fastQuery.isFetching || statsQuery.isFetching
+  const isInitialLoading =
+    rawTrees.length === 0 && fastQuery.isPending && statsQuery.isPending
 
   const formatUptime = (c: ContainerRuntimeStat): string => {
     if (c.state !== 'running') {
@@ -402,9 +424,16 @@ export default function ContainersPage() {
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       <Flex justify="space-between" align="center" wrap gap={12}>
-        <Typography.Title level={3} style={{ margin: 0 }}>
-          {t.containers.title}
-        </Typography.Title>
+        <Space size={10} align="center" wrap>
+          <Typography.Title level={3} style={{ margin: 0 }}>
+            {t.containers.title}
+          </Typography.Title>
+          {isShowingCached && isRefreshing && (
+            <Tag icon={<SyncOutlined spin />} color="processing" style={{ margin: 0 }}>
+              {t.containers.syncingLiveBadge}
+            </Tag>
+          )}
+        </Space>
         <Space wrap>
           {multiContainerKeys.length > 0 && (
             <Button

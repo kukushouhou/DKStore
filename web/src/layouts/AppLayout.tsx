@@ -118,6 +118,24 @@ export default function AppLayout() {
     enabled: canSubscribeEvents,
   })
 
+  // 预加载本地已收录的容器快照并在后台静默预热实时状态，确保首次切换到「容器」页时零等待直出
+  useEffect(() => {
+    if (!canSubscribeEvents) return
+    void qc.prefetchQuery({
+      queryKey: ['containers-cached', ''],
+      queryFn: () => api.listContainers(undefined, { cached: true }),
+      staleTime: 30000,
+    })
+    const timer = setTimeout(() => {
+      void qc.prefetchQuery({
+        queryKey: ['containers', ''],
+        queryFn: () => api.listContainers(undefined, { withStats: true }),
+        staleTime: 10000,
+      })
+    }, 300)
+    return () => clearTimeout(timer)
+  }, [canSubscribeEvents, qc])
+
   // 任一业务请求返回 401（会话过期 / 需要初始化 / 设备登录态失效）时重新获取访问状态，切换到对应页面
   useEffect(() => {
     return qc.getQueryCache().subscribe((ev) => {

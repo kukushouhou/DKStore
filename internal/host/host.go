@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"sync"
@@ -136,25 +137,74 @@ type Registry struct {
 	tokMu  sync.Mutex
 	tokens map[string]stashedToken
 
-	rtMu       sync.Mutex
-	rtPool     map[string]*pooledRuntimeAdapter
-	rtInflight map[string]*dialRuntimeCall
+	rtMu          sync.Mutex
+	rtPool        map[string]*pooledRuntimeAdapter
+	rtInflight    map[string]*dialRuntimeCall
+	bgEnabled     bool
+	bgCtx         context.Context
+	bgCancel      context.CancelFunc
+	bgRefreshing  map[string]bool
+	bgWg          sync.WaitGroup
 }
 
 // NewRegistry 创建主机注册表。
 func NewRegistry(st *store.Store, box *secret.Box) *Registry {
 	return &Registry{
-		st:         st,
-		box:        box,
-		tokens:     make(map[string]stashedToken),
-		rtPool:     make(map[string]*pooledRuntimeAdapter),
-		rtInflight: make(map[string]*dialRuntimeCall),
+		st:           st,
+		box:          box,
+		tokens:       make(map[string]stashedToken),
+		rtPool:       make(map[string]*pooledRuntimeAdapter),
+		rtInflight:   make(map[string]*dialRuntimeCall),
+		bgRefreshing: make(map[string]bool),
 	}
 }
 
-// Close 关闭并清理运行态适配器连接池。
+// EnableBackgroundCollector 开启后台运行态快照预收录，并在启动后立即异步收录全部设备快照到本地 SQLite。
+func (r *Registry) EnableBackgroundCollector(parent context.Context) {
+	r.rtMu.Lock()
+	if r.bgEnabled {
+		r.rtMu.Unlock()
+		return
+	}
+	r.bgEnabled = true
+	r.bgCtx, r.bgCancel = context.WithCancel(parent)
+	r.rtMu.Unlock()
+
+	r.RefreshRuntimeAsync("")
+}
+
+// RefreshRuntimeAsync 在后台异步采集指定主机（为空表示全部主机）的最新容器运行态并落库到 host_runtime_snapshot。
+// 仅在 EnableBackgroundCollector 开启后执行，相同 hostID 并发触发自动合并去重。
+func (r *Registry) RefreshRuntimeAsync(hostID string) {
+	key := strings.TrimSpace(hostID)
+	r.rtMu.Lock()
+	if !r.bgEnabled || r.bgCtx == nil || r.bgCtx.Err() != nil || r.bgRefreshing[key] {
+		r.rtMu.Unlock()
+		return
+	}
+	r.bgRefreshing[key] = true
+	ctx := r.bgCtx
+	r.bgWg.Add(1)
+	r.rtMu.Unlock()
+
+	go func() {
+		defer func() {
+			r.rtMu.Lock()
+			delete(r.bgRefreshing, key)
+			r.rtMu.Unlock()
+			r.bgWg.Done()
+		}()
+		cCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		_, _ = r.ListRuntimeContainers(cCtx, key, true)
+	}()
+}
+
+// Close 关闭后台收录协程并清理运行态适配器连接池。
 func (r *Registry) Close() error {
 	r.rtMu.Lock()
+	cancel := r.bgCancel
+	r.bgEnabled = false
 	var toClose []platform.Adapter
 	for id, ent := range r.rtPool {
 		ent.evicted = true
@@ -164,6 +214,10 @@ func (r *Registry) Close() error {
 		}
 	}
 	r.rtMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	r.bgWg.Wait()
 	for _, ad := range toClose {
 		_ = ad.Close()
 	}
@@ -412,7 +466,229 @@ func (r *Registry) querySingleHostRuntime(ctx context.Context, h Host, wantStats
 		apps[i].HostID = h.ID
 		apps[i].HostName = h.Name
 	}
+	r.saveHostRuntimeSnapshot(ctx, h.ID, wantStats, apps)
 	return apps, nil
+}
+
+func (r *Registry) saveHostRuntimeSnapshot(ctx context.Context, hostID string, wantStats bool, apps []platform.AppRuntimeTree) {
+	if r.st == nil || r.st.DB == nil {
+		return
+	}
+	now := time.Now().Unix()
+	toSave := apps
+
+	// 若本次是仅拉取列表（wantStats=false），且库中有 60 秒内的近期资源统计，保留原有的 CPU/内存采样数据避免冲掉快照中的数值
+	if !wantStats && len(apps) > 0 {
+		var prevJSON string
+		var prevAt int64
+		if err := r.st.DB.QueryRowContext(ctx, `SELECT trees_json, updated_at FROM host_runtime_snapshot WHERE host_id=?`, hostID).Scan(&prevJSON, &prevAt); err == nil && now-prevAt <= 60 {
+			var prevTrees []platform.AppRuntimeTree
+			if json.Unmarshal([]byte(prevJSON), &prevTrees) == nil && len(prevTrees) > 0 {
+				toSave = mergeRuntimeStats(apps, prevTrees)
+			}
+		}
+	}
+
+	if toSave == nil {
+		toSave = []platform.AppRuntimeTree{}
+	}
+	b, err := json.Marshal(toSave)
+	if err != nil {
+		return
+	}
+	wCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	_, _ = r.st.DB.ExecContext(wCtx, `
+		INSERT INTO host_runtime_snapshot(host_id, trees_json, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(host_id) DO UPDATE SET
+			trees_json=excluded.trees_json,
+			updated_at=excluded.updated_at`,
+		hostID, string(b), now,
+	)
+}
+
+func mergeRuntimeStats(fresh []platform.AppRuntimeTree, prev []platform.AppRuntimeTree) []platform.AppRuntimeTree {
+	prevByKey := make(map[string]platform.AppRuntimeTree, len(prev))
+	for _, p := range prev {
+		if p.StatsReady {
+			prevByKey[p.Key] = p
+		}
+	}
+	if len(prevByKey) == 0 {
+		return fresh
+	}
+	out := make([]platform.AppRuntimeTree, len(fresh))
+	for i, f := range fresh {
+		cpApp := f
+		pApp, ok := prevByKey[f.Key]
+		if !ok {
+			out[i] = cpApp
+			continue
+		}
+		cByID := make(map[string]platform.ContainerRuntimeStat, len(pApp.Containers))
+		for _, pc := range pApp.Containers {
+			k := pc.ID
+			if k == "" {
+				k = pc.Name
+			}
+			cByID[k] = pc
+		}
+		cpContainers := make([]platform.ContainerRuntimeStat, len(f.Containers))
+		var cpuSum float64
+		var memSum int64
+		for j, fc := range f.Containers {
+			k := fc.ID
+			if k == "" {
+				k = fc.Name
+			}
+			if pc, exists := cByID[k]; exists && fc.State == "running" {
+				fc.CPUPercent = pc.CPUPercent
+				fc.MemUsage = pc.MemUsage
+				fc.MemLimit = pc.MemLimit
+				cpuSum += pc.CPUPercent
+				memSum += pc.MemUsage
+			}
+			cpContainers[j] = fc
+		}
+		cpApp.Containers = cpContainers
+		cpApp.CPUPercent = math.Round(cpuSum*100) / 100
+		cpApp.MemUsage = memSum
+		cpApp.StatsReady = true
+		out[i] = cpApp
+	}
+	return out
+}
+
+// ListCachedRuntimeContainers 纯本地读取 SQLite 已收录的容器运行态快照（零远程网络 IO，毫秒级返回）。
+// 若某台主机尚未生成运行态快照，自动回退读取已发现的 app / service 库存表兜底展示。
+func (r *Registry) ListCachedRuntimeContainers(ctx context.Context, hostIDFilter string) ([]platform.AppRuntimeTree, error) {
+	hosts, err := r.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filter := strings.TrimSpace(hostIDFilter)
+	var targets []Host
+	for _, h := range hosts {
+		if filter != "" && h.ID != filter {
+			continue
+		}
+		targets = append(targets, h)
+	}
+	if len(targets) == 0 {
+		return []platform.AppRuntimeTree{}, nil
+	}
+
+	type snapRow struct {
+		raw       string
+		updatedAt int64
+	}
+	snaps := make(map[string]snapRow, len(targets))
+	sRows, err := r.st.DB.QueryContext(ctx, `SELECT host_id, trees_json, updated_at FROM host_runtime_snapshot`)
+	if err == nil {
+		for sRows.Next() {
+			var hid, raw string
+			var uat int64
+			if sRows.Scan(&hid, &raw, &uat) == nil {
+				snaps[hid] = snapRow{raw: raw, updatedAt: uat}
+			}
+		}
+		sRows.Close()
+	}
+
+	now := time.Now().Unix()
+	out := make([]platform.AppRuntimeTree, 0)
+	for _, h := range targets {
+		if snap, ok := snaps[h.ID]; ok {
+			var trees []platform.AppRuntimeTree
+			if json.Unmarshal([]byte(snap.raw), &trees) == nil {
+				age := now - snap.updatedAt
+				for i := range trees {
+					trees[i].HostID = h.ID
+					trees[i].HostName = h.Name
+					if age > 45 {
+						trees[i].StatsReady = false
+						trees[i].CPUPercent = 0
+						trees[i].MemUsage = 0
+					}
+					if age > 60 {
+						for j := range trees[i].Containers {
+							if trees[i].Containers[j].StartedAt > 0 {
+								trees[i].Containers[j].Uptime = ""
+							}
+						}
+					}
+				}
+				out = append(out, trees...)
+				continue
+			}
+		}
+		if fallback := r.synthesizeRuntimeFromInventory(ctx, h); len(fallback) > 0 {
+			out = append(out, fallback...)
+		}
+	}
+	return out, nil
+}
+
+func (r *Registry) synthesizeRuntimeFromInventory(ctx context.Context, h Host) []platform.AppRuntimeTree {
+	rows, err := r.st.DB.QueryContext(ctx, `
+		SELECT a.key, a.name, a.source, s.key, s.name, COALESCE(s.image_ref,''), COALESCE(s.state,'unknown')
+		FROM app a
+		JOIN service s ON s.app_key = a.key
+		WHERE a.host_id = ? AND a.gone_at IS NULL AND s.gone_at IS NULL
+		ORDER BY a.source ASC, a.name ASC, s.name ASC`, h.ID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var order []string
+	byApp := make(map[string]*platform.AppRuntimeTree)
+	for rows.Next() {
+		var appKey, appName, srcStr, svcKey, svcName, imgRef, state string
+		if rows.Scan(&appKey, &appName, &srcStr, &svcKey, &svcName, &imgRef, &state) != nil {
+			continue
+		}
+		tree, exists := byApp[appKey]
+		if !exists {
+			tree = &platform.AppRuntimeTree{
+				Key:        appKey,
+				HostID:     h.ID,
+				HostName:   h.Name,
+				Name:       appName,
+				Source:     platform.SourceKind(srcStr),
+				StatsReady: false,
+			}
+			byApp[appKey] = tree
+			order = append(order, appKey)
+		}
+		normState := strings.ToLower(strings.TrimSpace(state))
+		if normState == "" {
+			normState = "unknown"
+		}
+		cName := svcName
+		svcLabel := svcName
+		if srcStr == string(platform.SourceStandalone) || svcName == "main" {
+			cName = appName
+			svcLabel = ""
+		}
+		tree.TotalCount++
+		if normState == "running" {
+			tree.RunningCount++
+		}
+		tree.Containers = append(tree.Containers, platform.ContainerRuntimeStat{
+			ID:      svcKey,
+			Name:    cName,
+			Service: svcLabel,
+			Image:   imgRef,
+			State:   normState,
+		})
+	}
+	out := make([]platform.AppRuntimeTree, 0, len(order))
+	for _, k := range order {
+		out = append(out, *byApp[k])
+	}
+	return out
 }
 
 // ListRuntimeContainers 并发采集全部（或指定）主机上容器的树状实时运行状态。
@@ -706,6 +982,7 @@ func (r *Registry) Create(ctx context.Context, in CreateOrUpdateInput, lang i18n
 		return nil, i18n.NewHostError("host.save_failed", err)
 	}
 	r.evictRuntimeAdapter(id)
+	r.RefreshRuntimeAsync(id)
 	return r.Get(ctx, id)
 }
 
@@ -814,6 +1091,7 @@ func (r *Registry) Update(ctx context.Context, id string, in CreateOrUpdateInput
 		return nil, i18n.NewHostError("host.save_failed", err)
 	}
 	r.evictRuntimeAdapter(id)
+	r.RefreshRuntimeAsync(id)
 	return r.Get(ctx, id)
 }
 

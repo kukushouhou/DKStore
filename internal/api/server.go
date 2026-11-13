@@ -53,6 +53,9 @@ func New(d Deps) *Server {
 		if d.Checker != nil {
 			d.Updater.SetOnHostUpdated(func(hostID string) {
 				d.Checker.Trigger("manual", hostID, false)
+				if d.Hosts != nil {
+					d.Hosts.RefreshRuntimeAsync(hostID)
+				}
 			})
 		}
 	}
@@ -294,6 +297,16 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListContainers(w http.ResponseWriter, r *http.Request) {
 	hostID := strings.TrimSpace(r.URL.Query().Get("hostId"))
+	cachedParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("cached")))
+	if cachedParam == "1" || cachedParam == "true" {
+		items, err := s.d.Hosts.ListCachedRuntimeContainers(r.Context(), hostID)
+		if err != nil {
+			writeError(w, s.langOf(r), http.StatusInternalServerError, "db_error", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items, "cached": true})
+		return
+	}
 	statsParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("stats")))
 	withStats := statsParam != "0" && statsParam != "false"
 	items, err := s.d.Hosts.ListRuntimeContainers(r.Context(), hostID, withStats)
