@@ -17,6 +17,7 @@ import {
   theme,
 } from 'antd'
 import {
+  DeleteOutlined,
   DownOutlined,
   ExpandAltOutlined,
   HddOutlined,
@@ -180,22 +181,22 @@ export default function ContainersPage() {
 
   const colSpan = showHostCol
     ? {
-        name: { xs: 9, md: 6 },
+        name: { xs: 10, md: 7 },
         host: { xs: 4, md: 3 },
         state: { xs: 4, md: 3 },
         uptime: { xs: 0, md: 3 },
         resource: { xs: 4, md: 3 },
         image: { xs: 0, md: 4 },
-        action: { xs: 3, md: 2 },
+        action: { xs: 2, md: 1 },
       }
     : {
-        name: { xs: 10, md: 8 },
+        name: { xs: 11, md: 8 },
         host: { xs: 0, md: 0 },
         state: { xs: 5, md: 3 },
         uptime: { xs: 0, md: 3 },
-        resource: { xs: 5, md: 3 },
-        image: { xs: 0, md: 5 },
-        action: { xs: 4, md: 2 },
+        resource: { xs: 6, md: 3 },
+        image: { xs: 0, md: 6 },
+        action: { xs: 2, md: 1 },
       }
 
   const counts = useMemo(() => {
@@ -528,7 +529,7 @@ export default function ContainersPage() {
             <Col {...colSpan.uptime}>{t.containers.colUptime}</Col>
             <Col {...colSpan.resource}>{t.containers.colResource}</Col>
             <Col {...colSpan.image}>{t.containers.colImage}</Col>
-            <Col {...colSpan.action} style={{ textAlign: 'right' }}>
+            <Col {...colSpan.action} style={{ textAlign: 'right', whiteSpace: 'nowrap' }}>
               {t.containers.colActions}
             </Col>
           </Row>
@@ -613,17 +614,26 @@ export default function ContainersPage() {
                         -
                       </Typography.Text>
                     ) : (
-                      <Button
-                        type="link"
-                        danger
-                        size="small"
-                        style={{ paddingInline: 4 }}
-                        onClick={() => setDeletingApp(app)}
+                      <Tooltip
+                        title={
+                          app.source === 'compose' || app.source === 'dsm_project'
+                            ? t.containers.deleteProjectBtn
+                            : t.containers.deleteContainerBtn
+                        }
                       >
-                        {app.source === 'compose' || app.source === 'dsm_project'
-                          ? t.containers.deleteProjectBtn
-                          : t.containers.deleteContainerBtn}
-                      </Button>
+                        <Button
+                          type="text"
+                          danger
+                          size="small"
+                          aria-label={
+                            app.source === 'compose' || app.source === 'dsm_project'
+                              ? t.containers.deleteProjectBtn
+                              : t.containers.deleteContainerBtn
+                          }
+                          icon={<DeleteOutlined />}
+                          onClick={() => setDeletingApp(app)}
+                        />
+                      </Tooltip>
                     )}
                   </Col>
                 </Row>
@@ -754,18 +764,19 @@ export default function ContainersPage() {
                         -
                       </Typography.Text>
                     ) : (
-                      <Button
-                        type="link"
-                        danger
-                        size="small"
-                        style={{ paddingInline: 4 }}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setDeletingApp(app)
-                        }}
-                      >
-                        {t.containers.deleteProjectBtn}
-                      </Button>
+                      <Tooltip title={t.containers.deleteProjectBtn}>
+                        <Button
+                          type="text"
+                          danger
+                          size="small"
+                          aria-label={t.containers.deleteProjectBtn}
+                          icon={<DeleteOutlined />}
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setDeletingApp(app)
+                          }}
+                        />
+                      </Tooltip>
                     )}
                   </Col>
                 </Row>
@@ -832,11 +843,7 @@ export default function ContainersPage() {
                           )}
                         </Col>
                         <Col {...colSpan.image}>{renderImageCell(c.image)}</Col>
-                        <Col {...colSpan.action} style={{ textAlign: 'right' }}>
-                          <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-                            -
-                          </Typography.Text>
-                        </Col>
+                        <Col {...colSpan.action} />
                       </Row>
                     )
                   })}
