@@ -14,6 +14,7 @@ import (
 	"github.com/kukushouhou/DKStore/internal/auth"
 	"github.com/kukushouhou/DKStore/internal/checker"
 	"github.com/kukushouhou/DKStore/internal/host"
+	"github.com/kukushouhou/DKStore/internal/hostauth"
 	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/ignore"
 	"github.com/kukushouhou/DKStore/internal/notify"
@@ -72,6 +73,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
 	mux.HandleFunc("POST /api/v1/auth/setup", s.handleSetup)
+	mux.HandleFunc("POST /api/v1/auth/device-ticket", s.handleIssueDeviceTicket)
+	mux.HandleFunc("GET /api/v1/auth/handoff", s.handleDeviceHandoff)
 
 	// 需要认证的业务端点
 	mux.HandleFunc("POST /api/v1/auth/password", s.requireAuth(s.handleSetPassword))
@@ -217,6 +220,25 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	s.d.Auth.Logout(w, r)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleIssueDeviceTicket 仅允许受信任本机网关 Unix Socket 调用（如 OpenWrt LuCI rpcd），签发一次性设备免登交接票据。
+func (s *Server) handleIssueDeviceTicket(w http.ResponseWriter, r *http.Request) {
+	if !hostauth.IsTrustedGateway(r.Context()) {
+		writeError(w, s.langOf(r), http.StatusForbidden, "forbidden", "")
+		return
+	}
+	tok := s.d.Auth.IssueDeviceTicket()
+	writeJSON(w, http.StatusOK, map[string]any{"ticket": tok})
+}
+
+// handleDeviceHandoff 核销一次性宿主交接票据并下发宿主设备登录 Cookie 后跳转首页。
+func (s *Server) handleDeviceHandoff(w http.ResponseWriter, r *http.Request) {
+	ticket := strings.TrimSpace(r.URL.Query().Get("ticket"))
+	if ticket != "" {
+		s.d.Auth.ConsumeDeviceTicket(w, ticket)
+	}
+	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 // handleSetup 首次设置管理员密码（仅未设置密码时可用；套件模式下必须已通过宿主管理员认证），成功后直接登录。

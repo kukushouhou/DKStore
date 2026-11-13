@@ -39,6 +39,9 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) >= 2 && (os.Args[1] == "--rpcd" || os.Args[1] == "-rpcd") {
+		return runRPCD(os.Args[2:])
+	}
 	cfg, err := config.Load(os.Args[1:])
 	if err != nil {
 		return err
@@ -122,7 +125,11 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("监听 Unix Socket (%s) 失败: %w", cfg.UnixSocket, err)
 		}
-		_ = os.Chmod(cfg.UnixSocket, 0o666)
+		sockPerm := os.FileMode(0o666)
+		if hostauth.DetectInstallMode(hostauth.OSFS()) == hostauth.ModeOpenWrt {
+			sockPerm = 0o600
+		}
+		_ = os.Chmod(cfg.UnixSocket, sockPerm)
 		unixSrv = &http.Server{
 			Handler:           handler,
 			ReadHeaderTimeout: 10 * time.Second,

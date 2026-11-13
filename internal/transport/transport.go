@@ -571,7 +571,7 @@ type streamLocalChannelPayload struct {
 	Reserved1  uint32
 }
 
-const dockerStdioShellCmd = `sh -c 'PATH="$PATH:/usr/local/bin:/var/packages/ContainerManager/target/usr/bin:/var/packages/Docker/target/usr/bin" exec docker system dial-stdio'`
+const dockerStdioShellCmd = `sh -c 'PATH="$PATH:/usr/local/bin:/usr/sbin:/sbin:/var/packages/ContainerManager/target/usr/bin:/var/packages/Docker/target/usr/bin" exec docker system dial-stdio'`
 
 func (t *SSHTransport) dialDockerConn(ctx context.Context, _, _ string) (net.Conn, error) {
 	if err := t.ensureClient(ctx); err != nil {
@@ -726,7 +726,7 @@ func composeShellScript(workDir string, args []string) string {
 	if workDir != "" {
 		cdPart = "cd -- " + shellQuote(workDir) + " && "
 	}
-	return fmt.Sprintf(`PATH="$PATH:/usr/local/bin:/var/packages/ContainerManager/target/usr/bin:/var/packages/Docker/target/usr/bin"; %s`+
+	return fmt.Sprintf(`PATH="$PATH:/usr/local/bin:/usr/sbin:/sbin:/var/packages/ContainerManager/target/usr/bin:/var/packages/Docker/target/usr/bin"; %s`+
 		`if docker compose version >/dev/null 2>&1; then docker compose %s 2>&1; `+
 		`elif command -v docker-compose >/dev/null 2>&1; then docker-compose %s 2>&1; `+
 		`else echo 'docker compose: command not found' >&2; exit 127; fi`,

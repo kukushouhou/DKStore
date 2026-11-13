@@ -144,3 +144,18 @@ func TestListRuntimeAppsWithOptions_FastAndOneShotStats(t *testing.T) {
 		t.Fatalf("expected warm call to add only 1 stats hit (total 3), got hits=%d cpu=%v", statsHits.Load(), warmTrees[0].CPUPercent)
 	}
 }
+
+func TestParseOpenWrtRelease(t *testing.T) {
+	istore := []byte("DISTRIB_ID='iStoreOS'\nDISTRIB_RELEASE='22.03.7'\nDISTRIB_DESCRIPTION='iStoreOS 22.03.7 2025050912'\n")
+	if got := parseOpenWrtRelease(istore); got != "iStoreOS 22.03.7" {
+		t.Fatalf("expected iStoreOS 22.03.7, got %q", got)
+	}
+	owrt := []byte("DISTRIB_ID='OpenWrt'\nDISTRIB_RELEASE='24.10.0'\nDISTRIB_DESCRIPTION='OpenWrt 24.10.0 r28427-6df0e3d02a'\n")
+	if got := parseOpenWrtRelease(owrt); got != "OpenWrt 24.10.0" {
+		t.Fatalf("expected OpenWrt 24.10.0, got %q", got)
+	}
+	snap := []byte("DISTRIB_ID='OpenWrt'\nDISTRIB_RELEASE='SNAPSHOT'\nDISTRIB_DESCRIPTION='OpenWrt SNAPSHOT r29000'\n")
+	if got := parseOpenWrtRelease(snap); got != "OpenWrt SNAPSHOT r29000" {
+		t.Fatalf("expected OpenWrt SNAPSHOT r29000, got %q", got)
+	}
+}

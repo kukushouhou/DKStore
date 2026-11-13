@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from 'react'
 import {
   Alert,
   Button,
-  Card,
   Flex,
   Grid,
   Input,
@@ -25,15 +24,17 @@ import {
   HistoryOutlined,
   LockOutlined,
   ReloadOutlined,
-  SafetyCertificateOutlined,
   SettingOutlined,
   SyncOutlined,
 } from '@ant-design/icons'
 import { Outlet, useLocation, useNavigate } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError, api } from '../api/client'
+import AuthToolbar from '../components/AuthToolbar'
+import DKStoreLogo from '../components/DKStoreLogo'
 import UpdateLogModal from '../components/UpdateLogModal'
 import UpdateQueuePanel from '../components/UpdateQueuePanel'
+import { useEffectiveDark } from '../hooks/useEffectiveDark'
 import { useEvents } from '../hooks/useEvents'
 import { useIsUltrawide, useOrderedQueueJobs } from '../hooks/useUpdateQueue'
 import { useI18n } from '../i18n'
@@ -46,6 +47,7 @@ export default function AppLayout() {
   const screens = Grid.useBreakpoint()
   const { token } = theme.useToken()
   const { locale, setLocale, t } = useI18n()
+  const isDark = useEffectiveDark()
   const qc = useQueryClient()
 
   const auth = useQuery({ queryKey: ['authStatus'], queryFn: api.authStatus })
@@ -182,7 +184,7 @@ export default function AppLayout() {
 
   if (auth.isPending && !inSetupStep2) {
     return (
-      <Flex align="center" justify="center" style={{ minHeight: '100vh' }}>
+      <Flex className="dk-aurora-bg" align="center" justify="center" style={{ minHeight: '100vh' }}>
         <Spin />
       </Flex>
     )
@@ -190,37 +192,76 @@ export default function AppLayout() {
 
   if (auth.data?.mode === 'host_login_required' && !inSetupStep2) {
     return (
-      <Flex align="center" justify="center" style={{ minHeight: '100vh', padding: 16 }}>
-        <Card style={{ width: 440 }}>
-          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-            <Flex justify="space-between" align="center">
-              <Typography.Title level={4} style={{ margin: 0 }}>
-                <SafetyCertificateOutlined /> {t.auth.hostLoginTitle}
-              </Typography.Title>
-              <Segmented
-                size="small"
-                value={locale}
-                onChange={(v) => setLocale(v as Locale)}
-                options={[
-                  { label: '中文', value: 'zh-CN' },
-                  { label: 'EN', value: 'en-US' },
-                ]}
-              />
+      <Flex
+        vertical
+        justify="space-between"
+        className="dk-aurora-bg"
+        style={{ minHeight: '100vh', padding: 20 }}
+      >
+        <Flex justify="flex-end">
+          <AuthToolbar />
+        </Flex>
+        <Flex align="center" justify="center" style={{ flex: 1, paddingBlock: 16 }}>
+          <div
+            className="dk-glass-card"
+            style={{
+              width: '100%',
+              maxWidth: 420,
+              borderRadius: 20,
+              padding: '34px 32px',
+            }}
+          >
+            <Flex vertical align="center" style={{ textAlign: 'center', marginBottom: 22 }}>
+              <DKStoreLogo size={54} withHalo dark={isDark} />
+              <div
+                style={{
+                  fontSize: 22,
+                  fontWeight: 700,
+                  letterSpacing: '-0.02em',
+                  color: token.colorText,
+                  marginTop: 14,
+                }}
+              >
+                DKStore
+              </div>
+              <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM, marginTop: 2 }}>
+                {t.auth.tagline}
+              </Typography.Text>
             </Flex>
-            <Typography.Paragraph type="secondary" style={{ marginBottom: 4 }}>
-              {t.auth.hostLoginDesc}
-            </Typography.Paragraph>
+            <div style={{ textAlign: 'center', marginBottom: 20 }}>
+              <Typography.Title level={5} style={{ margin: '0 0 8px' }}>
+                {t.auth.hostLoginTitle}
+              </Typography.Title>
+              <Typography.Paragraph
+                type="secondary"
+                style={{ fontSize: token.fontSizeSM, marginBottom: 0, lineHeight: 1.65 }}
+              >
+                {auth.data.deviceAuthHint || t.auth.hostLoginDesc}
+              </Typography.Paragraph>
+            </div>
             <Button
               type="primary"
+              size="large"
               block
               icon={<ReloadOutlined />}
               loading={auth.isFetching}
               onClick={() => auth.refetch()}
+              style={{ height: 42, borderRadius: 10, fontWeight: 500 }}
             >
               {t.auth.hostLoginRetry}
             </Button>
-          </Space>
-        </Card>
+          </div>
+        </Flex>
+        <div
+          style={{
+            textAlign: 'center',
+            fontSize: token.fontSizeSM,
+            color: token.colorTextTertiary,
+            paddingBottom: 4,
+          }}
+        >
+          {t.auth.platformsFooter}
+        </div>
       </Flex>
     )
   }
@@ -242,34 +283,80 @@ export default function AppLayout() {
 
   if (auth.data?.mode === 'password' && !auth.data.authenticated) {
     return (
-      <Flex align="center" justify="center" style={{ minHeight: '100vh', padding: 16 }}>
-        <Card style={{ width: 380 }}>
-          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-            <Flex justify="space-between" align="center">
-              <Typography.Title level={4} style={{ margin: 0 }}>
-                <LockOutlined /> DKStore
-              </Typography.Title>
-              <Segmented
-                size="small"
-                value={locale}
-                onChange={(v) => setLocale(v as Locale)}
-                options={[
-                  { label: '中文', value: 'zh-CN' },
-                  { label: 'EN', value: 'en-US' },
-                ]}
-              />
+      <Flex
+        vertical
+        justify="space-between"
+        className="dk-aurora-bg"
+        style={{ minHeight: '100vh', padding: 20 }}
+      >
+        <Flex justify="flex-end">
+          <AuthToolbar />
+        </Flex>
+        <Flex align="center" justify="center" style={{ flex: 1, paddingBlock: 16 }}>
+          <div
+            className="dk-glass-card"
+            style={{
+              width: '100%',
+              maxWidth: 400,
+              borderRadius: 20,
+              padding: '34px 32px',
+            }}
+          >
+            <Flex vertical align="center" style={{ textAlign: 'center', marginBottom: 24 }}>
+              <DKStoreLogo size={54} withHalo dark={isDark} />
+              <div
+                style={{
+                  fontSize: 22,
+                  fontWeight: 700,
+                  letterSpacing: '-0.02em',
+                  color: token.colorText,
+                  marginTop: 14,
+                }}
+              >
+                DKStore
+              </div>
+              <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM, marginTop: 2 }}>
+                {t.auth.tagline}
+              </Typography.Text>
             </Flex>
-            <Typography.Text type="secondary">{t.settings.loginTitle}</Typography.Text>
-            <Input.Password
-              value={pw}
-              onChange={(e) => setPw(e.target.value)}
-              onPressEnter={doLogin}
-            />
-            <Button type="primary" block loading={loggingIn} onClick={doLogin}>
-              {t.settings.loginBtn}
-            </Button>
-          </Space>
-        </Card>
+            <Space direction="vertical" size={14} style={{ width: '100%' }}>
+              <Input.Password
+                size="large"
+                prefix={<LockOutlined style={{ color: token.colorTextQuaternary }} />}
+                placeholder={t.settings.loginTitle}
+                value={pw}
+                onChange={(e) => setPw(e.target.value)}
+                onPressEnter={doLogin}
+                autoFocus
+                style={{ borderRadius: 10 }}
+              />
+              <Button
+                type="primary"
+                size="large"
+                block
+                loading={loggingIn}
+                onClick={doLogin}
+                style={{
+                  height: 42,
+                  borderRadius: 10,
+                  fontWeight: 500,
+                }}
+              >
+                {t.settings.loginBtn}
+              </Button>
+            </Space>
+          </div>
+        </Flex>
+        <div
+          style={{
+            textAlign: 'center',
+            fontSize: token.fontSizeSM,
+            color: token.colorTextTertiary,
+            paddingBottom: 4,
+          }}
+        >
+          {t.auth.platformsFooter}
+        </div>
       </Flex>
     )
   }
@@ -353,9 +440,25 @@ export default function AppLayout() {
             gap: 16,
           }}
         >
-          <Typography.Title level={4} style={{ margin: 0, whiteSpace: 'nowrap' }}>
-            DKStore
-          </Typography.Title>
+          <div
+            onClick={() => navigate('/')}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 10,
+              cursor: 'pointer',
+              userSelect: 'none',
+              flexShrink: 0,
+            }}
+          >
+            <DKStoreLogo size={28} />
+            <Typography.Title
+              level={4}
+              style={{ margin: 0, whiteSpace: 'nowrap', letterSpacing: '-0.02em' }}
+            >
+              DKStore
+            </Typography.Title>
+          </div>
           <Menu
             mode="horizontal"
             selectedKeys={[selected]}
@@ -407,7 +510,11 @@ export default function AppLayout() {
                 size="small"
                 onClick={async () => {
                   await api.logout()
-                  qc.invalidateQueries()
+                  qc.setQueryData(['authStatus'], (prev: typeof auth.data) =>
+                    prev ? { ...prev, authenticated: false } : prev,
+                  )
+                  qc.removeQueries({ predicate: (q) => q.queryKey[0] !== 'authStatus' })
+                  await qc.invalidateQueries({ queryKey: ['authStatus'] })
                 }}
               >
                 {t.nav.logout}

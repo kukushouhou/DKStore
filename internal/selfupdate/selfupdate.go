@@ -72,7 +72,11 @@ func Check(ctx context.Context, lang i18n.Lang) Status {
 	case "docker":
 		cmdHint = "docker compose pull dkstore && docker compose up -d dkstore"
 	case "openwrt":
-		cmdHint = "opkg update && opkg upgrade luci-app-dkstore  # or: apk upgrade luci-app-dkstore"
+		if lang == i18n.EnUS {
+			cmdHint = "Upload new .ipk in LuCI -> System -> Software (or .run in iStore), or run: opkg install --force-reinstall luci-app-dkstore_*.ipk"
+		} else {
+			cmdHint = "在 LuCI「系统 → 软件包 → 上传软件包」上传新版 .ipk（或在 iStore「手动安装」上传新版 .run）完成覆盖升级（自动保留数据）"
+		}
 	case "synology_spk":
 		if lang == i18n.EnUS {
 			cmdHint = "Upgrade via Synology DSM Package Center -> Manual Install new .spk"

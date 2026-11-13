@@ -63,7 +63,8 @@ func TestStatusModes(t *testing.T) {
 		{"docker no pw", fakeHost{hostauth.ModeDocker, okHost}, "", ModeSetupRequired, false, "", false, "setup_required"},
 		{"binary no pw", fakeHost{hostauth.ModeBinary, okHost}, "", ModeSetupRequired, false, "", false, "setup_required"},
 		{"syno uninit trusted", fakeHost{hostauth.ModeSynology, okHost}, "", ModeSetupRequired, false, "", false, "setup_required"},
-		{"owrt uninit trusted", fakeHost{hostauth.ModeOpenWrt, okHost}, "", ModeSetupRequired, false, "", false, "setup_required"},
+		{"owrt uninit trusted zero-pw", fakeHost{hostauth.ModeOpenWrt, okHost}, "", ModeDevice, true, "", true, ""},
+		{"owrt uninit untrusted blocked", fakeHost{hostauth.ModeOpenWrt, failHost}, "", ModeHostLoginRequired, false, hostauth.ReasonNoCookie, false, "setup_required"},
 		{"syno uninit untrusted blocked", fakeHost{hostauth.ModeSynology, failHost}, "", ModeHostLoginRequired, false, hostauth.ReasonNoCookie, false, "setup_required"},
 		{"fnos uninit trusted gateway zero-pw", fakeHost{hostauth.ModeFnOS, okHost}, "", ModeDevice, true, "", true, ""},
 		{"fnos uninit untrusted tcp blocked", fakeHost{hostauth.ModeFnOS, hostauth.Result{Reason: hostauth.ReasonNoFnOSGateway}}, "", ModeHostLoginRequired, false, hostauth.ReasonNoFnOSGateway, false, "setup_required"},
@@ -148,5 +149,44 @@ func TestSetupAndLogin(t *testing.T) {
 	req2.AddCookie(sessionCookie(rec2))
 	if ok, _ := s.Authorize(ctx, req2); !ok {
 		t.Fatal("new session should be valid")
+	}
+}
+
+func TestOpenWrtDeviceTicketSingleUseHandoff(t *testing.T) {
+	ctx := context.Background()
+	s := newTestService(fakeHost{mode: hostauth.ModeOpenWrt, res: hostauth.Result{Reason: hostauth.ReasonNoCookie}}, "")
+
+	tok := s.IssueDeviceTicket()
+	if tok == "" {
+		t.Fatal("expected non-empty ticket")
+	}
+
+	rec := httptest.NewRecorder()
+	if !s.ConsumeDeviceTicket(rec, tok) {
+		t.Fatal("first consume should succeed")
+	}
+	// Single-use: consuming same ticket again must fail
+	if s.ConsumeDeviceTicket(httptest.NewRecorder(), tok) {
+		t.Fatal("reusing consumed ticket must fail")
+	}
+
+	var devCookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == deviceCookieName && c.Value != "" {
+			devCookie = c
+		}
+	}
+	if devCookie == nil {
+		t.Fatal("expected device session cookie")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/overview", nil)
+	req.AddCookie(devCookie)
+	st := s.Status(ctx, req)
+	if st.Mode != ModeDevice || !st.Authenticated {
+		t.Fatalf("expected ModeDevice authenticated=true after handoff, got %+v", st)
+	}
+	if ok, _ := s.Authorize(ctx, req); !ok {
+		t.Fatal("expected Authorize=true with device session cookie")
 	}
 }

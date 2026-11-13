@@ -381,9 +381,16 @@ func (r *Registry) EnsureLocalHostAdded(ctx context.Context) (*Host, error) {
 	}
 	name := "本机 Docker"
 	kind := "docker"
-	if hostauth.DetectInstallMode(hostauth.OSFS()) == hostauth.ModeFnOS {
+	switch hostauth.DetectInstallMode(hostauth.OSFS()) {
+	case hostauth.ModeFnOS:
 		name = "本机飞牛 NAS"
 		kind = "fnos"
+	case hostauth.ModeOpenWrt:
+		name = "本机 OpenWrt"
+		if b, err := os.ReadFile("/etc/openwrt_release"); err == nil && strings.Contains(strings.ToLower(string(b)), "istoreos") {
+			name = "本机 iStoreOS"
+		}
+		kind = "openwrt"
 	}
 	h, err := r.Create(ctx, CreateOrUpdateInput{
 		Name:      name,
@@ -938,6 +945,7 @@ func (r *Registry) Create(ctx context.Context, in CreateOrUpdateInput, lang i18n
 	if !testRes.OK {
 		return nil, buildSaveVerifyError(testRes, lang)
 	}
+	refineDetectedKind(&in, testRes.Info)
 
 	id := newID("h_")
 	now := time.Now().Unix()
@@ -1348,6 +1356,12 @@ func (r *Registry) testConnection(ctx context.Context, in CreateOrUpdateInput, l
 			Status:  "ok",
 			Message: tr("已启用（原位更新 Compose 项目，自动将 /var/apps 套件容器保护为只读）", "Enabled (in-place Compose updates; protects /var/apps packages as read-only)"),
 		})
+	} else if in.Kind == "openwrt" || isOpenWrtTarget(ctx, sshTr) {
+		res.Steps = append(res.Steps, StepResult{
+			Step:    tr("OpenWrt / iStoreOS 容器环境识别", "OpenWrt / iStoreOS container environment check"),
+			Status:  "ok",
+			Message: tr("已启用（支持原位更新独立容器与 Compose 项目）", "Enabled (in-place updates for standalone containers & Compose projects)"),
+		})
 	}
 	res.OK = true
 	res.Info = info
@@ -1481,6 +1495,9 @@ func (r *Registry) OpenAdapter(ctx context.Context, hostID string) (platform.Ada
 	if h.Kind != "fnos" && isFnOSTarget(ctx, sshTr) {
 		h.Kind = "fnos"
 		_, _ = r.st.DB.ExecContext(ctx, `UPDATE host SET kind='fnos' WHERE id=?`, h.ID)
+	} else if h.Kind != "openwrt" && isOpenWrtTarget(ctx, sshTr) {
+		h.Kind = "openwrt"
+		_, _ = r.st.DB.ExecContext(ctx, `UPDATE host SET kind='openwrt' WHERE id=?`, h.ID)
 	}
 	return docker.New(h.ID, sshTr), h, nil
 }
@@ -1507,6 +1524,24 @@ func isFnOSTarget(ctx context.Context, tr transport.Transport) bool {
 		}
 	}
 	return false
+}
+
+func isOpenWrtTarget(ctx context.Context, tr transport.Transport) bool {
+	b, err := tr.ReadFile(ctx, "/etc/openwrt_release")
+	return err == nil && len(strings.TrimSpace(string(b))) > 0
+}
+
+func refineDetectedKind(in *CreateOrUpdateInput, info *platform.HostInfo) {
+	if in == nil || info == nil || in.Kind == "synology" || in.Transport == "dsm_api" {
+		return
+	}
+	pv := strings.ToLower(strings.TrimSpace(info.PlatformVersion))
+	switch {
+	case strings.Contains(pv, "fnos"):
+		in.Kind = "fnos"
+	case strings.Contains(pv, "openwrt"), strings.Contains(pv, "istoreos"), strings.Contains(pv, "immortalwrt"), strings.Contains(pv, "kwrt"), strings.Contains(pv, "lede"):
+		in.Kind = "openwrt"
+	}
 }
 
 func (r *Registry) markOffline(ctx context.Context, id string) {

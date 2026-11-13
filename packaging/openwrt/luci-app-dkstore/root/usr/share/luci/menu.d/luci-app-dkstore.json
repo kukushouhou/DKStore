@@ -1,13 +1,28 @@
 {
-  "admin/services/dkstore": {
-    "title": "DKStore Update Center",
-    "order": 85,
-    "action": {
-      "type": "view",
-      "path": "dkstore/index"
-    },
-    "depends": {
-      "acl": [ "luci-app-dkstore" ]
-    }
-  }
+	"admin/services/dkstore": {
+		"title": "DKStore",
+		"order": 85,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": [ "luci-app-dkstore" ]
+		}
+	},
+	"admin/services/dkstore/panel": {
+		"title": "Update Center",
+		"order": 10,
+		"action": {
+			"type": "view",
+			"path": "dkstore/index"
+		}
+	},
+	"admin/services/dkstore/config": {
+		"title": "Service Settings",
+		"order": 20,
+		"action": {
+			"type": "view",
+			"path": "dkstore/config"
+		}
+	}
 }

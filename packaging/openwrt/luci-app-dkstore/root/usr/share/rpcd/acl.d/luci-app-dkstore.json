@@ -1,0 +1,17 @@
+{
+	"luci-app-dkstore": {
+		"description": "Grant access to DKStore Docker App Update Center",
+		"read": {
+			"ubus": {
+				"luci.dkstore": [ "status", "launch" ]
+			},
+			"uci": [ "dkstore" ]
+		},
+		"write": {
+			"ubus": {
+				"luci.dkstore": [ "launch" ]
+			},
+			"uci": [ "dkstore" ]
+		}
+	}
+}

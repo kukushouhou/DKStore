@@ -15,6 +15,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -202,36 +203,35 @@ func addTarFile(tw *tar.Writer, name string, data []byte, mode int64) {
 	_, _ = tw.Write(data)
 }
 
-// renderIconPNG 生成带圆角蓝色背景与白色容器方块标识的 PNG 图标。
+// renderIconPNG 按 F2-3 品牌 Logo（飞檐 K 冠 + 拱门 D 屋 + 青芯）渲染抗锯齿 PNG 图标。
 func renderIconPNG(size int) []byte {
-	img := image.NewRGBA(image.Rect(0, 0, size, size))
-	bg := color.RGBA{R: 22, G: 119, B: 255, A: 255}
-	fg := color.RGBA{R: 255, G: 255, B: 255, A: 255}
-	radius := size / 5
-	for y := 0; y < size; y++ {
-		for x := 0; x < size; x++ {
-			if inRoundedRect(x, y, size, size, radius) {
-				img.SetRGBA(x, y, bg)
-			}
-		}
-	}
-	// 绘制 3x2 白色容器网格块
-	pad := size / 5
-	cellW := (size - 2*pad) / 3
-	cellH := (size - 2*pad) / 3
-	gap := max(1, size/24)
-	for row := 0; row < 2; row++ {
-		for col := 0; col < 3; col++ {
-			x0 := pad + col*cellW + gap
-			y0 := pad + (row+1)*cellH + gap - cellH/2
-			x1 := pad + (col+1)*cellW - gap
-			y1 := y0 + cellH - 2*gap
-			for y := y0; y < y1 && y < size; y++ {
-				for x := x0; x < x1 && x < size; x++ {
-					if x >= 0 && y >= 0 {
-						img.SetRGBA(x, y, fg)
-					}
+	img := image.NewNRGBA(image.Rect(0, 0, size, size))
+	const ss = 4
+	scale := 64.0 / float64(size)
+	for py := 0; py < size; py++ {
+		for px := 0; px < size; px++ {
+			var rSum, gSum, bSum, aSum float64
+			for sy := 0; sy < ss; sy++ {
+				for sx := 0; sx < ss; sx++ {
+					u := (float64(px) + (float64(sx)+0.5)/float64(ss)) * scale
+					v := (float64(py) + (float64(sy)+0.5)/float64(ss)) * scale
+					c := sampleF23Logo(u, v)
+					af := float64(c.A) / 255.0
+					rSum += float64(c.R) * af
+					gSum += float64(c.G) * af
+					bSum += float64(c.B) * af
+					aSum += af
 				}
+			}
+			if aSum > 0 {
+				inv := 1.0 / aSum
+				aOut := uint8(math.Round((aSum / float64(ss*ss)) * 255.0))
+				img.SetNRGBA(px, py, color.NRGBA{
+					R: uint8(math.Round(rSum * inv)),
+					G: uint8(math.Round(gSum * inv)),
+					B: uint8(math.Round(bSum * inv)),
+					A: aOut,
+				})
 			}
 		}
 	}
@@ -240,19 +240,63 @@ func renderIconPNG(size int) []byte {
 	return buf.Bytes()
 }
 
-func inRoundedRect(x, y, w, h, r int) bool {
-	cx, cy := x, y
-	if x < r {
-		cx = r
-	} else if x >= w-r {
-		cx = w - r - 1
+func sampleF23Logo(u, v float64) color.NRGBA {
+	if !inRoundBox(u, v, 2, 2, 62, 62, 15) {
+		return color.NRGBA{}
 	}
-	if y < r {
-		cy = r
-	} else if y >= h-r {
-		cy = h - r - 1
+	// 青色发光核心
+	if inRoundBox(u, v, 29.2, 34.5, 34.8, 42.0, 2.8) {
+		return color.NRGBA{R: 103, G: 232, B: 249, A: 255}
 	}
-	dx := x - cx
-	dy := y - cy
-	return dx*dx+dy*dy <= r*r
+	// 白色 K 冠（顶梁 + 屋檐斜臂）
+	if distSeg(u, v, 20, 13, 44, 13) <= 2.2 ||
+		distSeg(u, v, 13, 28.5, 32, 14) <= 2.5 ||
+		distSeg(u, v, 32, 14, 51, 28.5) <= 2.5 {
+		return color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	}
+	// 白色拱门 D 屋（外拱减去内拱）
+	inOuterD := (v >= 41 && inRoundBox(u, v, 17, 38, 47, 50.5, 3.0)) ||
+		(v <= 41 && v >= 25 && sq((u-32)/15.0)+sq((v-41)/16.0) <= 1.0)
+	inInnerD := (v >= 41 && v <= 45.2 && u >= 22.4 && u <= 41.6) ||
+		(v <= 41 && v >= 30.5 && sq((u-32)/9.6)+sq((v-41)/10.5) <= 1.0)
+	if inOuterD && !inInnerD {
+		return color.NRGBA{R: 255, G: 255, B: 255, A: 255}
+	}
+	// 对角线蓝渐变底色 (#4F8CFF -> #2F6BFF -> #153CC0)
+	t := ((u-8)*48 + (v-4)*56) / (48*48 + 56*56)
+	t = max(0, min(1, t))
+	if t < 0.5 {
+		k := t * 2
+		return lerpColor(color.NRGBA{79, 140, 255, 255}, color.NRGBA{47, 107, 255, 255}, k)
+	}
+	k := (t - 0.5) * 2
+	return lerpColor(color.NRGBA{47, 107, 255, 255}, color.NRGBA{21, 60, 192, 255}, k)
+}
+
+func sq(x float64) float64 { return x * x }
+
+func lerpColor(a, b color.NRGBA, t float64) color.NRGBA {
+	return color.NRGBA{
+		R: uint8(math.Round(float64(a.R) + (float64(b.R)-float64(a.R))*t)),
+		G: uint8(math.Round(float64(a.G) + (float64(b.G)-float64(a.G))*t)),
+		B: uint8(math.Round(float64(a.B) + (float64(b.B)-float64(a.B))*t)),
+		A: 255,
+	}
+}
+
+func distSeg(px, py, x1, y1, x2, y2 float64) float64 {
+	dx, dy := x2-x1, y2-y1
+	t := ((px-x1)*dx + (py-y1)*dy) / (dx*dx + dy*dy)
+	t = max(0, min(1, t))
+	cx, cy := x1+t*dx, y1+t*dy
+	return math.Hypot(px-cx, py-cy)
+}
+
+func inRoundBox(px, py, x0, y0, x1, y1, r float64) bool {
+	if px < x0 || px > x1 || py < y0 || py > y1 {
+		return false
+	}
+	cx := max(x0+r, min(x1-r, px))
+	cy := max(y0+r, min(y1-r, py))
+	return sq(px-cx)+sq(py-cy) <= r*r
 }

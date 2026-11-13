@@ -19,11 +19,15 @@ import (
 )
 
 const (
-	cookieName     = "dkstore_session"
-	passwordSetKey = "admin_password_hash"
+	cookieName       = "dkstore_session"
+	deviceCookieName = "dkstore_device_session"
+	passwordSetKey   = "admin_password_hash"
 
 	// MinPasswordLen 是管理员密码的最小长度（字符数）。
 	MinPasswordLen = 6
+
+	deviceTicketTTL  = 30 * time.Second
+	deviceSessionTTL = 12 * time.Hour
 )
 
 // 访问模式（GET /auth/status 的 mode 字段）。
@@ -56,10 +60,12 @@ type HostVerifier interface {
 //   - 未设置密码且为群晖/OpenWrt 套件安装、能核验到宿主管理员登录态 → 设备登录直接放行；
 //   - 其他情况 → 必须先设置密码（setup_required），所有业务接口拒绝访问。
 type Service struct {
-	st       *store.Store
-	host     HostVerifier
-	mu       sync.RWMutex
-	sessions map[string]time.Time
+	st             *store.Store
+	host           HostVerifier
+	mu             sync.RWMutex
+	sessions       map[string]time.Time
+	deviceTickets  map[string]time.Time
+	deviceSessions map[string]time.Time
 
 	// getHash/setHash 可在测试中替换；默认读写 setting 表。
 	getHash func(ctx context.Context) string
@@ -82,9 +88,11 @@ func New(st *store.Store, host HostVerifier) *Service {
 		host = hostauth.New("", nil, nil)
 	}
 	s := &Service{
-		st:       st,
-		host:     host,
-		sessions: make(map[string]time.Time),
+		st:             st,
+		host:           host,
+		sessions:       make(map[string]time.Time),
+		deviceTickets:  make(map[string]time.Time),
+		deviceSessions: make(map[string]time.Time),
 	}
 	s.getHash = s.dbGetHash
 	s.setHash = s.dbSetHash
@@ -107,13 +115,102 @@ func (s *Service) PasswordSet(ctx context.Context) bool {
 //     - 若持有有效密码会话 Cookie → ModePassword, Authenticated=true；
 //     - 若来自可信宿主后台（host.Supported && Verify.OK）→ ModeDevice, Authenticated=true（免二次登录）；
 //     - 其他浏览器 / 外部链接访问 → ModePassword, Authenticated=false（展示密码登录页）。
+func isZeroSetupDeviceMode(mode string) bool {
+	return mode == hostauth.ModeFnOS || mode == hostauth.ModeOpenWrt
+}
+
+// IssueDeviceTicket 签发一次性短效设备登录交接票据（仅允许受信任本机网关 Socket 调用，例如 OpenWrt LuCI rpcd）。
+func (s *Service) IssueDeviceTicket() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	tok := hex.EncodeToString(b)
+	now := time.Now()
+	s.mu.Lock()
+	for k, exp := range s.deviceTickets {
+		if now.After(exp) {
+			delete(s.deviceTickets, k)
+		}
+	}
+	s.deviceTickets[tok] = now.Add(deviceTicketTTL)
+	s.mu.Unlock()
+	return tok
+}
+
+// ConsumeDeviceTicket 核销一次性设备交接票据并下发宿主设备会话 Cookie。
+func (s *Service) ConsumeDeviceTicket(w http.ResponseWriter, ticket string) bool {
+	if len(ticket) < 16 || len(ticket) > 128 {
+		return false
+	}
+	now := time.Now()
+	s.mu.Lock()
+	exp, ok := s.deviceTickets[ticket]
+	if ok {
+		delete(s.deviceTickets, ticket)
+	}
+	for k, e := range s.deviceTickets {
+		if now.After(e) {
+			delete(s.deviceTickets, k)
+		}
+	}
+	if !ok || now.After(exp) {
+		s.mu.Unlock()
+		return false
+	}
+	b := make([]byte, 24)
+	_, _ = rand.Read(b)
+	sessTok := hex.EncodeToString(b)
+	sessExp := now.Add(deviceSessionTTL)
+	for k, e := range s.deviceSessions {
+		if now.After(e) {
+			delete(s.deviceSessions, k)
+		}
+	}
+	s.deviceSessions[sessTok] = sessExp
+	s.mu.Unlock()
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     deviceCookieName,
+		Value:    sessTok,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Expires:  sessExp,
+	})
+	return true
+}
+
+func (s *Service) hasDeviceSession(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	c, err := r.Cookie(deviceCookieName)
+	if err != nil || c.Value == "" {
+		return false
+	}
+	s.mu.RLock()
+	exp, ok := s.deviceSessions[c.Value]
+	s.mu.RUnlock()
+	return ok && time.Now().Before(exp)
+}
+
 func (s *Service) Status(ctx context.Context, r *http.Request) StatusInfo {
 	info := StatusInfo{InstallMode: s.host.InstallMode()}
 	if !s.PasswordSet(ctx) {
 		if s.host.Supported() {
+			if s.hasDeviceSession(r) {
+				if isZeroSetupDeviceMode(s.host.InstallMode()) {
+					info.Mode = ModeDevice
+					info.Authenticated = true
+					info.HostUser = "root"
+					return info
+				}
+				info.Mode = ModeSetupRequired
+				info.HostUser = "admin"
+				return info
+			}
 			res := s.host.Verify(ctx, r)
 			if res.OK {
-				if s.host.InstallMode() == hostauth.ModeFnOS {
+				if isZeroSetupDeviceMode(s.host.InstallMode()) {
 					info.Mode = ModeDevice
 					info.Authenticated = true
 					info.HostUser = res.User
@@ -139,6 +236,12 @@ func (s *Service) Status(ctx context.Context, r *http.Request) StatusInfo {
 		return info
 	}
 	if s.host.Supported() {
+		if s.hasDeviceSession(r) {
+			info.Mode = ModeDevice
+			info.Authenticated = true
+			info.HostUser = "root"
+			return info
+		}
 		if res := s.host.Verify(ctx, r); res.OK {
 			info.Mode = ModeDevice
 			info.Authenticated = true
@@ -154,15 +257,17 @@ func (s *Service) Status(ctx context.Context, r *http.Request) StatusInfo {
 // Authorize 判断请求能否访问业务接口；不通过时返回 API 错误码（unauthorized / setup_required）。
 func (s *Service) Authorize(ctx context.Context, r *http.Request) (ok bool, code string) {
 	if !s.PasswordSet(ctx) {
-		if s.host.InstallMode() == hostauth.ModeFnOS && s.host.Supported() && s.host.Verify(ctx, r).OK {
-			return true, ""
+		if isZeroSetupDeviceMode(s.host.InstallMode()) && s.host.Supported() {
+			if s.hasDeviceSession(r) || s.host.Verify(ctx, r).OK {
+				return true, ""
+			}
 		}
 		return false, ErrSetupRequired.Error()
 	}
 	if s.hasSession(r) {
 		return true, ""
 	}
-	if s.host.Supported() && s.host.Verify(ctx, r).OK {
+	if s.host.Supported() && (s.hasDeviceSession(r) || s.host.Verify(ctx, r).OK) {
 		return true, ""
 	}
 	return false, "unauthorized"
@@ -255,14 +360,21 @@ func (s *Service) Logout(w http.ResponseWriter, r *http.Request) {
 		delete(s.sessions, c.Value)
 		s.mu.Unlock()
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     cookieName,
-		Value:    "",
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   -1,
-	})
+	if dc, err := r.Cookie(deviceCookieName); err == nil && dc.Value != "" {
+		s.mu.Lock()
+		delete(s.deviceSessions, dc.Value)
+		s.mu.Unlock()
+	}
+	for _, name := range []string{cookieName, deviceCookieName} {
+		http.SetCookie(w, &http.Cookie{
+			Name:     name,
+			Value:    "",
+			Path:     "/",
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			MaxAge:   -1,
+		})
+	}
 }
 
 func (s *Service) issueCookie(w http.ResponseWriter) {

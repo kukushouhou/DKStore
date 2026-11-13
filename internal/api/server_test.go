@@ -13,6 +13,7 @@ import (
 	"github.com/kukushouhou/DKStore/internal/auth"
 	"github.com/kukushouhou/DKStore/internal/checker"
 	"github.com/kukushouhou/DKStore/internal/host"
+	"github.com/kukushouhou/DKStore/internal/hostauth"
 	"github.com/kukushouhou/DKStore/internal/ignore"
 	"github.com/kukushouhou/DKStore/internal/inventory"
 	"github.com/kukushouhou/DKStore/internal/notify"
@@ -169,6 +170,19 @@ func TestAPIEndpoints_IconsTagsIgnoreAndCustomUpdateValidation(t *testing.T) {
 	recCfgUpd := doReq(http.MethodPost, "/api/v1/services/config-update", `{"serviceKey":"h1/container/web/main","policyMode":"forever","env":[{"key":"TZ","value":"UTC"}],"ports":[{"hostPort":"8080","containerPort":"80","protocol":"tcp"}]}`)
 	if recCfgUpd.Code != http.StatusOK || !strings.Contains(recCfgUpd.Body.String(), `"job":{`) {
 		t.Fatalf("expected services/config-update to return tracked job, got %d %s", recCfgUpd.Code, recCfgUpd.Body.String())
+	}
+
+	// 8. POST /api/v1/auth/device-ticket MUST reject untrusted TCP requests (HTTP 403), and succeed on trusted gateway context
+	recUntrustedTicket := doReq(http.MethodPost, "/api/v1/auth/device-ticket", "{}")
+	if recUntrustedTicket.Code != http.StatusForbidden {
+		t.Fatalf("expected HTTP 403 for untrusted TCP device-ticket request, got %d", recUntrustedTicket.Code)
+	}
+	trustedReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/device-ticket", strings.NewReader("{}"))
+	trustedReq = trustedReq.WithContext(hostauth.WithTrustedGateway(trustedReq.Context()))
+	recTrustedTicket := httptest.NewRecorder()
+	srv.ServeHTTP(recTrustedTicket, trustedReq)
+	if recTrustedTicket.Code != http.StatusOK || !strings.Contains(recTrustedTicket.Body.String(), `"ticket":"`) {
+		t.Fatalf("expected HTTP 200 ticket on trusted gateway context, got %d %s", recTrustedTicket.Code, recTrustedTicket.Body.String())
 	}
 
 	// Wait briefly for background goroutines launched against mock local socket to settle before TempDir cleanup

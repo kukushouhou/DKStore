@@ -37,17 +37,18 @@ import {
   SafetyCertificateOutlined,
   SyncOutlined,
   WarningOutlined,
+  WifiOutlined,
 } from '@ant-design/icons'
 import { useSearchParams } from 'react-router'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, ApiError, type HostInput, type HostItem, type HostTestResult } from '../api/client'
 import { useI18n } from '../i18n'
 
-type PlatformId = 'synology' | 'fnos' | 'linux' | 'local'
+type PlatformId = 'synology' | 'fnos' | 'openwrt' | 'linux' | 'local'
 
 interface PlatformSpec {
   id: PlatformId
-  kind: 'synology' | 'fnos' | 'docker'
+  kind: 'synology' | 'fnos' | 'openwrt' | 'docker'
   transports: ('dsm_api' | 'ssh' | 'local')[]
   defaultTransport: 'dsm_api' | 'ssh' | 'local'
 }
@@ -62,6 +63,12 @@ const PLATFORM_SPECS: PlatformSpec[] = [
   {
     id: 'fnos',
     kind: 'fnos',
+    transports: ['ssh'],
+    defaultTransport: 'ssh',
+  },
+  {
+    id: 'openwrt',
+    kind: 'openwrt',
     transports: ['ssh'],
     defaultTransport: 'ssh',
   },
@@ -120,9 +127,11 @@ export default function HostsPage() {
     const spec = PLATFORM_SPECS.find((p) => p.id === nextId) ?? PLATFORM_SPECS[0]
     setPlatformId(spec.id)
     setTestResult(null)
+    const curUser = String(form.getFieldValue('sshUser') || '').trim()
     form.setFieldsValue({
       kind: spec.kind,
       transport: spec.defaultTransport,
+      ...(spec.id === 'openwrt' && !curUser ? { sshUser: 'root' } : {}),
     })
   }
 
@@ -167,8 +176,18 @@ export default function HostsPage() {
       } else if (canAddLocal) {
         setPlatformId('local')
         form.setFieldsValue({
-          name: instMode === 'fnos_fpk' ? t.hosts.fnosLocalDefaultName : t.hosts.localDefaultName,
-          kind: instMode === 'fnos_fpk' ? 'fnos' : 'docker',
+          name:
+            instMode === 'fnos_fpk'
+              ? t.hosts.fnosLocalDefaultName
+              : instMode === 'openwrt'
+                ? t.hosts.openwrtLocalDefaultName
+                : t.hosts.localDefaultName,
+          kind:
+            instMode === 'fnos_fpk'
+              ? 'fnos'
+              : instMode === 'openwrt'
+                ? 'openwrt'
+                : 'docker',
           transport: 'local',
         })
       } else if (instMode === 'fnos_fpk') {
@@ -179,6 +198,17 @@ export default function HostsPage() {
           transport: 'ssh',
           address: '127.0.0.1',
           port: 22,
+          sshAuth: 'password',
+        })
+      } else if (instMode === 'openwrt') {
+        setPlatformId('openwrt')
+        form.setFieldsValue({
+          name: t.hosts.openwrtLocalDefaultName,
+          kind: 'openwrt',
+          transport: 'ssh',
+          address: '127.0.0.1',
+          port: 22,
+          sshUser: 'root',
           sshAuth: 'password',
         })
       } else {
@@ -207,6 +237,7 @@ export default function HostsPage() {
     t.auth.spkDefaultName,
     t.hosts.fnosLocalDefaultName,
     t.hosts.localDefaultName,
+    t.hosts.openwrtLocalDefaultName,
   ])
 
   const openEdit = (h: HostItem) => {
@@ -223,7 +254,9 @@ export default function HostsPage() {
           ? 'synology'
           : h.kind === 'fnos'
             ? 'fnos'
-            : 'linux'
+            : h.kind === 'openwrt'
+              ? 'openwrt'
+              : 'linux'
     setPlatformId(initPlatform)
     form.setFieldsValue({
       name: h.name,
@@ -352,6 +385,12 @@ export default function HostsPage() {
           title: t.hosts.platformFnos,
           desc: t.hosts.platformFnosDesc,
         }
+      case 'openwrt':
+        return {
+          icon: <WifiOutlined style={{ fontSize: 20, color: token.colorPrimary }} />,
+          title: t.hosts.platformOpenwrt,
+          desc: t.hosts.platformOpenwrtDesc,
+        }
       case 'linux':
         return {
           icon: <CloudServerOutlined style={{ fontSize: 20, color: token.colorPrimary }} />,
@@ -472,6 +511,13 @@ export default function HostsPage() {
                   <Space wrap>
                     {h.kind === 'synology' && <Tag color="geekblue">Synology DSM</Tag>}
                     {h.kind === 'fnos' && <Tag color="cyan">{t.hosts.tagFnos}</Tag>}
+                    {h.kind === 'openwrt' && (
+                      <Tag color="orange">
+                        {h.info?.platformVersion?.toLowerCase().includes('istoreos')
+                          ? t.hosts.tagIstoreos
+                          : t.hosts.tagOpenwrt}
+                      </Tag>
+                    )}
                     <Tag>
                       {h.transport === 'local'
                         ? t.hosts.localSocket
@@ -599,14 +645,14 @@ export default function HostsPage() {
               <Input />
             </Form.Item>
 
-            {platformId === 'fnos' && (
+            {(platformId === 'fnos' || platformId === 'openwrt') && (
               <Alert
                 type="info"
                 showIcon
                 style={{ marginBottom: 16 }}
                 title={
                   <Typography.Text style={{ fontSize: token.fontSizeSM }}>
-                    {t.hosts.fnosSshGuide}
+                    {platformId === 'fnos' ? t.hosts.fnosSshGuide : t.hosts.openwrtSshGuide}
                   </Typography.Text>
                 }
               />

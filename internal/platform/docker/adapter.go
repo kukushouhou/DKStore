@@ -85,6 +85,32 @@ func (a *Adapter) Probe(ctx context.Context) (*platform.HostInfo, error) {
 	}, nil
 }
 
+func parseOpenWrtRelease(b []byte) string {
+	kv := make(map[string]string)
+	sc := bufio.NewScanner(bytes.NewReader(b))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		kv[strings.TrimSpace(k)] = strings.Trim(strings.TrimSpace(v), `"'`)
+	}
+	id := kv["DISTRIB_ID"]
+	rel := kv["DISTRIB_RELEASE"]
+	desc := kv["DISTRIB_DESCRIPTION"]
+	if id != "" && rel != "" && !strings.EqualFold(rel, "SNAPSHOT") {
+		return id + " " + rel
+	}
+	if desc != "" {
+		return desc
+	}
+	if id != "" {
+		return id
+	}
+	return ""
+}
+
 func (a *Adapter) detectPlatformVersion(ctx context.Context, info dockerInfoResp) string {
 	platVer := strings.TrimSpace(info.OperatingSystem)
 	kvLower := strings.ToLower(strings.TrimSpace(info.KernelVersion))
@@ -105,6 +131,13 @@ func (a *Adapter) detectPlatformVersion(ctx context.Context, info dockerInfoResp
 				return "fnOS (" + platVer + ")"
 			}
 			return "fnOS"
+		}
+	}
+	if osLower == "" || osLower == "linux" || strings.Contains(osLower, "wrt") || strings.Contains(osLower, "istore") || strings.Contains(osLower, "lede") {
+		if b, err := a.tr.ReadFile(ctx, "/etc/openwrt_release"); err == nil && len(b) > 0 {
+			if owVer := parseOpenWrtRelease(b); owVer != "" {
+				return owVer
+			}
 		}
 	}
 	return platVer
