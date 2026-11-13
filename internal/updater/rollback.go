@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/kukushouhou/DKStore/internal/i18n"
@@ -32,8 +33,8 @@ func (s *Service) ListJobs(ctx context.Context, limit int, lang i18n.Lang) ([]Jo
 	rows, err := s.st.DB.QueryContext(ctx, `
 		SELECT id, kind, host_id, host_name, app_key, app_name, service_key, service_name, source,
 		       status, phase, COALESCE(progress_json,''),
-		       old_image_ref, COALESCE(old_image_id,''), COALESCE(old_repo_digest,''), COALESCE(old_version,''), COALESCE(old_matched_tags_json,''),
-		       target_image_ref, COALESCE(target_repo_digest,''), COALESCE(target_version,''), COALESCE(target_matched_tags_json,''),
+		       old_image_ref, COALESCE(old_image_id,''), COALESCE(old_repo_digest,''), COALESCE(old_version,''), COALESCE(old_resolved_tag,''), COALESCE(old_matched_tags_json,''),
+		       target_image_ref, COALESCE(target_repo_digest,''), COALESCE(target_version,''), COALESCE(target_resolved_tag,''), COALESCE(target_matched_tags_json,''),
 		       COALESCE(new_image_id,''), COALESCE(new_repo_digest,''),
 		       rollback_eligible, COALESCE(rollback_ref,''), COALESCE(rollback_reason,''),
 		       COALESCE(error_code,''), COALESCE(error_msg,''), COALESCE(logs_text,''),
@@ -103,8 +104,8 @@ func (s *Service) GetJob(ctx context.Context, id string, lang i18n.Lang) (*Job, 
 	rows, err := s.st.DB.QueryContext(ctx, `
 		SELECT id, kind, host_id, host_name, app_key, app_name, service_key, service_name, source,
 		       status, phase, COALESCE(progress_json,''),
-		       old_image_ref, COALESCE(old_image_id,''), COALESCE(old_repo_digest,''), COALESCE(old_version,''), COALESCE(old_matched_tags_json,''),
-		       target_image_ref, COALESCE(target_repo_digest,''), COALESCE(target_version,''), COALESCE(target_matched_tags_json,''),
+		       old_image_ref, COALESCE(old_image_id,''), COALESCE(old_repo_digest,''), COALESCE(old_version,''), COALESCE(old_resolved_tag,''), COALESCE(old_matched_tags_json,''),
+		       target_image_ref, COALESCE(target_repo_digest,''), COALESCE(target_version,''), COALESCE(target_resolved_tag,''), COALESCE(target_matched_tags_json,''),
 		       COALESCE(new_image_id,''), COALESCE(new_repo_digest,''),
 		       rollback_eligible, COALESCE(rollback_ref,''), COALESCE(rollback_reason,''),
 		       COALESCE(error_code,''), COALESCE(error_msg,''), COALESCE(logs_text,''),
@@ -148,11 +149,24 @@ func (s *Service) VerifyRollback(ctx context.Context, jobID string, lang i18n.La
 		}, nil
 	}
 
-	// 查询主机平台架构（审计 L12：未记录平台时不盲目默认 linux/amd64）
+	// 查询主机平台架构（审计 L12：未记录平台时不盲目默认 linux/amd64，若服务未存则回退查询宿主探针架构）
 	var plat string
 	_ = s.st.DB.QueryRowContext(ctx, `SELECT COALESCE(platform,'') FROM service WHERE key=?`, j.ServiceKey).Scan(&plat)
+	if plat == "" && j.HostID != "" {
+		var infoJSON string
+		if s.st.DB.QueryRowContext(ctx, `SELECT COALESCE(info_json,'') FROM host WHERE id=?`, j.HostID).Scan(&infoJSON) == nil && infoJSON != "" {
+			var hi platform.HostInfo
+			if json.Unmarshal([]byte(infoJSON), &hi) == nil && hi.Arch != "" && hi.Arch != "unknown" {
+				osName := strings.ToLower(strings.TrimSpace(hi.OS))
+				if osName == "" {
+					osName = "linux"
+				}
+				plat = osName + "/" + strings.ToLower(strings.TrimSpace(hi.Arch))
+			}
+		}
+	}
 
-	// 1. 先检查远端仓库中该精确版本标签是否仍指向历史旧 Digest（审计 M12）
+	// 1. 先检查远端仓库中该精确版本标签是否仍指向历史旧 Digest / 旧 ImageID（审计 M12）
 	ref, err := version.ParseImageRef(j.RollbackRef)
 	if err != nil {
 		return &RollbackVerifyResult{
@@ -162,20 +176,53 @@ func (s *Service) VerifyRollback(ctx context.Context, jobID string, lang i18n.La
 		}, nil
 	}
 
-	remoteMatches := false
-	mf, mfErr := s.reg.CheckManifest(ctx, ref, plat, true)
-	if mfErr == nil && mf != nil {
-		oldDigest := registry.NormalizeDigest(j.OldRepoDigest)
-		oldImgID := registry.NormalizeDigest(j.OldImageID)
+	oldDigest := registry.NormalizeDigest(j.OldRepoDigest)
+	oldImgID := registry.NormalizeDigest(j.OldImageID)
+	needCfg := oldDigest == "" && oldImgID != ""
+
+	checkCandidateRef := func(candRef version.ParsedRef) (bool, error) {
+		mf, mfErr := s.reg.CheckManifestEx(ctx, candRef, registry.ManifestCheckOptions{
+			HostPlatform: plat,
+			BypassCache:  true,
+			NeedConfig:   needCfg,
+		})
+		if mfErr != nil || mf == nil {
+			return false, mfErr
+		}
 		remDigest := registry.NormalizeDigest(mf.RepoDigest)
 		remPlatDigest := registry.NormalizeDigest(mf.PlatformDigest)
 		remCfgDigest := registry.NormalizeDigest(mf.ConfigDigest)
 		if oldDigest != "" {
 			if remDigest == oldDigest || (remPlatDigest != "" && remPlatDigest == oldDigest) {
-				remoteMatches = true
+				return true, nil
 			}
 		} else if oldImgID != "" && remCfgDigest != "" && remCfgDigest == oldImgID {
-			remoteMatches = true
+			return true, nil
+		}
+		return false, nil
+	}
+
+	remoteMatches, mfErr := checkCandidateRef(ref)
+	verifiedRollbackRef := j.RollbackRef
+
+	// 若 OCI 标签与仓库 Tag 仅相差 v 前缀（如 3.8.3 vs v3.8.3）导致 404，自动核验一次切换 v 前缀的候选标签
+	if !remoteMatches {
+		var re *registry.RegistryError
+		if errors.As(mfErr, &re) && re.Kind == registry.ErrNotFound && ref.Tag != "" {
+			altTag := "v" + ref.Tag
+			if strings.HasPrefix(ref.Tag, "v") || strings.HasPrefix(ref.Tag, "V") {
+				altTag = ref.Tag[1:]
+			}
+			if altParsed, pErr := version.ParseImageRef(ref.WithTag(altTag)); pErr == nil {
+				if ok, altErr := checkCandidateRef(altParsed); ok {
+					remoteMatches = true
+					mfErr = nil
+					verifiedRollbackRef = replaceRefTag(j.OldImageRef, altTag)
+					_, _ = s.st.DB.ExecContext(ctx, `UPDATE update_job SET rollback_ref=?, old_resolved_tag=? WHERE id=?`, verifiedRollbackRef, altTag, j.ID)
+				} else if altErr == nil {
+					mfErr = nil
+				}
+			}
 		}
 	}
 
@@ -205,7 +252,7 @@ func (s *Service) VerifyRollback(ctx context.Context, jobID string, lang i18n.La
 
 	return &RollbackVerifyResult{
 		Eligible:    true,
-		RollbackRef: j.RollbackRef,
+		RollbackRef: verifiedRollbackRef,
 		OldVersion:  j.OldVersion,
 		OldDigest:   j.OldRepoDigest,
 		DataWarning: warn,
@@ -249,6 +296,10 @@ func (s *Service) ExecuteRollback(ctx context.Context, jobID string, lang i18n.L
 		FROM service WHERE key=?`, orig.ServiceKey).Scan(&curImageRef, &curImageID, &curRepoDigest)
 
 	now := time.Now().Unix()
+	targetRef := ver.RollbackRef
+	if targetRef == "" {
+		targetRef = orig.RollbackRef
+	}
 	rbJob := Job{
 		ID:                 newJobID(),
 		Kind:               "rollback",
@@ -266,9 +317,11 @@ func (s *Service) ExecuteRollback(ctx context.Context, jobID string, lang i18n.L
 		OldImageID:         curImageID,
 		OldRepoDigest:      curRepoDigest,
 		OldVersion:         orig.TargetVersion,
-		TargetImageRef:     orig.RollbackRef,
+		OldResolvedTag:     orig.TargetResolvedTag,
+		TargetImageRef:     targetRef,
 		TargetRepoDigest:   orig.OldRepoDigest,
 		TargetVersion:      orig.OldVersion,
+		TargetResolvedTag:  orig.OldResolvedTag,
 		TargetMatchedTags:  orig.OldMatchedTags,
 		RollbackEligible:   false,
 		RollbackReason:     "no_exact_version_tag",
@@ -288,6 +341,27 @@ func (s *Service) ExecuteRollback(ctx context.Context, jobID string, lang i18n.L
 	return &rbJob, nil
 }
 
+// ClearJobs 按范围清理历史更新/回退记录（scope: "failed" 仅清理失败记录；"all" 清理全部非执行中记录）。
+func (s *Service) ClearJobs(ctx context.Context, scope string) (int64, error) {
+	var (
+		res sql.Result
+		err error
+	)
+	switch strings.ToLower(strings.TrimSpace(scope)) {
+	case "failed":
+		res, err = s.st.DB.ExecContext(ctx, `DELETE FROM update_job WHERE status = 'failed'`)
+	case "all":
+		res, err = s.st.DB.ExecContext(ctx, `DELETE FROM update_job WHERE status NOT IN ('running', 'queued')`)
+	default:
+		return 0, errors.New("invalid scope")
+	}
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 func scanJobRow(rows *sql.Rows, lang i18n.Lang) (Job, error) {
 	var (
 		j                        Job
@@ -298,8 +372,8 @@ func scanJobRow(rows *sql.Rows, lang i18n.Lang) (Job, error) {
 	err := rows.Scan(
 		&j.ID, &j.Kind, &j.HostID, &j.HostName, &j.AppKey, &j.AppName, &j.ServiceKey, &j.ServiceName, &j.Source,
 		&j.Status, &j.Phase, &progJSON,
-		&j.OldImageRef, &j.OldImageID, &j.OldRepoDigest, &j.OldVersion, &oldTagsJSON,
-		&j.TargetImageRef, &j.TargetRepoDigest, &j.TargetVersion, &tgtTagsJSON,
+		&j.OldImageRef, &j.OldImageID, &j.OldRepoDigest, &j.OldVersion, &j.OldResolvedTag, &oldTagsJSON,
+		&j.TargetImageRef, &j.TargetRepoDigest, &j.TargetVersion, &j.TargetResolvedTag, &tgtTagsJSON,
 		&j.NewImageID, &j.NewRepoDigest,
 		&eligibleInt, &j.RollbackRef, &j.RollbackReason,
 		&j.ErrorCode, &j.ErrorMsg, &j.Logs,

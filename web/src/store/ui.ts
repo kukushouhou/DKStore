@@ -120,6 +120,7 @@ interface UIState {
   setActiveLogJobId: (jobId: string | null) => void
   dismissQueueJob: (jobId: string) => void
   clearFinishedQueueJobs: () => void
+  clearJobsByScope: (scope: 'failed' | 'all') => void
   upsertUpdateJob: (job: UpdateJobItem) => void
 }
 
@@ -166,6 +167,27 @@ export const useUIStore = create<UIState>((set) => ({
       }
       return {
         updateQueueJobs: nextQueue,
+        ...(Object.keys(nextQueue).length === 0 ? { queueCollapsed: false } : {}),
+      }
+    }),
+  clearJobsByScope: (scope) =>
+    set((s) => {
+      const keep = (job: UpdateJobItem) => {
+        if (job.status === 'queued' || job.status === 'running') return true
+        if (scope === 'failed') return job.status !== 'failed'
+        return false
+      }
+      const nextQueue: Record<string, UpdateJobItem> = {}
+      for (const [id, job] of Object.entries(s.updateQueueJobs)) {
+        if (keep(job)) nextQueue[id] = job
+      }
+      const nextFinished: Record<string, UpdateJobItem> = {}
+      for (const [sk, job] of Object.entries(s.lastFinishedJobs)) {
+        if (keep(job)) nextFinished[sk] = job
+      }
+      return {
+        updateQueueJobs: nextQueue,
+        lastFinishedJobs: nextFinished,
         ...(Object.keys(nextQueue).length === 0 ? { queueCollapsed: false } : {}),
       }
     }),

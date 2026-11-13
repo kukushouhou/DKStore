@@ -383,3 +383,126 @@ func TestNormalizeOldDockerZstdError(t *testing.T) {
 		t.Fatalf("unexpected legacy zh error: %q", legacyZh)
 	}
 }
+
+func TestStructuredResolvedTagRollbackAndLegacyBackfill(t *testing.T) {
+	up, st := newTestUpdater(t, nil)
+	ctx := context.Background()
+
+	_, err := st.DB.ExecContext(ctx, `INSERT INTO host(id, name, kind, transport, status, created_at) VALUES ('h1', 'NAS', 'synology', 'dsm_api', 'online', 1700000000)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.DB.ExecContext(ctx, `INSERT INTO app(key, host_id, name, source, updated_at) VALUES ('h1/dsm_project/iptv', 'h1', 'iptv', 'dsm_project', 1700000000)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.DB.ExecContext(ctx, `
+		INSERT INTO service(key, app_key, name, image_ref, image_id, platform, current_tags_json, updated_at)
+		VALUES ('h1/dsm_project/iptv/rtp2httpd', 'h1/dsm_project/iptv', 'rtp2httpd', 'ghcr.nju.edu.cn/stackia/rtp2httpd:latest', 'sha256:573910c7', 'linux/amd64', '["latest"]', 1700000000)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.DB.ExecContext(ctx, `
+		INSERT INTO finding(service_key, kind, category, current_version, current_resolved_tag, target_version, target_resolved_tag, target_ref)
+		VALUES ('h1/dsm_project/iptv/rtp2httpd', 'digest_update', 'normal', 'latest (3.8.3)', '3.8.3', 'latest (3.17.2)', '3.17.2', 'ghcr.io/stackia/rtp2httpd:latest')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	j1, _, _, err := up.prepareUpgradeJob(ctx, UpdateItemRequest{ServiceKey: "h1/dsm_project/iptv/rtp2httpd"}, i18n.ZhCN)
+	if err != nil {
+		t.Fatalf("prepareUpgradeJob: %v", err)
+	}
+	if !j1.RollbackEligible || j1.RollbackRef != "ghcr.nju.edu.cn/stackia/rtp2httpd:3.8.3" || j1.OldResolvedTag != "3.8.3" {
+		t.Fatalf("expected structured rollback eligible to :3.8.3, got eligible=%v ref=%q oldResolved=%q", j1.RollbackEligible, j1.RollbackRef, j1.OldResolvedTag)
+	}
+
+	_, err = st.DB.ExecContext(ctx, `
+		INSERT INTO service(key, app_key, name, image_ref, image_id, repo_digest, platform, current_tags_json, updated_at)
+		VALUES ('h1/dsm_project/iptv/ha', 'h1/dsm_project/iptv', 'ha', 'homeassistant/home-assistant:latest', 'sha256:13894a', 'sha256:fccef878', 'linux/amd64', '["latest"]', 1700000000)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.DB.ExecContext(ctx, `
+		INSERT INTO finding(service_key, kind, category, current_version, current_resolved_tag, target_version, target_resolved_tag, target_ref)
+		VALUES ('h1/dsm_project/iptv/ha', 'digest_update', 'normal', 'latest (fccef8)', '', 'latest (2026.11.1)', '2026.11.1', 'homeassistant/home-assistant:latest')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j2, _, _, err := up.prepareUpgradeJob(ctx, UpdateItemRequest{ServiceKey: "h1/dsm_project/iptv/ha"}, i18n.ZhCN)
+	if err != nil {
+		t.Fatalf("prepareUpgradeJob ha: %v", err)
+	}
+	if j2.RollbackEligible || j2.RollbackReason != "no_exact_version_tag" {
+		t.Fatalf("expected floating latest without resolved tag to be ineligible, got eligible=%v reason=%q", j2.RollbackEligible, j2.RollbackReason)
+	}
+
+	_, err = st.DB.ExecContext(ctx, `
+		INSERT INTO update_job(
+			id, kind, host_id, host_name, app_key, app_name, service_key, service_name, source,
+			status, phase, old_image_ref, old_version, target_image_ref, target_version,
+			rollback_eligible, rollback_ref, rollback_reason, started_at, finished_at
+		) VALUES (
+			'up_legacy_rtp', 'upgrade', 'h1', 'NAS', 'h1/dsm_project/iptv', 'iptv', 'h1/dsm_project/iptv/rtp2httpd', 'rtp2httpd', 'dsm_project',
+			'succeeded', 'done', 'ghcr.nju.edu.cn/stackia/rtp2httpd:latest', 'latest (3.8.3)',
+			'ghcr.nju.edu.cn/stackia/rtp2httpd:latest', 'latest (3.17.2)',
+			0, '', 'no_exact_version_tag', 1700000500, 1700000600
+		)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	up.backfillLegacyResolvedTags()
+	repaired, err := up.GetJob(ctx, "up_legacy_rtp", i18n.ZhCN)
+	if err != nil {
+		t.Fatalf("GetJob repaired: %v", err)
+	}
+	if !repaired.RollbackEligible || repaired.RollbackRef != "ghcr.nju.edu.cn/stackia/rtp2httpd:3.8.3" || repaired.OldResolvedTag != "3.8.3" {
+		t.Fatalf("expected legacy row repaired to eligible :3.8.3, got %+v", repaired)
+	}
+}
+
+func TestClearJobs_FailedVsAll(t *testing.T) {
+	up, _ := newTestUpdater(t, nil)
+	ctx := context.Background()
+
+	mk := func(id, status string, ts int64) Job {
+		return Job{
+			ID:             id,
+			Kind:           "upgrade",
+			HostID:         "h1",
+			HostName:       "NAS",
+			AppKey:         "app/" + id,
+			AppName:        id,
+			ServiceKey:     "svc/" + id,
+			ServiceName:    "main",
+			Source:         "standalone",
+			Status:         status,
+			Phase:          "done",
+			OldImageRef:    "nginx:1.26",
+			TargetImageRef: "nginx:1.27",
+			StartedAt:      ts,
+		}
+	}
+	_ = up.insertJob(ctx, mk("j_ok", "succeeded", 100))
+	_ = up.insertJob(ctx, mk("j_fail1", "failed", 200))
+	_ = up.insertJob(ctx, mk("j_fail2", "failed", 300))
+	_ = up.insertJob(ctx, mk("j_run", "running", 400))
+
+	nFailed, err := up.ClearJobs(ctx, "failed")
+	if err != nil || nFailed != 2 {
+		t.Fatalf("ClearJobs(failed) = %d, %v; want 2, nil", nFailed, err)
+	}
+	rem1, _ := up.ListJobs(ctx, 50, i18n.ZhCN)
+	if len(rem1) != 2 {
+		t.Fatalf("expected 2 remaining jobs (succeeded + running), got %d", len(rem1))
+	}
+
+	nAll, err := up.ClearJobs(ctx, "all")
+	if err != nil || nAll != 1 {
+		t.Fatalf("ClearJobs(all) = %d, %v; want 1 (preserving running), nil", nAll, err)
+	}
+	rem2, _ := up.ListJobs(ctx, 50, i18n.ZhCN)
+	if len(rem2) != 1 || rem2[0].ID != "j_run" {
+		t.Fatalf("expected only running job preserved, got %+v", rem2)
+	}
+}

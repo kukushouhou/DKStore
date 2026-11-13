@@ -51,20 +51,22 @@ type Input struct {
 // Output 是分类器输出的 Finding 结果。
 // Reason 与 Hint 保存语言无关的编码（供入库后按任意语言实时渲染），ReasonText 与 HintText 为按 Input.Lang 渲染好的本地化文本。
 type Output struct {
-	Kind           Kind           `json:"kind"`
-	Category       Category       `json:"category,omitempty"`
-	Reason         string         `json:"reason,omitempty"` // major_bump | database | database_suspected | database_cross_series | pinned_digest | republished
-	ReasonText     string         `json:"reasonText,omitempty"`
-	CurrentVersion string         `json:"currentVersion,omitempty"`
-	TargetVersion  string         `json:"targetVersion,omitempty"`
-	TargetRef      string         `json:"targetRef,omitempty"`
-	TargetDigest   string         `json:"targetDigest,omitempty"`
-	TargetTags     []string       `json:"targetTags,omitempty"`
-	Hint           string         `json:"hint,omitempty"`
-	Links          rules.RepoLink `json:"links"`
-	IsDatabase     bool           `json:"isDatabase"`
-	DatabaseName   string         `json:"databaseName,omitempty"`
-	RoleKind       string         `json:"roleKind,omitempty"` // database | mq | middleware
+	Kind               Kind           `json:"kind"`
+	Category           Category       `json:"category,omitempty"`
+	Reason             string         `json:"reason,omitempty"` // major_bump | database | database_suspected | database_cross_series | pinned_digest | republished
+	ReasonText         string         `json:"reasonText,omitempty"`
+	CurrentVersion     string         `json:"currentVersion,omitempty"`
+	CurrentResolvedTag string         `json:"currentResolvedTag,omitempty"` // 真实识别到的可拉取精确旧版本标签
+	TargetVersion      string         `json:"targetVersion,omitempty"`
+	TargetResolvedTag  string         `json:"targetResolvedTag,omitempty"` // 真实识别到的可拉取精确目标版本标签
+	TargetRef          string         `json:"targetRef,omitempty"`
+	TargetDigest       string         `json:"targetDigest,omitempty"`
+	TargetTags         []string       `json:"targetTags,omitempty"`
+	Hint               string         `json:"hint,omitempty"`
+	Links              rules.RepoLink `json:"links"`
+	IsDatabase         bool           `json:"isDatabase"`
+	DatabaseName       string         `json:"databaseName,omitempty"`
+	RoleKind           string         `json:"roleKind,omitempty"` // database | mq | middleware
 }
 
 // ExtractVersionLabel 从容器/镜像 Labels 中提取有效的版本字符串。
@@ -98,36 +100,81 @@ func ValidVersionLabel(raw string) string {
 	return v
 }
 
-// plausibleVersionLabel 防止基础镜像（如 FROM node:17.1.0）残留的 OCI version 标签污染业务镜像版本展示：
-// 当仓库已有候选标签时，仅当该标签在仓库候选标签中存在或至少存在同一主版本系列标签时才采信。
-func plausibleVersionLabel(raw string, candidates []registry.TagDigestEntry) string {
+// resolveVersionLabelTag 校验 OCI version 标签是否可信，并同步返回仓库中对应的真实版本标签名（优先精确命中候选标签，自动对齐 v 前缀习惯）。
+func resolveVersionLabelTag(raw string, candidates []registry.TagDigestEntry) (displayVer, resolvedTag string) {
 	v := ValidVersionLabel(raw)
 	if v == "" {
-		return ""
+		return "", ""
 	}
+	pv := version.ParseTag(v)
 	if len(candidates) == 0 {
-		return v
+		if pv.Scheme != version.SchemeUnknown {
+			return v, v
+		}
+		return v, ""
 	}
 	trimV := strings.TrimPrefix(strings.TrimPrefix(v, "v"), "V")
-	pv := version.ParseTag(v)
-	hasAnyParsedCandidate := false
 	for _, c := range candidates {
 		cn := strings.TrimSpace(c.Name)
-		if strings.EqualFold(cn, v) || strings.EqualFold(strings.TrimPrefix(strings.TrimPrefix(cn, "v"), "V"), trimV) {
-			return v
+		if strings.EqualFold(cn, v) {
+			if version.ParseTag(cn).Scheme != version.SchemeUnknown {
+				return v, cn
+			}
+			return v, ""
 		}
+	}
+	for _, c := range candidates {
+		cn := strings.TrimSpace(c.Name)
+		if strings.EqualFold(strings.TrimPrefix(strings.TrimPrefix(cn, "v"), "V"), trimV) {
+			if version.ParseTag(cn).Scheme != version.SchemeUnknown {
+				return v, cn
+			}
+			return v, ""
+		}
+	}
+
+	hasAnyParsedCandidate := false
+	matchedSameMajor := false
+	sameMajorWithV := 0
+	sameMajorNoV := 0
+	for _, c := range candidates {
+		cn := strings.TrimSpace(c.Name)
 		pc := version.ParseTag(cn)
 		if pc.Scheme != version.SchemeUnknown && !pc.Prerelease {
 			hasAnyParsedCandidate = true
 			if pv.Scheme == pc.Scheme && pv.Major == pc.Major {
-				return v
+				matchedSameMajor = true
+				if pc.HasVPrefix {
+					sameMajorWithV++
+				} else {
+					sameMajorNoV++
+				}
 			}
 		}
 	}
-	if !hasAnyParsedCandidate {
-		return v
+	if matchedSameMajor {
+		aligned := v
+		if sameMajorWithV > 0 && sameMajorNoV == 0 && !pv.HasVPrefix {
+			aligned = "v" + trimV
+		} else if sameMajorNoV > 0 && sameMajorWithV == 0 && pv.HasVPrefix {
+			aligned = trimV
+		}
+		return v, aligned
 	}
-	return ""
+	if !hasAnyParsedCandidate {
+		if pv.Scheme != version.SchemeUnknown {
+			return v, v
+		}
+		return v, ""
+	}
+	return "", ""
+}
+
+// plausibleVersionLabel 防止基础镜像（如 FROM node:17.1.0）残留的 OCI version 标签污染业务镜像版本展示：
+// 当仓库已有候选标签时，仅当该标签在仓库候选标签中存在或至少存在同一主版本系列标签时才采信。
+func plausibleVersionLabel(raw string, candidates []registry.TagDigestEntry) string {
+	disp, _ := resolveVersionLabelTag(raw, candidates)
+	return disp
 }
 
 // InferStatefulRole 基于服务名称特征做非白名单有状态组件兜底识别（附录 D.2）。
@@ -216,12 +263,22 @@ func Evaluate(in Input) Output {
 
 	curTag := version.ParseTag(in.Ref.Tag)
 	curDisplay := version.SelectBestDisplayTag(in.Ref.Tag, in.CurrentMatchedTags)
+	if curDisplay != "" && version.ParseTag(curDisplay).Scheme != version.SchemeUnknown {
+		out.CurrentResolvedTag = curDisplay
+	}
 	if curDisplay == "" {
-		curDisplay = plausibleVersionLabel(in.LocalVersionLabel, in.CandidateTags)
+		disp, resolved := resolveVersionLabelTag(in.LocalVersionLabel, in.CandidateTags)
+		curDisplay = disp
+		if resolved != "" && version.ParseTag(resolved).Scheme != version.SchemeUnknown {
+			out.CurrentResolvedTag = resolved
+		}
 	}
 	out.CurrentVersion = version.FormatTagVersionDisplay(in.Ref.Tag, curDisplay, "")
 	if curDisplay == "" && curTag.Scheme != version.SchemeUnknown {
 		curDisplay = in.Ref.Tag
+	}
+	if out.CurrentResolvedTag == "" && curTag.Scheme != version.SchemeUnknown {
+		out.CurrentResolvedTag = in.Ref.Tag
 	}
 
 	// 2. 本地无 RepoDigest 时，只有来源为群晖 dsm_api（AllowImageIDCompare）且远端取到了对应平台的 ConfigDigest，
@@ -310,21 +367,31 @@ func Evaluate(in Input) Output {
 		remoteHash = firstNonEmpty(remoteConfigDigest, remoteRepoDigest, remotePlatformDigest)
 	}
 
-	resolveRemoteBest := func() string {
+	resolveRemoteBest := func() (string, string) {
 		rb := version.SelectBestDisplayTag(in.Ref.Tag, in.RemoteMatchedTags)
+		rTag := ""
+		if rb != "" && version.ParseTag(rb).Scheme != version.SchemeUnknown {
+			rTag = rb
+		}
 		if rb == "" {
-			rb = ValidVersionLabel(firstNonEmpty(in.RemoteVersionLabel, remoteManifestVer))
+			disp, aligned := resolveVersionLabelTag(firstNonEmpty(in.RemoteVersionLabel, remoteManifestVer), in.CandidateTags)
+			rb = disp
+			if aligned != "" && version.ParseTag(aligned).Scheme != version.SchemeUnknown {
+				rTag = aligned
+			}
 		}
 		// 严禁出现起止相同的版本号（如 2 -> 2）或回退成浮动标签自身
 		if rb != "" {
 			if rb == curDisplay || (rb == in.Ref.Tag && (curDisplay == "" || curDisplay == in.Ref.Tag || curDisplay != in.Ref.Tag)) {
 				rb = ""
+				rTag = ""
 			}
 		}
-		return rb
+		return rb, rTag
 	}
 
-	applyDigestVersions := func(remoteBest string) {
+	applyDigestVersions := func(remoteBest, remoteResolvedTag string) {
+		out.TargetResolvedTag = remoteResolvedTag
 		if remoteBest == "" && curTag.Scheme != version.SchemeUnknown && curTag.Precision >= 3 {
 			out.CurrentVersion = formatTagWithHash(in.Ref.Tag, localHash)
 			out.TargetVersion = formatTagWithHash(in.Ref.Tag, remoteHash)
@@ -349,6 +416,7 @@ func Evaluate(in Input) Output {
 			out.Category = CategoryCaution
 			out.Reason = dbReason
 			out.TargetVersion = latestInSeries.Raw
+			out.TargetResolvedTag = latestInSeries.Raw
 			out.TargetRef = in.Ref.WithTag(latestInSeries.Raw)
 			if latestInEntry != nil {
 				out.TargetDigest = latestInEntry.RepoDigest
@@ -365,8 +433,8 @@ func Evaluate(in Input) Output {
 			out.Kind = KindDigestUpdate
 			out.Category = CategoryCaution
 			out.Reason = dbReason
-			remoteBest := resolveRemoteBest()
-			applyDigestVersions(remoteBest)
+			remoteBest, remoteResolvedTag := resolveRemoteBest()
+			applyDigestVersions(remoteBest, remoteResolvedTag)
 			out.TargetRef = in.Ref.WithTag(in.Ref.Tag)
 			out.TargetDigest = firstNonEmpty(remoteRepoDigest, remoteConfigDigest)
 			out.TargetTags = in.RemoteMatchedTags
@@ -394,6 +462,7 @@ func Evaluate(in Input) Output {
 	if curTag.Scheme != version.SchemeUnknown && curTag.Precision >= 3 && latestOverall != nil {
 		out.Kind = KindVersionUpdate
 		out.TargetVersion = latestOverall.Raw
+		out.TargetResolvedTag = latestOverall.Raw
 		out.TargetRef = in.Ref.WithTag(latestOverall.Raw)
 		if latestOverEntry != nil {
 			out.TargetDigest = latestOverEntry.RepoDigest
@@ -417,8 +486,8 @@ func Evaluate(in Input) Output {
 	if digestChanged {
 		out.Kind = KindDigestUpdate
 		out.Category = CategoryNormal
-		remoteBest := resolveRemoteBest()
-		applyDigestVersions(remoteBest)
+		remoteBest, remoteResolvedTag := resolveRemoteBest()
+		applyDigestVersions(remoteBest, remoteResolvedTag)
 		if remoteBest == "" && curTag.Scheme != version.SchemeUnknown && curTag.Precision >= 3 {
 			out.Reason = "republished"
 			out.ReasonText = i18n.FormatReason(lang, out.Reason, "", out.CurrentVersion, out.TargetVersion)
@@ -437,6 +506,7 @@ func Evaluate(in Input) Output {
 	if curTag.Scheme != version.SchemeUnknown && latestOverall != nil {
 		out.Kind = KindVersionUpdate
 		out.TargetVersion = latestOverall.Raw
+		out.TargetResolvedTag = latestOverall.Raw
 		out.TargetRef = in.Ref.WithTag(latestOverall.Raw)
 		if latestOverEntry != nil {
 			out.TargetDigest = latestOverEntry.RepoDigest

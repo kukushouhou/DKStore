@@ -5,6 +5,7 @@ import {
   Card,
   Collapse,
   Descriptions,
+  Dropdown,
   Empty,
   Flex,
   Modal,
@@ -13,11 +14,20 @@ import {
   Space,
   Tag,
   Timeline,
+  Tooltip,
   Typography,
   message,
   theme,
+  type MenuProps,
 } from 'antd'
-import { ArrowRightOutlined, RollbackOutlined } from '@ant-design/icons'
+import {
+  ArrowRightOutlined,
+  ClearOutlined,
+  DeleteOutlined,
+  DownOutlined,
+  ExclamationCircleFilled,
+  RollbackOutlined,
+} from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, showApiError, type UpdateJobItem } from '../api/client'
 import { useI18n } from '../i18n'
@@ -33,6 +43,8 @@ export default function HistoryPage() {
   const [rollbackRef, setRollbackRef] = useState('')
   const [dataWarning, setDataWarning] = useState('')
   const [rollingBack, setRollingBack] = useState(false)
+  const [clearing, setClearing] = useState(false)
+  const [clearAllModalOpen, setClearAllModalOpen] = useState(false)
 
   const updatesQuery = useQuery({
     queryKey: ['updates', locale],
@@ -43,6 +55,11 @@ export default function HistoryPage() {
 
   const updateItems = updatesQuery.data?.items ?? []
   const scanItems = runsQuery.data?.items ?? []
+
+  const failedCount = updateItems.filter((j) => j.status === 'failed').length
+  const clearableCount = updateItems.filter(
+    (j) => j.status === 'succeeded' || j.status === 'failed',
+  ).length
 
   const triggerLabel = (tr: string) => {
     if (tr === 'manual') return t.history.triggerManual
@@ -102,20 +119,112 @@ export default function HistoryPage() {
     }
   }
 
+  const onClearFailed = async () => {
+    setClearing(true)
+    try {
+      const res = await api.clearUpdates('failed')
+      useUIStore.getState().clearJobsByScope('failed')
+      await qc.invalidateQueries({ queryKey: ['updates'] })
+      message.success(
+        t.history.clearFailedDone.replace('{count}', String(res.deleted ?? failedCount)),
+      )
+    } catch (e) {
+      showApiError(e)
+    } finally {
+      setClearing(false)
+    }
+  }
+
+  const onConfirmClearAll = async () => {
+    setClearing(true)
+    try {
+      await api.clearUpdates('all')
+      useUIStore.getState().clearJobsByScope('all')
+      setClearAllModalOpen(false)
+      await qc.invalidateQueries({ queryKey: ['updates'] })
+      message.success(t.history.clearAllDone)
+    } catch (e) {
+      showApiError(e)
+    } finally {
+      setClearing(false)
+    }
+  }
+
+  const clearMenuItems: MenuProps['items'] = [
+    ...(failedCount > 0
+      ? [
+          {
+            key: 'failed',
+            icon: <ClearOutlined />,
+            label: (
+              <Flex align="center" justify="space-between" gap={16}>
+                <span>{t.history.clearFailedItem}</span>
+                <Tag
+                  color="error"
+                  style={{ margin: 0, borderRadius: 10, paddingInline: 6, lineHeight: '18px' }}
+                >
+                  {failedCount}
+                </Tag>
+              </Flex>
+            ),
+            onClick: () => void onClearFailed(),
+          },
+          { type: 'divider' as const },
+        ]
+      : []),
+    {
+      key: 'all',
+      danger: true,
+      icon: <DeleteOutlined />,
+      label: t.history.clearAllItem,
+      onClick: () => setClearAllModalOpen(true),
+    },
+  ]
+
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       <Flex justify="space-between" align="center" wrap gap={12}>
         <Typography.Title level={3} style={{ margin: 0 }}>
           {t.history.title}
         </Typography.Title>
-        <Segmented
-          value={tab}
-          onChange={(v) => setTab(v as 'updates' | 'scans')}
-          options={[
-            { label: t.history.tabUpdates, value: 'updates' },
-            { label: t.history.tabChecks, value: 'scans' },
-          ]}
-        />
+        <Space size={10} wrap>
+          {tab === 'updates' && clearableCount > 0 && (
+            <Dropdown
+              trigger={['click', 'hover']}
+              placement="bottomRight"
+              menu={{ items: clearMenuItems }}
+            >
+              <Button loading={clearing}>
+                <Space size={6}>
+                  <span>{t.history.clearMenuBtn}</span>
+                  {failedCount > 0 && (
+                    <Tag
+                      color="error"
+                      style={{
+                        margin: 0,
+                        paddingInline: 6,
+                        lineHeight: '18px',
+                        borderRadius: 10,
+                        fontSize: token.fontSizeSM,
+                      }}
+                    >
+                      {failedCount}
+                    </Tag>
+                  )}
+                  <DownOutlined style={{ fontSize: 11, color: token.colorTextSecondary }} />
+                </Space>
+              </Button>
+            </Dropdown>
+          )}
+          <Segmented
+            value={tab}
+            onChange={(v) => setTab(v as 'updates' | 'scans')}
+            options={[
+              { label: t.history.tabUpdates, value: 'updates' },
+              { label: t.history.tabChecks, value: 'scans' },
+            ]}
+          />
+        </Space>
       </Flex>
 
       {tab === 'updates' ? (
@@ -153,13 +262,9 @@ export default function HistoryPage() {
                       >
                         {t.home.viewLogs}
                       </Button>
-                      {job.kind === 'upgrade' && job.status === 'succeeded' && (
-                        <>
-                          {!job.rollbackEligible && job.rollbackReasonText && (
-                            <Tag color="default">
-                              {t.history.rollbackUnavailable}: {job.rollbackReasonText}
-                            </Tag>
-                          )}
+                      {job.kind === 'upgrade' &&
+                        job.status === 'succeeded' &&
+                        (job.rollbackEligible ? (
                           <Button
                             size="small"
                             icon={<RollbackOutlined />}
@@ -168,8 +273,23 @@ export default function HistoryPage() {
                           >
                             {t.history.verifyRollbackBtn}
                           </Button>
-                        </>
-                      )}
+                        ) : (
+                          <Tooltip
+                            title={job.rollbackReasonText || t.history.rollbackUnavailable}
+                            placement="topRight"
+                          >
+                            <span style={{ display: 'inline-block', cursor: 'not-allowed' }}>
+                              <Button
+                                size="small"
+                                icon={<RollbackOutlined />}
+                                disabled
+                                style={{ pointerEvents: 'none' }}
+                              >
+                                {t.history.verifyRollbackBtn}
+                              </Button>
+                            </span>
+                          </Tooltip>
+                        ))}
                     </Space>
                   </Flex>
 
@@ -346,6 +466,26 @@ export default function HistoryPage() {
           </Descriptions>
           {dataWarning && <Alert type="warning" showIcon title={dataWarning} />}
         </Space>
+      </Modal>
+
+      <Modal
+        open={clearAllModalOpen}
+        title={
+          <Space size={8}>
+            <ExclamationCircleFilled style={{ color: token.colorWarning }} />
+            <span>{t.history.clearAllModalTitle}</span>
+          </Space>
+        }
+        okText={t.history.clearAllConfirmBtn}
+        okButtonProps={{ danger: true }}
+        cancelText={t.ignoreModal.cancel}
+        confirmLoading={clearing}
+        onOk={onConfirmClearAll}
+        onCancel={() => setClearAllModalOpen(false)}
+      >
+        <Typography.Paragraph style={{ marginBottom: 0 }}>
+          {t.history.clearAllModalDesc}
+        </Typography.Paragraph>
       </Modal>
     </Space>
   )

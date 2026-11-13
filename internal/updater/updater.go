@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kukushouhou/DKStore/internal/classify"
 	"github.com/kukushouhou/DKStore/internal/host"
 	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/ignore"
@@ -44,10 +45,12 @@ type Job struct {
 	OldImageID         string                `json:"oldImageId,omitempty"`
 	OldRepoDigest      string                `json:"oldRepoDigest,omitempty"`
 	OldVersion         string                `json:"oldVersion,omitempty"`
+	OldResolvedTag     string                `json:"oldResolvedTag,omitempty"`
 	OldMatchedTags     []string              `json:"oldMatchedTags,omitempty"`
 	TargetImageRef     string                `json:"targetImageRef"`
 	TargetRepoDigest   string                `json:"targetRepoDigest,omitempty"`
 	TargetVersion      string                `json:"targetVersion,omitempty"`
+	TargetResolvedTag  string                `json:"targetResolvedTag,omitempty"`
 	TargetMatchedTags  []string              `json:"targetMatchedTags,omitempty"`
 	NewImageID         string                `json:"newImageId,omitempty"`
 	NewRepoDigest      string                `json:"newRepoDigest,omitempty"`
@@ -143,6 +146,7 @@ func New(
 		subscribers: make(map[chan Job]struct{}),
 	}
 	s.recoverInterruptedJobs()
+	s.backfillLegacyResolvedTags()
 	return s
 }
 
@@ -331,21 +335,24 @@ func (s *Service) prepareUpgradeJob(ctx context.Context, item UpdateItemRequest,
 	var (
 		appKey, appName, hostID, hostName, svcName, source      string
 		oldImageRef, oldImageID, oldRepoDigest, svcPlat         string
-		curTagsRaw, targetRef, targetDigest, targetVer          string
-		targetTagsRaw, curVer                                   string
+		curTagsRaw, labelsRaw, targetRef, targetDigest          string
+		targetVer, targetTagsRaw, curVer                        string
+		curResolvedTag, fTargetResolvedTag                      string
 	)
 	err := s.st.DB.QueryRowContext(ctx, `
 		SELECT s.app_key, a.name, a.host_id, h.name, s.name, a.source,
-		       COALESCE(s.image_ref,''), COALESCE(s.image_id,''), COALESCE(s.repo_digest,''), COALESCE(s.platform,''), COALESCE(s.current_tags_json,''),
-		       COALESCE(f.current_version,''), COALESCE(f.target_ref,''), COALESCE(f.target_digest,''), COALESCE(f.target_version,''), COALESCE(f.target_tags_json,'')
+		       COALESCE(s.image_ref,''), COALESCE(s.image_id,''), COALESCE(s.repo_digest,''), COALESCE(s.platform,''), COALESCE(s.current_tags_json,''), COALESCE(s.labels_json,''),
+		       COALESCE(f.current_version,''), COALESCE(f.current_resolved_tag,''),
+		       COALESCE(f.target_ref,''), COALESCE(f.target_digest,''), COALESCE(f.target_version,''), COALESCE(f.target_resolved_tag,''), COALESCE(f.target_tags_json,'')
 		FROM service s
 		JOIN app a ON s.app_key = a.key
 		JOIN host h ON a.host_id = h.id
 		LEFT JOIN finding f ON f.service_key = s.key
 		WHERE s.key = ? AND s.gone_at IS NULL`, serviceKey).Scan(
 		&appKey, &appName, &hostID, &hostName, &svcName, &source,
-		&oldImageRef, &oldImageID, &oldRepoDigest, &svcPlat, &curTagsRaw,
-		&curVer, &targetRef, &targetDigest, &targetVer, &targetTagsRaw,
+		&oldImageRef, &oldImageID, &oldRepoDigest, &svcPlat, &curTagsRaw, &labelsRaw,
+		&curVer, &curResolvedTag,
+		&targetRef, &targetDigest, &targetVer, &fTargetResolvedTag, &targetTagsRaw,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		cleanupPlaceholder()
@@ -364,6 +371,8 @@ func (s *Service) prepareUpgradeJob(ctx context.Context, item UpdateItemRequest,
 	var oldMatched, targetMatched []string
 	_ = json.Unmarshal([]byte(curTagsRaw), &oldMatched)
 	_ = json.Unmarshal([]byte(targetTagsRaw), &targetMatched)
+
+	targetResolvedTag := fTargetResolvedTag
 
 	// 若用户显式指定了自定义目标标签，先校验仓库中该标签存在并获取最新摘要
 	if item.TargetTag != "" {
@@ -400,6 +409,11 @@ func (s *Service) prepareUpgradeJob(ctx context.Context, item UpdateItemRequest,
 			targetRef = customRefStr
 		}
 		targetVer = item.TargetTag
+		if version.ParseTag(item.TargetTag).Scheme != version.SchemeUnknown {
+			targetResolvedTag = item.TargetTag
+		} else {
+			targetResolvedTag = ""
+		}
 		targetMatched = []string{item.TargetTag}
 	} else {
 		if targetRef == "" {
@@ -410,28 +424,36 @@ func (s *Service) prepareUpgradeJob(ctx context.Context, item UpdateItemRequest,
 				targetRef = replaceRefTag(oldImageRef, newTag)
 			}
 		}
+		if targetResolvedTag == "" {
+			targetResolvedTag = resolveStructuredExactTag(targetRef, targetMatched, "")
+		}
+	}
+
+	oldResolvedTag := strings.TrimSpace(curResolvedTag)
+	if oldResolvedTag == "" {
+		oldResolvedTag = resolveStructuredExactTag(oldImageRef, oldMatched, labelsRaw)
 	}
 
 	if curVer == "" {
 		if pr, err := version.ParseImageRef(oldImageRef); err == nil {
-			curVer = version.SelectBestDisplayTag(pr.Tag, oldMatched)
-			if curVer == "" && version.ParseTag(pr.Tag).Scheme != version.SchemeUnknown {
-				curVer = pr.Tag
+			if oldResolvedTag != "" {
+				curVer = version.FormatTagVersionDisplay(pr.Tag, oldResolvedTag, "")
+			} else {
+				curVer = version.SelectBestDisplayTag(pr.Tag, oldMatched)
+				if curVer == "" && version.ParseTag(pr.Tag).Scheme != version.SchemeUnknown {
+					curVer = pr.Tag
+				}
 			}
 		}
 	}
 
-	// 计算是否具备可验证回退条件（立项文档 §8.2 / A10 / A12）
+	// 直接基于结构化保存的精确旧版本标签判定可回退性（零展示字符串截取）
 	rollbackEligible := false
 	rollbackRef := ""
 	rollbackReason := ""
-	cleanCurForRollback := curVer
-	if base, _, ok := strings.Cut(cleanCurForRollback, " ("); ok {
-		cleanCurForRollback = strings.TrimSpace(base)
-	}
-	if cleanCurForRollback != "" && version.ParseTag(cleanCurForRollback).Scheme != version.SchemeUnknown {
+	if oldResolvedTag != "" && version.ParseTag(oldResolvedTag).Scheme != version.SchemeUnknown {
 		rollbackEligible = true
-		rollbackRef = replaceRefTag(oldImageRef, cleanCurForRollback)
+		rollbackRef = replaceRefTag(oldImageRef, oldResolvedTag)
 	} else {
 		rollbackReason = "no_exact_version_tag"
 	}
@@ -454,10 +476,12 @@ func (s *Service) prepareUpgradeJob(ctx context.Context, item UpdateItemRequest,
 		OldImageID:         oldImageID,
 		OldRepoDigest:      oldRepoDigest,
 		OldVersion:         curVer,
+		OldResolvedTag:     oldResolvedTag,
 		OldMatchedTags:     oldMatched,
 		TargetImageRef:     targetRef,
 		TargetRepoDigest:   targetDigest,
 		TargetVersion:      targetVer,
+		TargetResolvedTag:  targetResolvedTag,
 		TargetMatchedTags:  targetMatched,
 		RollbackEligible:   rollbackEligible,
 		RollbackRef:        rollbackRef,
@@ -594,26 +618,28 @@ func (s *Service) StartComposeUpdate(ctx context.Context, req ComposeUpdateReque
 	}
 
 	// 查询代表服务元数据（若前端指定了 serviceKey 则取该服务，否则取该项目下第一个服务）
-	var svcName, oldImageRef, oldImageID, oldRepoDigest, curVer, prevFindingVer string
+	var svcName, oldImageRef, oldImageID, oldRepoDigest, curTagsRaw, labelsRaw, curVer, curResolvedTag, prevFindingVer string
 	if svcKey != "" {
 		_ = s.st.DB.QueryRowContext(ctx, `
 			SELECT s.name, COALESCE(s.image_ref,''), COALESCE(s.image_id,''), COALESCE(s.repo_digest,''),
-			       COALESCE(f.current_version,''), COALESCE(f.target_version,'')
+			       COALESCE(s.current_tags_json,''), COALESCE(s.labels_json,''),
+			       COALESCE(f.current_version,''), COALESCE(f.current_resolved_tag,''), COALESCE(f.target_version,'')
 			FROM service s
 			LEFT JOIN finding f ON f.service_key = s.key
 			WHERE s.key=? AND s.app_key=? AND s.gone_at IS NULL`, svcKey, appKey).Scan(
-			&svcName, &oldImageRef, &oldImageID, &oldRepoDigest, &curVer, &prevFindingVer,
+			&svcName, &oldImageRef, &oldImageID, &oldRepoDigest, &curTagsRaw, &labelsRaw, &curVer, &curResolvedTag, &prevFindingVer,
 		)
 	}
 	if svcName == "" {
 		_ = s.st.DB.QueryRowContext(ctx, `
 			SELECT s.key, s.name, COALESCE(s.image_ref,''), COALESCE(s.image_id,''), COALESCE(s.repo_digest,''),
-			       COALESCE(f.current_version,''), COALESCE(f.target_version,'')
+			       COALESCE(s.current_tags_json,''), COALESCE(s.labels_json,''),
+			       COALESCE(f.current_version,''), COALESCE(f.current_resolved_tag,''), COALESCE(f.target_version,'')
 			FROM service s
 			LEFT JOIN finding f ON f.service_key = s.key
 			WHERE s.app_key=? AND s.gone_at IS NULL
 			ORDER BY s.name ASC LIMIT 1`, appKey).Scan(
-			&svcKey, &svcName, &oldImageRef, &oldImageID, &oldRepoDigest, &curVer, &prevFindingVer,
+			&svcKey, &svcName, &oldImageRef, &oldImageID, &oldRepoDigest, &curTagsRaw, &labelsRaw, &curVer, &curResolvedTag, &prevFindingVer,
 		)
 	}
 	if svcKey == "" {
@@ -622,6 +648,9 @@ func (s *Service) StartComposeUpdate(ctx context.Context, req ComposeUpdateReque
 	if svcName == "" {
 		svcName = appName
 	}
+
+	var oldMatched []string
+	_ = json.Unmarshal([]byte(curTagsRaw), &oldMatched)
 
 	targetRef := svcImages[svcName]
 	if targetRef == "" {
@@ -634,6 +663,10 @@ func (s *Service) StartComposeUpdate(ctx context.Context, req ComposeUpdateReque
 		targetRef = oldImageRef
 	}
 	_, targetVer := splitRefAndTag(targetRef)
+	targetResolvedTag := ""
+	if version.ParseTag(targetVer).Scheme != version.SchemeUnknown {
+		targetResolvedTag = targetVer
+	}
 
 	s.mu.Lock()
 	if active, ok := s.activeJobs[svcKey]; ok && (active.Status == "running" || active.Status == "queued") {
@@ -663,6 +696,20 @@ func (s *Service) StartComposeUpdate(ctx context.Context, req ComposeUpdateReque
 		}
 	}
 
+	oldResolvedTag := strings.TrimSpace(curResolvedTag)
+	if oldResolvedTag == "" {
+		oldResolvedTag = resolveStructuredExactTag(oldImageRef, oldMatched, labelsRaw)
+	}
+	rollbackEligible := false
+	rollbackRef := ""
+	rollbackReason := ""
+	if len(svcImages) <= 1 && oldImageRef != "" && oldResolvedTag != "" && version.ParseTag(oldResolvedTag).Scheme != version.SchemeUnknown {
+		rollbackEligible = true
+		rollbackRef = replaceRefTag(oldImageRef, oldResolvedTag)
+	} else {
+		rollbackReason = "no_exact_version_tag"
+	}
+
 	now := time.Now().Unix()
 	job := Job{
 		ID:                 newJobID(),
@@ -681,11 +728,15 @@ func (s *Service) StartComposeUpdate(ctx context.Context, req ComposeUpdateReque
 		OldImageID:         oldImageID,
 		OldRepoDigest:      oldRepoDigest,
 		OldVersion:         curVer,
+		OldResolvedTag:     oldResolvedTag,
+		OldMatchedTags:     oldMatched,
 		TargetImageRef:     targetRef,
 		TargetVersion:      targetVer,
-		RollbackEligible:   false,
-		RollbackReason:     "no_exact_version_tag",
-		RollbackReasonText: i18n.FormatRollbackReason(lang, "no_exact_version_tag"),
+		TargetResolvedTag:  targetResolvedTag,
+		RollbackEligible:   rollbackEligible,
+		RollbackRef:        rollbackRef,
+		RollbackReason:     rollbackReason,
+		RollbackReasonText: i18n.FormatRollbackReason(lang, rollbackReason),
 		StartedAt:          now,
 	}
 	initHeader := formatJobHeader(job)
@@ -1253,15 +1304,15 @@ func (s *Service) finalizeSucceededServiceJob(j *Job, tracker *jobProgressTracke
 		res.ComposePath, res.ComposeSHA256, j.Logs, finished, j.ID,
 	)
 
-	// 同步更新库存与 finding 状态为已是最新（resolved）
-	newDisplayVer := j.TargetVersion
-	if base, _, ok := strings.Cut(newDisplayVer, " ("); ok && strings.TrimSpace(base) != "" {
-		newDisplayVer = strings.TrimSpace(base)
+	// 同步更新库存与 finding 状态为已是最新（resolved），保留真实解析标签供后续升级回退直接使用
+	_, cfgTag := splitRefAndTag(j.TargetImageRef)
+	newResolvedTag := j.TargetResolvedTag
+	if newResolvedTag == "" {
+		newResolvedTag = resolveStructuredExactTag(j.TargetImageRef, j.TargetMatchedTags, "")
 	}
-	if newDisplayVer == "" {
-		if _, t := splitRefAndTag(j.TargetImageRef); t != "" {
-			newDisplayVer = t
-		}
+	newDisplayVer := j.TargetVersion
+	if newDisplayVer == "" || newDisplayVer == "@new_digest" {
+		newDisplayVer = version.FormatTagVersionDisplay(cfgTag, newResolvedTag, "")
 	}
 	targetTagsJSON, _ := json.Marshal(j.TargetMatchedTags)
 	_, _ = s.st.DB.ExecContext(fCtx, `
@@ -1273,9 +1324,10 @@ func (s *Service) finalizeSucceededServiceJob(j *Job, tracker *jobProgressTracke
 	)
 	_, _ = s.st.DB.ExecContext(fCtx, `
 		UPDATE finding
-		SET kind='none', current_version=?, target_version='', target_ref='', target_digest='', checked_at=?
+		SET kind='none', current_version=?, current_resolved_tag=?,
+		    target_version='', target_resolved_tag='', target_ref='', target_digest='', checked_at=?
 		WHERE service_key=?`,
-		newDisplayVer, finished, j.ServiceKey,
+		newDisplayVer, newResolvedTag, finished, j.ServiceKey,
 	)
 	s.broadcast(*j)
 }
@@ -1321,17 +1373,151 @@ func (s *Service) insertJob(ctx context.Context, j Job) error {
 		INSERT INTO update_job(
 			id, kind, host_id, host_name, app_key, app_name, service_key, service_name, source,
 			status, phase, progress_json,
-			old_image_ref, old_image_id, old_repo_digest, old_version, old_matched_tags_json,
-			target_image_ref, target_repo_digest, target_version, target_matched_tags_json,
+			old_image_ref, old_image_id, old_repo_digest, old_version, old_resolved_tag, old_matched_tags_json,
+			target_image_ref, target_repo_digest, target_version, target_resolved_tag, target_matched_tags_json,
 			rollback_eligible, rollback_ref, rollback_reason, logs_text, started_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		j.ID, j.Kind, j.HostID, j.HostName, j.AppKey, j.AppName, j.ServiceKey, j.ServiceName, j.Source,
 		j.Status, j.Phase, string(progBytes),
-		j.OldImageRef, j.OldImageID, j.OldRepoDigest, j.OldVersion, string(oldTags),
-		j.TargetImageRef, j.TargetRepoDigest, j.TargetVersion, string(tgtTags),
+		j.OldImageRef, j.OldImageID, j.OldRepoDigest, j.OldVersion, j.OldResolvedTag, string(oldTags),
+		j.TargetImageRef, j.TargetRepoDigest, j.TargetVersion, j.TargetResolvedTag, string(tgtTags),
 		eligibleInt, j.RollbackRef, j.RollbackReason, j.Logs, j.StartedAt,
 	)
 	return err
+}
+
+func resolveStructuredExactTag(imageRef string, matchedTags []string, labelsJSON string) string {
+	pr, err := version.ParseImageRef(imageRef)
+	if err == nil {
+		if best := version.SelectBestDisplayTag(pr.Tag, matchedTags); best != "" && version.ParseTag(best).Scheme != version.SchemeUnknown {
+			return best
+		}
+	}
+	if labelsJSON != "" {
+		var labels map[string]string
+		if json.Unmarshal([]byte(labelsJSON), &labels) == nil {
+			if lv := classify.ExtractVersionLabel(labels); lv != "" && version.ParseTag(lv).Scheme != version.SchemeUnknown {
+				return lv
+			}
+		}
+	}
+	if err == nil && pr.Tag != "" && version.ParseTag(pr.Tag).Scheme != version.SchemeUnknown {
+		return pr.Tag
+	}
+	return ""
+}
+
+// backfillLegacyResolvedTags 在升级到 0006 迁移后一次性补齐旧库中尚未写入 resolved_tag 列的记录，
+// 修复此前浮动标签已识别具体版本号（如 latest (3.8.3)）却被标记为不可回退的历史数据。
+func (s *Service) backfillLegacyResolvedTags() {
+	if s.st == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), finalizeTimeout)
+	defer cancel()
+
+	fRows, err := s.st.DB.QueryContext(ctx, `
+		SELECT f.service_key, COALESCE(s.image_ref,''), COALESCE(s.current_tags_json,''), COALESCE(s.labels_json,''),
+		       COALESCE(f.current_version,''), COALESCE(f.target_version,''), COALESCE(f.target_tags_json,'')
+		FROM finding f
+		LEFT JOIN service s ON s.key = f.service_key
+		WHERE f.current_resolved_tag IS NULL`)
+	if err == nil {
+		type fPatch struct {
+			key, curTag, tgtTag string
+		}
+		var patches []fPatch
+		for fRows.Next() {
+			var svcKey, imgRef, curTagsRaw, labelsRaw, curVer, tgtVer, tgtTagsRaw string
+			if fRows.Scan(&svcKey, &imgRef, &curTagsRaw, &labelsRaw, &curVer, &tgtVer, &tgtTagsRaw) == nil {
+				var curMatched, tgtMatched []string
+				_ = json.Unmarshal([]byte(curTagsRaw), &curMatched)
+				_ = json.Unmarshal([]byte(tgtTagsRaw), &tgtMatched)
+				curTag := resolveStructuredExactTag(imgRef, curMatched, labelsRaw)
+				if curTag == "" {
+					if uw := version.UnwrapDisplayVersion(curVer); uw != "" && version.ParseTag(uw).Scheme != version.SchemeUnknown {
+						curTag = uw
+					}
+				}
+				tgtTag := resolveStructuredExactTag(imgRef, tgtMatched, "")
+				if tgtTag == "" {
+					if uw := version.UnwrapDisplayVersion(tgtVer); uw != "" && version.ParseTag(uw).Scheme != version.SchemeUnknown {
+						tgtTag = uw
+					}
+				}
+				patches = append(patches, fPatch{key: svcKey, curTag: curTag, tgtTag: tgtTag})
+			}
+		}
+		fRows.Close()
+		for _, p := range patches {
+			_, _ = s.st.DB.ExecContext(ctx, `
+				UPDATE finding SET current_resolved_tag=?, target_resolved_tag=? WHERE service_key=?`,
+				p.curTag, p.tgtTag, p.key)
+		}
+	}
+
+	jRows, err := s.st.DB.QueryContext(ctx, `
+		SELECT id, source, old_image_ref, COALESCE(old_version,''), COALESCE(old_matched_tags_json,''),
+		       target_image_ref, COALESCE(target_version,''), COALESCE(target_matched_tags_json,''),
+		       rollback_eligible, COALESCE(rollback_ref,''), COALESCE(rollback_reason,'')
+		FROM update_job
+		WHERE kind='upgrade' AND old_resolved_tag IS NULL`)
+	if err != nil {
+		return
+	}
+	type jPatch struct {
+		id, oldTag, tgtTag, rbRef, rbReason string
+		eligible                            int
+	}
+	var jPatches []jPatch
+	for jRows.Next() {
+		var (
+			id, source, oldRef, oldVer, oldTagsRaw string
+			tgtRef, tgtVer, tgtTagsRaw             string
+			eligible                               int
+			rbRef, rbReason                        string
+		)
+		if jRows.Scan(&id, &source, &oldRef, &oldVer, &oldTagsRaw, &tgtRef, &tgtVer, &tgtTagsRaw, &eligible, &rbRef, &rbReason) != nil {
+			continue
+		}
+		var oldMatched, tgtMatched []string
+		_ = json.Unmarshal([]byte(oldTagsRaw), &oldMatched)
+		_ = json.Unmarshal([]byte(tgtTagsRaw), &tgtMatched)
+
+		oldTag := resolveStructuredExactTag(oldRef, oldMatched, "")
+		if oldTag == "" {
+			if uw := version.UnwrapDisplayVersion(oldVer); uw != "" && version.ParseTag(uw).Scheme != version.SchemeUnknown {
+				oldTag = uw
+			}
+		}
+		tgtTag := resolveStructuredExactTag(tgtRef, tgtMatched, "")
+		if tgtTag == "" {
+			if uw := version.UnwrapDisplayVersion(tgtVer); uw != "" && version.ParseTag(uw).Scheme != version.SchemeUnknown {
+				tgtTag = uw
+			}
+		}
+		if oldTag != "" && source != string(platform.SourceVendorManaged) && eligible == 0 && (rbReason == "" || rbReason == "no_exact_version_tag") {
+			eligible = 1
+			rbRef = replaceRefTag(oldRef, oldTag)
+			rbReason = ""
+		}
+		jPatches = append(jPatches, jPatch{
+			id:       id,
+			oldTag:   oldTag,
+			tgtTag:   tgtTag,
+			eligible: eligible,
+			rbRef:    rbRef,
+			rbReason: rbReason,
+		})
+	}
+	jRows.Close()
+	for _, p := range jPatches {
+		_, _ = s.st.DB.ExecContext(ctx, `
+			UPDATE update_job
+			SET old_resolved_tag=?, target_resolved_tag=?, rollback_eligible=?, rollback_ref=?, rollback_reason=?
+			WHERE id=?`,
+			p.oldTag, p.tgtTag, p.eligible, p.rbRef, p.rbReason, p.id)
+	}
 }
 
 func (s *Service) updateJobProgressAndLogs(ctx context.Context, id string, p platform.PullProgress, logs string) {

@@ -116,6 +116,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/v1/updates", s.requireAuth(s.handleListUpdates))
 	mux.HandleFunc("POST /api/v1/updates", s.requireAuth(s.handleStartUpdates))
+	mux.HandleFunc("DELETE /api/v1/updates", s.requireAuth(s.handleClearUpdates))
 	mux.HandleFunc("GET /api/v1/updates/{id}", s.requireAuth(s.handleGetUpdateJob))
 	mux.HandleFunc("GET /api/v1/updates/{id}/rollback-check", s.requireAuth(s.handleVerifyRollback))
 	mux.HandleFunc("POST /api/v1/updates/{id}/rollback", s.requireAuth(s.handleExecuteRollback))
@@ -619,6 +620,24 @@ func (s *Server) handleListUpdates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleClearUpdates(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
+	if s.d.Updater == nil {
+		writeError(w, lang, http.StatusInternalServerError, "updater_unavailable", "")
+		return
+	}
+	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
+	if scope == "" {
+		scope = "failed"
+	}
+	deleted, err := s.d.Updater.ClearJobs(r.Context(), scope)
+	if err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": deleted})
 }
 
 func (s *Server) handleStartUpdates(w http.ResponseWriter, r *http.Request) {

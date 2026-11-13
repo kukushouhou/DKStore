@@ -35,6 +35,9 @@ func (s *Service) saveFinding(
 	if out.CurrentVersion == "" {
 		out.CurrentVersion = fallbackCurrentVersion(svc.ImageRef, curTags, svc.LabelsJSON)
 	}
+	if out.CurrentResolvedTag == "" {
+		out.CurrentResolvedTag = fallbackCurrentResolvedTag(svc.ImageRef, curTags, svc.LabelsJSON)
+	}
 
 	var prevKind, prevTargetDigest, prevTargetVer string
 	var firstSeen int64
@@ -80,16 +83,19 @@ func (s *Service) saveFinding(
 
 	_, _ = s.st.DB.ExecContext(ctx, `
 		INSERT INTO finding(
-			service_key, kind, category, reason, current_version, target_version,
+			service_key, kind, category, reason, current_version, current_resolved_tag,
+			target_version, target_resolved_tag,
 			target_ref, target_digest, target_tags_json, hint, error_kind, error_msg,
 			links_json, first_seen_at, checked_at, notified_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(service_key) DO UPDATE SET
 			kind=excluded.kind,
 			category=excluded.category,
 			reason=excluded.reason,
 			current_version=excluded.current_version,
+			current_resolved_tag=excluded.current_resolved_tag,
 			target_version=excluded.target_version,
+			target_resolved_tag=excluded.target_resolved_tag,
 			target_ref=excluded.target_ref,
 			target_digest=excluded.target_digest,
 			target_tags_json=excluded.target_tags_json,
@@ -101,7 +107,9 @@ func (s *Service) saveFinding(
 			checked_at=excluded.checked_at,
 			notified_at=excluded.notified_at`,
 		svc.Key, string(out.Kind), string(out.Category), reasonStored,
-		out.CurrentVersion, out.TargetVersion, out.TargetRef, out.TargetDigest,
+		out.CurrentVersion, out.CurrentResolvedTag,
+		out.TargetVersion, out.TargetResolvedTag,
+		out.TargetRef, out.TargetDigest,
 		string(targetTagsJSON), out.Hint, errKind, errMsg, string(linksJSON),
 		firstSeen, now, notifiedAt,
 	)
@@ -253,6 +261,27 @@ func fallbackCurrentVersion(imageRef string, curTags []string, labelsJSON string
 		return pr.Digest
 	}
 	return imageRef
+}
+
+func fallbackCurrentResolvedTag(imageRef string, curTags []string, labelsJSON string) string {
+	var labels map[string]string
+	if labelsJSON != "" {
+		_ = json.Unmarshal([]byte(labelsJSON), &labels)
+	}
+	labelVer := classify.ExtractVersionLabel(labels)
+	pr, err := version.ParseImageRef(imageRef)
+	if err == nil {
+		if best := version.SelectBestDisplayTag(pr.Tag, curTags); best != "" && version.ParseTag(best).Scheme != version.SchemeUnknown {
+			return best
+		}
+	}
+	if labelVer != "" && version.ParseTag(labelVer).Scheme != version.SchemeUnknown {
+		return labelVer
+	}
+	if err == nil && pr.Tag != "" && version.ParseTag(pr.Tag).Scheme != version.SchemeUnknown {
+		return pr.Tag
+	}
+	return ""
 }
 
 func resolveServiceRoleAndLinks(svcName, imageRef, storedReason string, storedLinks rules.RepoLink) (reasonCode, dbName, roleKind string, links rules.RepoLink) {

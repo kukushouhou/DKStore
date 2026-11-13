@@ -516,10 +516,12 @@ export interface UpdateJobItem {
   oldImageId?: string
   oldRepoDigest?: string
   oldVersion?: string
+  oldResolvedTag?: string
   oldMatchedTags?: string[]
   targetImageRef: string
   targetRepoDigest?: string
   targetVersion?: string
+  targetResolvedTag?: string
   targetMatchedTags?: string[]
   newImageId?: string
   newRepoDigest?: string
@@ -664,6 +666,10 @@ export const api = {
     }),
 
   listUpdates: () => request<{ items: UpdateJobItem[] }>('/updates'),
+  clearUpdates: (scope: 'failed' | 'all') =>
+    request<{ ok: boolean; deleted: number }>(`/updates?scope=${encodeURIComponent(scope)}`, {
+      method: 'DELETE',
+    }),
   getUpdateJob: (id: string) =>
     request<UpdateJobItem>(`/updates/${encodeURIComponent(id)}`),
   startUpdates: (payload: string[] | StartUpdatesPayload) =>
