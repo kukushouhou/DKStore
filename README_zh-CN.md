@@ -28,9 +28,11 @@ DKStore 是面向家庭 NAS、软路由（OpenWrt / iStoreOS）与 Linux 主机�
 ## 多平台打包与部署形态
 
 - **单文件二进制 / Docker 容器**：内嵌前端静态资源（`cmd/dkstore`），纯 Go SQLite 零外部依赖。
-- **群晖 DSM 7 SPK 套件工程**：[`packaging/synology/`](./packaging/synology)
-- **OpenWrt / iStoreOS IPK 与 LuCI 入口工程**：[`packaging/openwrt/`](./packaging/openwrt)
+- **群晖 DSM 7 SPK 套件**：[`packaging/synology/`](./packaging/synology)（`go run ./tools/build_spk.go`）
+- **飞牛 fnOS FPK 应用包**：[`packaging/fnos/`](./packaging/fnos)（`go run ./tools/build_fpk.go`）
+- **OpenWrt / iStoreOS LuCI 插件（`.ipk` / `.apk` / `.run`）**：[`packaging/openwrt/`](./packaging/openwrt)（`go run ./tools/build_openwrt.go`）
 - **Linux systemd 服务配置**：[`packaging/linux/dkstore.service`](./packaging/linux/dkstore.service)
+- **全平台统一发布构建器**：[`tools/build_release.go`](./tools/build_release.go)（`go run ./tools/build_release.go -version v0.2.0`）
 
 ## 开发构建
 

@@ -5,7 +5,7 @@
 //   2. .apk（适用于 OpenWrt 25.12+ 的 apk add --allow-untrusted）
 //   3. .run（适用于 iStoreOS「iStore 商店 → 手动安装」及全版本 OpenWrt 一键自解压安装）
 //
-// 用法：go run ./packaging/openwrt/build_openwrt.go
+// 用法：go run ./tools/build_openwrt.go [-version 0.2.0] [-bin-dir <optional_prebuilt_dir>]
 package main
 
 import (
@@ -16,6 +16,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -25,14 +26,12 @@ import (
 	"time"
 )
 
-const (
-	pkgVersion = "0.2.0"
-	pkgRelease = "1"
-)
+const pkgRelease = "1"
 
 type targetArch struct {
 	goarch    string
 	goarm     string
+	binKey    string // 预编译文件名后缀（amd64 / arm64 / armv7）
 	label     string // 文件名架构后缀
 	apkArch   string // OpenWrt 25.12 apk 架构名
 	unameGlob string // preinst uname -m 匹配模式
@@ -41,6 +40,11 @@ type targetArch struct {
 }
 
 func main() {
+	verFlag := flag.String("version", "", "版本号（如 0.2.0 或 v0.2.0）")
+	binDirFlag := flag.String("bin-dir", "", "可选预编译二进制目录")
+	flag.Parse()
+
+	ver := normalizeVer(*verFlag)
 	rootDir, err := os.Getwd()
 	if err != nil {
 		panic(err)
@@ -57,6 +61,7 @@ func main() {
 	targets := []targetArch{
 		{
 			goarch:    "amd64",
+			binKey:    "amd64",
 			label:     "x86_64",
 			apkArch:   "x86_64",
 			unameGlob: "x86_64|amd64",
@@ -65,6 +70,7 @@ func main() {
 		},
 		{
 			goarch:    "arm64",
+			binKey:    "arm64",
 			label:     "aarch64",
 			apkArch:   "aarch64",
 			unameGlob: "aarch64*|arm64*",
@@ -74,6 +80,7 @@ func main() {
 		{
 			goarch:    "arm",
 			goarm:     "7",
+			binKey:    "armv7",
 			label:     "arm",
 			apkArch:   "armhf",
 			unameGlob: "armv7*|arm*",
@@ -83,21 +90,33 @@ func main() {
 	}
 
 	for _, t := range targets {
-		if err := buildForTarget(rootDir, distDir, commit, t); err != nil {
+		if err := buildForTarget(rootDir, distDir, ver, commit, *binDirFlag, t); err != nil {
 			panic(err)
 		}
 	}
 }
 
-type pkgEntry struct {
-	path string // 不带前导斜杠，如 "usr/bin/dkstore"
-	mode int64
-	isDir bool
-	data []byte
+func normalizeVer(raw string) string {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		v = strings.TrimSpace(os.Getenv("DKSTORE_VERSION"))
+	}
+	v = strings.TrimPrefix(v, "v")
+	if v == "" {
+		v = "0.2.0"
+	}
+	return v
 }
 
-func buildForTarget(rootDir, distDir, commit string, t targetArch) error {
-	binBytes, err := compileLinuxBinary(rootDir, commit, t)
+type pkgEntry struct {
+	path  string
+	mode  int64
+	isDir bool
+	data  []byte
+}
+
+func buildForTarget(rootDir, distDir, ver, commit, binDir string, t targetArch) error {
+	binBytes, err := loadOrCompileLinuxBinary(rootDir, ver, commit, binDir, t)
 	if err != nil {
 		return err
 	}
@@ -184,10 +203,10 @@ func buildForTarget(rootDir, distDir, commit string, t targetArch) error {
 		installedBytes += int64(len(e.data))
 	}
 
-	// 1. 生成 .ipk（兼容所有 OpenWrt / iStoreOS / ImmortalWrt opkg 架构）
-	ipkName := fmt.Sprintf("luci-app-dkstore_%s-%s_%s.ipk", pkgVersion, pkgRelease, t.label)
+	// 1. .ipk
+	ipkName := fmt.Sprintf("luci-app-dkstore_%s-%s_%s.ipk", ver, pkgRelease, t.label)
 	ipkPath := filepath.Join(distDir, ipkName)
-	ipkBytes, err := buildIPK(entries, installedBytes, t)
+	ipkBytes, err := buildIPK(entries, installedBytes, ver, t)
 	if err != nil {
 		return err
 	}
@@ -196,11 +215,11 @@ func buildForTarget(rootDir, distDir, commit string, t targetArch) error {
 	}
 	fmt.Printf("Built IPK: %s\n", ipkPath)
 
-	// 2. 生成 OpenWrt 25.12+ APKv2 .apk 包
+	// 2. .apk
 	if t.buildAPK {
-		apkName := fmt.Sprintf("luci-app-dkstore-%s-r%s-%s.apk", pkgVersion, pkgRelease, t.label)
+		apkName := fmt.Sprintf("luci-app-dkstore-%s-r%s-%s.apk", ver, pkgRelease, t.label)
 		apkPath := filepath.Join(distDir, apkName)
-		apkBytes, err := buildAPKv2(entries, installedBytes, t)
+		apkBytes, err := buildAPKv2(entries, installedBytes, ver, t)
 		if err != nil {
 			return err
 		}
@@ -210,11 +229,11 @@ func buildForTarget(rootDir, distDir, commit string, t targetArch) error {
 		fmt.Printf("Built APK: %s\n", apkPath)
 	}
 
-	// 3. 生成 iStoreOS / 全版本 OpenWrt 通用自解压安装包 .run
+	// 3. .run
 	if t.buildRun {
-		runName := fmt.Sprintf("dkstore-openwrt-%s-%s.run", t.label, pkgVersion)
+		runName := fmt.Sprintf("dkstore-openwrt-%s-%s.run", t.label, ver)
 		runPath := filepath.Join(distDir, runName)
-		runBytes, err := buildRunInstaller(ipkBytes, entries, t)
+		runBytes, err := buildRunInstaller(ipkBytes, ver, t)
 		if err != nil {
 			return err
 		}
@@ -227,11 +246,17 @@ func buildForTarget(rootDir, distDir, commit string, t targetArch) error {
 	return nil
 }
 
-func compileLinuxBinary(rootDir, commit string, t targetArch) ([]byte, error) {
+func loadOrCompileLinuxBinary(rootDir, ver, commit, binDir string, t targetArch) ([]byte, error) {
+	if binDir != "" {
+		cand := filepath.Join(binDir, "dkstore-linux-"+t.binKey)
+		if b, err := os.ReadFile(cand); err == nil && len(b) > 0 {
+			return b, nil
+		}
+	}
 	tmpBin := filepath.Join(os.TempDir(), fmt.Sprintf("dkstore-owrt-%s-%d", t.label, os.Getpid()))
 	defer os.Remove(tmpBin)
 
-	ldflags := fmt.Sprintf("-s -w -X github.com/kukushouhou/DKStore/internal/version.Version=%s -X github.com/kukushouhou/DKStore/internal/version.Commit=%s", pkgVersion, commit)
+	ldflags := fmt.Sprintf("-s -w -X github.com/kukushouhou/DKStore/internal/version.Version=v%s -X github.com/kukushouhou/DKStore/internal/version.Commit=%s", ver, commit)
 	cmd := exec.Command("go", "build", "-trimpath", "-ldflags="+ldflags, "-o", tmpBin, "./cmd/dkstore")
 	cmd.Dir = rootDir
 	env := append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+t.goarch)
@@ -293,12 +318,10 @@ exit 0
 `)
 }
 
-// buildIPK 生成符合 OpenWrt ipkg-build 规范的 .ipk（外层 tar.gz 含 ./debian-binary、./control.tar.gz、./data.tar.gz）。
-// Architecture 设为 all 并在 preinst 中校验 uname -m，从而同时兼容 aarch64_generic / aarch64_cortex-a53 / aarch64_cortex-a72 等全部细分架构。
-func buildIPK(entries []pkgEntry, installedSize int64, t targetArch) ([]byte, error) {
+func buildIPK(entries []pkgEntry, installedSize int64, ver string, t targetArch) ([]byte, error) {
 	controlText := strings.Join([]string{
 		"Package: luci-app-dkstore",
-		fmt.Sprintf("Version: %s-%s", pkgVersion, pkgRelease),
+		fmt.Sprintf("Version: %s-%s", ver, pkgRelease),
 		"Depends: libc",
 		"Provides: dkstore",
 		"Section: luci",
@@ -310,7 +333,6 @@ func buildIPK(entries []pkgEntry, installedSize int64, t targetArch) ([]byte, er
 		"",
 	}, "\n")
 
-	// 1. data.tar.gz
 	dataTgz, err := buildTarGz(func(tw *tar.Writer) error {
 		writeUSTARDir(tw, "./", 0o755)
 		for _, e := range entries {
@@ -330,7 +352,6 @@ func buildIPK(entries []pkgEntry, installedSize int64, t targetArch) ([]byte, er
 		return nil, err
 	}
 
-	// 2. control.tar.gz
 	ctrlTgz, err := buildTarGz(func(tw *tar.Writer) error {
 		writeUSTARDir(tw, "./", 0o755)
 		writeUSTARFile(tw, "./control", []byte(controlText), 0o644)
@@ -344,7 +365,6 @@ func buildIPK(entries []pkgEntry, installedSize int64, t targetArch) ([]byte, er
 		return nil, err
 	}
 
-	// 3. 外层 .ipk（tar.gz）
 	return buildTarGz(func(tw *tar.Writer) error {
 		writeUSTARDir(tw, "./", 0o755)
 		writeUSTARFile(tw, "./debian-binary", []byte("2.0\n"), 0o644)
@@ -354,9 +374,7 @@ func buildIPK(entries []pkgEntry, installedSize int64, t targetArch) ([]byte, er
 	})
 }
 
-// buildAPKv2 生成符合 Alpine / OpenWrt 25.12+ APKv2 规范的 .apk 归档（控制流 gzip [无 tar 尾部零块] + 数据流 gzip）。
-func buildAPKv2(entries []pkgEntry, installedSize int64, t targetArch) ([]byte, error) {
-	// 1. 构建数据段 tar.gz（完整包含 1024B tar 结束零块）
+func buildAPKv2(entries []pkgEntry, installedSize int64, ver string, t targetArch) ([]byte, error) {
 	var rawDataTar bytes.Buffer
 	dtw := tar.NewWriter(&rawDataTar)
 	for _, e := range entries {
@@ -382,12 +400,11 @@ func buildAPKv2(entries []pkgEntry, installedSize int64, t targetArch) ([]byte, 
 	dataGzBytes := dataGzBuf.Bytes()
 	dataHash := sha256.Sum256(dataGzBytes)
 
-	// 2. 构建控制段 tar（去掉末尾两个 512B 全零 EOF 块，符合 APKv2 多流拼接规范）
 	nowUnix := time.Now().Unix()
 	pkgInfo := strings.Join([]string{
 		"# Generated by DKStore build_openwrt.go",
 		"pkgname = luci-app-dkstore",
-		fmt.Sprintf("pkgver = %s-r%s", pkgVersion, pkgRelease),
+		fmt.Sprintf("pkgver = %s-r%s", ver, pkgRelease),
 		"pkgdesc = DKStore Cross-Platform Docker App Update Center for OpenWrt",
 		"url = https://github.com/kukushouhou/DKStore",
 		fmt.Sprintf("builddate = %d", nowUnix),
@@ -426,9 +443,7 @@ func buildAPKv2(entries []pkgEntry, installedSize int64, t targetArch) ([]byte, 
 	return out.Bytes(), nil
 }
 
-// buildRunInstaller 生成兼容 iStoreOS「手动安装 (.run)」及全版本 OpenWrt（opkg / apk）的一键自解压安装包。
-// 采用 4096 字节块对齐的纯 POSIX dd 提取内嵌 .ipk（零 base64 依赖，兼容裁剪版 BusyBox，体积仅 ~6.5 MB）。
-func buildRunInstaller(ipkBytes []byte, _ []pkgEntry, t targetArch) ([]byte, error) {
+func buildRunInstaller(ipkBytes []byte, ver string, t targetArch) ([]byte, error) {
 	const blockSize = 4096
 	fullBlocks := len(ipkBytes) / blockSize
 	remBytes := len(ipkBytes) % blockSize
@@ -484,7 +499,7 @@ fi
 
 echo "==> DKStore installed and started! Open LuCI -> Services -> DKStore."
 exit 0
-`, pkgVersion, t.label, t.unameGlob, t.label, blockSize, hdrBlocks, fullBlocks, remBytes, remSkip, remBytes)
+`, ver, t.label, t.unameGlob, t.label, blockSize, hdrBlocks, fullBlocks, remBytes, remSkip, remBytes)
 	}
 
 	hdrBlocks := 1
@@ -596,7 +611,6 @@ func trimTarEOF(b []byte) []byte {
 	return b
 }
 
-// buildLuCILMO 生成 OpenWrt LuCI 原生二进制翻译字典（po2lmo 格式）。
 func buildLuCILMO(dict map[string]string) []byte {
 	type lmoEntry struct {
 		keyHash uint32
@@ -650,7 +664,6 @@ func buildLuCILMO(dict map[string]string) []byte {
 	return body.Bytes()
 }
 
-// sfhHash 实现 Paul Hsieh SuperFastHash（与 OpenWrt luci-base lmo_core.c 完全一致）。
 func sfhHash(data []byte) uint32 {
 	n := len(data)
 	if n == 0 {
@@ -683,11 +696,11 @@ func sfhHash(data []byte) uint32 {
 		hash += hash >> 1
 	}
 	hash ^= hash << 3
-	hash += hash >> 5
+	hash ^= hash >> 5
 	hash ^= hash << 4
-	hash += hash >> 17
+	hash ^= hash >> 17
 	hash ^= hash << 25
-	hash += hash >> 6
+	hash ^= hash >> 6
 	return hash
 }
 

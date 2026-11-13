@@ -1,0 +1,161 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version tag (e.g. v0.2.0)'
+        required: true
+        type: string
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      version: ${{ steps.check.outputs.version }}
+      clean_version: ${{ steps.check.outputs.clean_version }}
+      need_tag: ${{ steps.check.outputs.need_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Resolve release version from tag, commit message, or dispatch input
+        id: check
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          VERSION=""
+          NEED_TAG="false"
+
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          elif [[ -n "${INPUT_VERSION}" ]]; then
+            VERSION="${INPUT_VERSION}"
+            [[ "${VERSION}" != v* ]] && VERSION="v${VERSION}"
+            NEED_TAG="true"
+          elif [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+            # Match commit messages like "release: v0.2.0", "chore(release): v0.2.0", or "[release v0.2.0]"
+            FIRST_LINE="$(printf '%s\n' "${COMMIT_MSG}" | head -n 1)"
+            if [[ "${FIRST_LINE}" =~ release[^v0-9]*v?([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?) ]]; then
+              VERSION="v${BASH_REMATCH[1]}"
+              NEED_TAG="true"
+            fi
+          fi
+
+          if [[ -z "${VERSION}" ]]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Avoid duplicate run if tag already exists and triggered via main branch push
+          if [[ "${NEED_TAG}" == "true" ]] && git rev-parse -q --verify "refs/tags/${VERSION}" >/dev/null; then
+            if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+              echo "Tag ${VERSION} already exists; skipping branch-triggered duplicate release."
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            NEED_TAG="false"
+          fi
+
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "clean_version=${VERSION#v}" >> "$GITHUB_OUTPUT"
+          echo "need_tag=${NEED_TAG}" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: detect
+    if: needs.detect.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create and push Git tag when triggered by release commit or manual dispatch
+        if: needs.detect.outputs.need_tag == 'true'
+        env:
+          TAG_NAME: ${{ needs.detect.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG_NAME}" "${GITHUB_SHA}" -m "Release ${TAG_NAME}"
+          git push origin "${TAG_NAME}"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Lint & build embedded frontend
+        working-directory: web
+        run: |
+          npm ci
+          npm run lint
+          npm run build
+
+      - name: Run Go vet & unit tests
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Build all multi-platform packages & SHA256SUMS
+        run: |
+          go run ./tools/build_release.go -version "${{ needs.detect.outputs.version }}"
+
+      - name: Extract bilingual release notes from CHANGELOG.md
+        run: |
+          go run ./tools/release_notes.go -version "${{ needs.detect.outputs.version }}" -out dist/RELEASE_NOTES.md
+
+      - name: Publish GitHub Release & upload packages
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.detect.outputs.version }}
+          name: DKStore ${{ needs.detect.outputs.version }}
+          body_path: dist/RELEASE_NOTES.md
+          prerelease: ${{ contains(needs.detect.outputs.version, '-') }}
+          files: |
+            dist/*.spk
+            dist/*.fpk
+            dist/*.ipk
+            dist/*.apk
+            dist/*.run
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS.txt
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push multi-arch Docker image to GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
+          push: true
+          build-args: |
+            VERSION=${{ needs.detect.outputs.version }}
+            COMMIT=${{ github.sha }}
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ needs.detect.outputs.version }}
+            ghcr.io/${{ github.repository }}:${{ needs.detect.outputs.clean_version }}
+            ghcr.io/${{ github.repository }}:latest

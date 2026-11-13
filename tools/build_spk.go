@@ -1,7 +1,7 @@
 //go:build ignore
 
 // build_spk.go 打包生成群晖 DSM 7 可直接手动安装的 .spk 套件包（无需依赖 Linux fakeroot/tar）。
-// 用法：go run ./packaging/synology/build_spk.go
+// 用法：go run ./tools/build_spk.go [-version 0.2.0] [-bin-dir <optional_prebuilt_dir>]
 package main
 
 import (
@@ -11,6 +11,7 @@ import (
 	"crypto/md5"
 	"encoding/base64"
 	"encoding/hex"
+	"flag"
 	"fmt"
 	"image"
 	"image/color"
@@ -24,6 +25,11 @@ import (
 )
 
 func main() {
+	verFlag := flag.String("version", "", "版本号（如 0.2.0 或 v0.2.0）")
+	binDirFlag := flag.String("bin-dir", "", "可选预编译二进制目录（含 dkstore-linux-amd64 / dkstore-linux-arm64）")
+	flag.Parse()
+
+	ver := normalizeVer(*verFlag)
 	rootDir, err := os.Getwd()
 	if err != nil {
 		panic(err)
@@ -31,43 +37,76 @@ func main() {
 	distDir := filepath.Join(rootDir, "dist")
 	_ = os.MkdirAll(distDir, 0o755)
 
+	commit := gitShortCommit(rootDir)
+
 	targets := []struct {
-		goarch  string
-		spkName string
+		goarch   string
+		spkName  string
 		synoArch string
 	}{
 		{
 			goarch:   "amd64",
-			spkName:  "dkstore-x86_64-0.2.0-0001.spk",
+			spkName:  fmt.Sprintf("dkstore-x86_64-%s-0001.spk", ver),
 			synoArch: "x86_64 apollolake avoton braswell broadwell broadwellnk broadwellnkv2 broadwellntbap bromolow cedarview denverton epyc7002 geminilake geminilakenk grantley icelaked kvmx64 purley r1000 r1000nk v1000 v1000nk",
 		},
 		{
 			goarch:   "arm64",
-			spkName:  "dkstore-aarch64-0.2.0-0001.spk",
+			spkName:  fmt.Sprintf("dkstore-aarch64-%s-0001.spk", ver),
 			synoArch: "aarch64 armv8 rtd1296 rtd1619b armada37xx",
 		},
 	}
 
 	for _, t := range targets {
 		spkPath := filepath.Join(distDir, t.spkName)
-		if err := buildSPK(rootDir, spkPath, t.goarch, t.synoArch); err != nil {
+		if err := buildSPK(rootDir, spkPath, ver, commit, t.goarch, t.synoArch, *binDirFlag); err != nil {
 			panic(err)
 		}
 		fmt.Printf("Built SPK: %s\n", spkPath)
 	}
 }
 
-func buildSPK(rootDir, outPath, goarch, synoArch string) error {
-	tmpBin := filepath.Join(os.TempDir(), "dkstore-linux-"+goarch)
+func normalizeVer(raw string) string {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		v = strings.TrimSpace(os.Getenv("DKSTORE_VERSION"))
+	}
+	v = strings.TrimPrefix(v, "v")
+	if v == "" {
+		v = "0.2.0"
+	}
+	return v
+}
+
+func gitShortCommit(rootDir string) string {
+	out, _ := exec.Command("git", "-C", rootDir, "rev-parse", "--short", "HEAD").Output()
+	if s := strings.TrimSpace(string(out)); s != "" {
+		return s
+	}
+	return "dev"
+}
+
+func loadOrBuildLinuxBin(rootDir, ver, commit, goarch, binDir string) ([]byte, error) {
+	if binDir != "" {
+		cand := filepath.Join(binDir, "dkstore-linux-"+goarch)
+		if b, err := os.ReadFile(cand); err == nil && len(b) > 0 {
+			return b, nil
+		}
+	}
+	tmpBin := filepath.Join(os.TempDir(), fmt.Sprintf("dkstore-spk-%s-%d", goarch, os.Getpid()))
 	defer os.Remove(tmpBin)
 
-	cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w -X github.com/kukushouhou/DKStore/internal/version.Version=0.2.0", "-o", tmpBin, "./cmd/dkstore")
+	ldflags := fmt.Sprintf("-s -w -X github.com/kukushouhou/DKStore/internal/version.Version=v%s -X github.com/kukushouhou/DKStore/internal/version.Commit=%s", ver, commit)
+	cmd := exec.Command("go", "build", "-trimpath", "-ldflags="+ldflags, "-o", tmpBin, "./cmd/dkstore")
 	cmd.Dir = rootDir
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+goarch)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("go build (%s) failed: %v\n%s", goarch, err, string(out))
+		return nil, fmt.Errorf("go build (%s) failed: %v\n%s", goarch, err, string(out))
 	}
-	binBytes, err := os.ReadFile(tmpBin)
+	return os.ReadFile(tmpBin)
+}
+
+func buildSPK(rootDir, outPath, ver, commit, goarch, synoArch, binDir string) error {
+	binBytes, err := loadOrBuildLinuxBin(rootDir, ver, commit, goarch, binDir)
 	if err != nil {
 		return err
 	}
@@ -83,7 +122,6 @@ func buildSPK(rootDir, outPath, goarch, synoArch string) error {
 	}
 	nginxConf = lf(nginxConf)
 
-	// 1. 生成 package.tgz（包含 bin/dkstore、etc/www/dsm.dkstore.conf、ui/config、ui/images/icon_*.png）
 	var pkgTgzBuf bytes.Buffer
 	gw := gzip.NewWriter(&pkgTgzBuf)
 	ptw := tar.NewWriter(gw)
@@ -112,10 +150,9 @@ func buildSPK(rootDir, outPath, goarch, synoArch string) error {
 	icon72 := renderIconPNG(72)
 	icon256 := renderIconPNG(256)
 
-	// 2. 生成 INFO
 	infoLines := []string{
 		`package="dkstore"`,
-		`version="0.2.0-0003"`,
+		fmt.Sprintf(`version="%s-0001"`, ver),
 		`os_min_ver="7.0-40000"`,
 		`description="DKStore: Cross-Platform Docker App Update Center with One-Click Upgrade & Rollback."`,
 		`description_chs="DKStore：跨平台 Docker 应用更新中心（支持群晖 Container Manager 项目识别、单服务安全升级与历史回退）。"`,
@@ -158,7 +195,6 @@ func buildSPK(rootDir, outPath, goarch, synoArch string) error {
 	}
 	noopScript := []byte("#!/bin/sh\nexit 0\n")
 
-	// 3. 打包顶层 .spk（未压缩 tar 归档）
 	var spkBuf bytes.Buffer
 	stw := tar.NewWriter(&spkBuf)
 	addTarFile(stw, "INFO", infoBytes, 0o644)
@@ -203,7 +239,6 @@ func addTarFile(tw *tar.Writer, name string, data []byte, mode int64) {
 	_, _ = tw.Write(data)
 }
 
-// renderIconPNG 按 F2-3 品牌 Logo（飞檐 K 冠 + 拱门 D 屋 + 青芯）渲染抗锯齿 PNG 图标。
 func renderIconPNG(size int) []byte {
 	img := image.NewNRGBA(image.Rect(0, 0, size, size))
 	const ss = 4
@@ -244,17 +279,14 @@ func sampleF23Logo(u, v float64) color.NRGBA {
 	if !inRoundBox(u, v, 2, 2, 62, 62, 15) {
 		return color.NRGBA{}
 	}
-	// 青色发光核心
 	if inRoundBox(u, v, 29.2, 34.5, 34.8, 42.0, 2.8) {
 		return color.NRGBA{R: 103, G: 232, B: 249, A: 255}
 	}
-	// 白色 K 冠（顶梁 + 屋檐斜臂）
 	if distSeg(u, v, 20, 13, 44, 13) <= 2.2 ||
 		distSeg(u, v, 13, 28.5, 32, 14) <= 2.5 ||
 		distSeg(u, v, 32, 14, 51, 28.5) <= 2.5 {
 		return color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 	}
-	// 白色拱门 D 屋（外拱减去内拱）
 	inOuterD := (v >= 41 && inRoundBox(u, v, 17, 38, 47, 50.5, 3.0)) ||
 		(v <= 41 && v >= 25 && sq((u-32)/15.0)+sq((v-41)/16.0) <= 1.0)
 	inInnerD := (v >= 41 && v <= 45.2 && u >= 22.4 && u <= 41.6) ||
@@ -262,7 +294,6 @@ func sampleF23Logo(u, v float64) color.NRGBA {
 	if inOuterD && !inInnerD {
 		return color.NRGBA{R: 255, G: 255, B: 255, A: 255}
 	}
-	// 对角线蓝渐变底色 (#4F8CFF -> #2F6BFF -> #153CC0)
 	t := ((u-8)*48 + (v-4)*56) / (48*48 + 56*56)
 	t = max(0, min(1, t))
 	if t < 0.5 {

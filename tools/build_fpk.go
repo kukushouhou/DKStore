@@ -1,7 +1,7 @@
 //go:build ignore
 
 // build_fpk.go 打包生成飞牛 fnOS 可直接手动安装的 .fpk 应用包（兼容 fnpack 1.2.3 规范，无需依赖 Linux 环境）。
-// 用法：go run ./packaging/fnos/build_fpk.go
+// 用法：go run ./tools/build_fpk.go [-version 0.2.0] [-bin-dir <optional_prebuilt_dir>]
 package main
 
 import (
@@ -10,6 +10,7 @@ import (
 	"compress/gzip"
 	"crypto/md5"
 	"encoding/hex"
+	"flag"
 	"fmt"
 	"image"
 	"image/color"
@@ -23,12 +24,18 @@ import (
 )
 
 func main() {
+	verFlag := flag.String("version", "", "版本号（如 0.2.0 或 v0.2.0）")
+	binDirFlag := flag.String("bin-dir", "", "可选预编译二进制目录（含 dkstore-linux-amd64 / dkstore-linux-arm64）")
+	flag.Parse()
+
+	ver := normalizeVer(*verFlag)
 	rootDir, err := os.Getwd()
 	if err != nil {
 		panic(err)
 	}
 	distDir := filepath.Join(rootDir, "dist")
 	_ = os.MkdirAll(distDir, 0o755)
+	commit := gitShortCommit(rootDir)
 
 	targets := []struct {
 		goarch   string
@@ -38,35 +45,66 @@ func main() {
 		{
 			goarch:   "amd64",
 			platform: "x86",
-			fpkName:  "dkstore-fnos-x86-0.2.0.fpk",
+			fpkName:  fmt.Sprintf("dkstore-fnos-x86-%s.fpk", ver),
 		},
 		{
 			goarch:   "arm64",
 			platform: "arm",
-			fpkName:  "dkstore-fnos-arm-0.2.0.fpk",
+			fpkName:  fmt.Sprintf("dkstore-fnos-arm-%s.fpk", ver),
 		},
 	}
 
 	for _, t := range targets {
 		fpkPath := filepath.Join(distDir, t.fpkName)
-		if err := buildFPK(rootDir, fpkPath, t.goarch, t.platform); err != nil {
+		if err := buildFPK(rootDir, fpkPath, ver, commit, t.goarch, t.platform, *binDirFlag); err != nil {
 			panic(err)
 		}
 		fmt.Printf("Built FPK: %s\n", fpkPath)
 	}
 }
 
-func buildFPK(rootDir, outPath, goarch, fnPlatform string) error {
-	tmpBin := filepath.Join(os.TempDir(), "dkstore-fnos-"+goarch)
+func normalizeVer(raw string) string {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		v = strings.TrimSpace(os.Getenv("DKSTORE_VERSION"))
+	}
+	v = strings.TrimPrefix(v, "v")
+	if v == "" {
+		v = "0.2.0"
+	}
+	return v
+}
+
+func gitShortCommit(rootDir string) string {
+	out, _ := exec.Command("git", "-C", rootDir, "rev-parse", "--short", "HEAD").Output()
+	if s := strings.TrimSpace(string(out)); s != "" {
+		return s
+	}
+	return "dev"
+}
+
+func loadOrBuildLinuxBin(rootDir, ver, commit, goarch, binDir string) ([]byte, error) {
+	if binDir != "" {
+		cand := filepath.Join(binDir, "dkstore-linux-"+goarch)
+		if b, err := os.ReadFile(cand); err == nil && len(b) > 0 {
+			return b, nil
+		}
+	}
+	tmpBin := filepath.Join(os.TempDir(), fmt.Sprintf("dkstore-fnos-%s-%d", goarch, os.Getpid()))
 	defer os.Remove(tmpBin)
 
-	cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w -X github.com/kukushouhou/DKStore/internal/version.Version=0.2.0", "-o", tmpBin, "./cmd/dkstore")
+	ldflags := fmt.Sprintf("-s -w -X github.com/kukushouhou/DKStore/internal/version.Version=v%s -X github.com/kukushouhou/DKStore/internal/version.Commit=%s", ver, commit)
+	cmd := exec.Command("go", "build", "-trimpath", "-ldflags="+ldflags, "-o", tmpBin, "./cmd/dkstore")
 	cmd.Dir = rootDir
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+goarch)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("go build (%s) failed: %v\n%s", goarch, err, string(out))
+		return nil, fmt.Errorf("go build (%s) failed: %v\n%s", goarch, err, string(out))
 	}
-	binBytes, err := os.ReadFile(tmpBin)
+	return os.ReadFile(tmpBin)
+}
+
+func buildFPK(rootDir, outPath, ver, commit, goarch, fnPlatform, binDir string) error {
+	binBytes, err := loadOrBuildLinuxBin(rootDir, ver, commit, goarch, binDir)
 	if err != nil {
 		return err
 	}
@@ -98,7 +136,6 @@ func buildFPK(rootDir, outPath, goarch, fnPlatform string) error {
 	icon64 := renderIconPNG(64)
 	icon256 := renderIconPNG(256)
 
-	// 1. 生成内层 app.tgz（包含 server/dkstore、ui/config、ui/images/icon_{64,256}.png、config/{privilege,resource}）
 	var appTgzBuf bytes.Buffer
 	appGz := gzip.NewWriter(&appTgzBuf)
 	appTw := tar.NewWriter(appGz)
@@ -124,10 +161,9 @@ func buildFPK(rootDir, outPath, goarch, fnPlatform string) error {
 	sum := md5.Sum(appTgzBytes)
 	checksum := hex.EncodeToString(sum[:])
 
-	// 2. 生成 manifest（UTF-8 无 BOM，LF 换行）
 	manifestLines := []string{
 		"appname               = dkstore",
-		"version               = 0.2.0",
+		fmt.Sprintf("version               = %s", ver),
 		"display_name          = DKStore 容器更新中心",
 		"desc                  = 跨平台 Docker 应用更新中心：支持本机与远程 Docker/Compose 发现、单服务安全更新、版本切换与历史回退。",
 		fmt.Sprintf("platform              = %s", fnPlatform),
@@ -147,7 +183,6 @@ func buildFPK(rootDir, outPath, goarch, fnPlatform string) error {
 	manifestBytes := []byte(strings.Join(manifestLines, "\n"))
 	noopHook := []byte("#!/bin/bash\nexit 0\n")
 
-	// 3. 打包外层 .fpk（gzip 压缩 tar 归档，与 fnpack 1.2.3 完全一致）
 	var fpkBuf bytes.Buffer
 	fpkGz := gzip.NewWriter(&fpkBuf)
 	fpkTw := tar.NewWriter(fpkGz)
@@ -208,7 +243,6 @@ func addTarFile(tw *tar.Writer, name string, data []byte, mode int64) {
 	_, _ = tw.Write(data)
 }
 
-// renderIconPNG 按 F2-3 品牌 Logo（飞檐 K 冠 + 拱门 D 屋 + 青芯）渲染抗锯齿 PNG 图标。
 func renderIconPNG(size int) []byte {
 	img := image.NewNRGBA(image.Rect(0, 0, size, size))
 	const ss = 4

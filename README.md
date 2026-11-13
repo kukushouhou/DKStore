@@ -28,9 +28,11 @@ DKStore is an app-store-like update center designed for home NAS, routers, and L
 ## Packaging & Deployment
 
 - **Single Binary / Docker Container**: Embedded React + Ant Design frontend (`cmd/dkstore`), zero external runtime dependencies (pure-Go SQLite).
-- **Synology DSM 7 SPK Scaffold**: [`packaging/synology/`](./packaging/synology)
-- **OpenWrt / iStoreOS IPK & LuCI Scaffold**: [`packaging/openwrt/`](./packaging/openwrt)
+- **Synology DSM 7 SPK**: [`packaging/synology/`](./packaging/synology) (`go run ./tools/build_spk.go`)
+- **fnOS App Center FPK**: [`packaging/fnos/`](./packaging/fnos) (`go run ./tools/build_fpk.go`)
+- **OpenWrt / iStoreOS LuCI Plugin (`.ipk` / `.apk` / `.run`)**: [`packaging/openwrt/`](./packaging/openwrt) (`go run ./tools/build_openwrt.go`)
 - **Linux systemd Service**: [`packaging/linux/dkstore.service`](./packaging/linux/dkstore.service)
+- **Unified Multi-Platform Release Builder**: [`tools/build_release.go`](./tools/build_release.go) (`go run ./tools/build_release.go -version v0.2.0`)
 
 ## Development
 
