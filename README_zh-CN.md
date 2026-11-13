@@ -1,50 +1,125 @@
 # DKStore — 家庭 Docker 应用更新中心
 
-[English](./README.md) | **简体中文**
+<p>
+  <a href="./README.md">English</a> · <strong>简体中文</strong> · <a href="./CHANGELOG.md">更新日志</a> · <a href="https://github.com/kukushouhou/DKStore/releases">下载安装包</a>
+</p>
 
-> [!WARNING]
-> **当前状态：早期开发中（Work in Progress / Pre-Alpha）**
-> 本项目正在进行开发与内部测试，尚未发布正式稳定版本，请勿用于生产环境。
+<p>
+  <a href="https://github.com/kukushouhou/DKStore/releases"><img src="https://img.shields.io/github/v/release/kukushouhou/DKStore?style=flat-square&label=Release" alt="Latest Release" /></a>
+  <img src="https://img.shields.io/badge/Synology%20DSM-7.0%2B%20(.spk)-blue?style=flat-square" alt="Synology DSM 7.0+" />
+  <img src="https://img.shields.io/badge/fnOS-App%20(.fpk)-00b4d8?style=flat-square" alt="fnOS" />
+  <img src="https://img.shields.io/badge/OpenWrt%20%2F%20iStoreOS-.run%20%7C%20.ipk%20%7C%20.apk-f97316?style=flat-square" alt="OpenWrt / iStoreOS" />
+  <img src="https://img.shields.io/badge/Docker-amd64%20%7C%20arm64%20%7C%20armv7-2496ed?style=flat-square" alt="Docker Multi-Arch" />
+</p>
 
-DKStore 是面向家庭 NAS、软路由（OpenWrt / iStoreOS）与 Linux 主机的跨平台 Docker 应用更新中心。只需在家中任意一台设备安装一次，即可像手机应用商店一样统一检查、一键安全更新并在必要时回退多台设备上的 Docker 应用，同时与群晖 Container Manager 等系统原生管理器无感并存。
+**DKStore** 是专为家庭 NAS、软路由与个人服务器打造的跨平台 Docker 应用更新中心。只需在家中任意一台设备安装一次，即可像手机应用商店一样统一检查、一键安全升级、在线调整配置并在必要时一键回退家里所有设备上的 Docker 应用，同时与群晖 Container Manager、飞牛应用中心等系统原生管理器无感并存。
 
-## 核心能力
+---
 
-- **更新优先，而非运维优先**：围绕**“可更新 / 需谨慎更新（跨大版本、数据库服务与高风险规则）/ 已忽略（仅忽略当前版本或永久忽略）”**三组卡片展示，提供清晰的更新原因与官方 Release Notes 跳转。
-- **一处安装，多端直连管理（被管设备免装客户端）**：通过本机 `docker.sock`、群晖 DSM WebAPI 或标准 SSH（支持 Socket 转发、免密 `sudo -n` 以及管理员 `sudo -S` 标准输入提权）直接接入局域网内多台 Linux、群晖 NAS、飞牛 fnOS 与软路由设备。
-- **与群晖 Container Manager 及 Compose 原生并存**：
-  - 自动识别群晖 Container Manager 原生项目（`SYNO.Docker.Project`）、标准 Docker Compose 项目（解析 `docker-compose.yml` 与 `.env` 变量）及独立容器。
-  - 自动识别群晖套件中心等平台托管容器（`vendor_managed`）并设为只读保护，防止误改系统套件。
-- **安全的一键更新与单服务隔离**：
-  - **执行前冲突检测**：核验容器 `ImageID` 与 Compose YAML 文件 `SHA-256`，若被外部修改则主动中止并提示重新扫描。
-  - **分层下载实时进度**：通过 SSE 实时推送镜像总层数、已完成层数、已下载字节与当前阶段（`1/4` 至 `4/4`）。
-  - **单服务精准升级**：Compose 与群晖项目更新仅替换目标服务的 `image:` 行（完整保留原 YAML 注释与缩进），并通过 `--no-deps` 仅重建目标服务，**绝不重启或改动同项目的数据库等其他服务**。
-  - **独立容器原位重建**：完整保留容器名称、端口映射、挂载卷、环境变量、全部自定义网络（含 `Aliases` 与 `IPAMConfig`）、Labels 以及**原始运行/停止状态**（原为停止状态的容器更新后保持停止）；若新容器启动失败自动恢复原容器。
-- **更新历史与有条件安全回退**：
-  - 完整记录每次升级与回退任务的旧/新版本、Digest、匹配标签及执行日志。
-  - 提供动态回退可行性核验（`GET /api/v1/updates/{id}/rollback-check`）：实时校验历史精确版本标签在远端仓库是否仍指向升级前 Digest（或宿主机本地仍保留旧镜像 ID），对于无精确版本标签的纯浮动标签（如 `:latest`）或已被覆盖的标签诚实提示不可回退原因。
-- **全栈中英双语国际化（`zh-CN` / `en-US`）**：覆盖前端界面、后端 API 诊断与错误消息、回退说明以及多渠道推送通知（Webhook、企业微信、Bark、Telegram、ntfy）。
+## 功能亮点
 
-## 多平台打包与部署形态
+- **应用商店式更新体验，告别盲目升级**
+  - 自动反查 `:latest` 等浮动标签背后的真实版本号（如 `latest (v1.4.1)`），直观对比当前运行版本与最新可用版本。
+  - 智能将待更新应用划分为 **「可更新」** 与 **「需谨慎更新」**（自动识别跨大版本升级、MySQL/PostgreSQL/Redis/MQ 等数据库与中间件组件），并附带官方更新说明与仓库直达链接。
+  - 灵活的提醒范围控制：支持 **锁定大版本前缀**（例如锁住 `0.5.x` 或 `v1.x` 不跨大版本提醒）、**仅跳过当前版本** 或 **不再提醒**。
+- **一处安装，统管全家设备（被管设备免装客户端）**
+  - 支持接入本机 Docker、**群晖 DSM WebAPI 免 SSH 连接**（支持两步验证 OTP 与设备信任令牌持久化）以及 **SSH 远程连接**（支持密码、PEM 私钥、一键生成密钥对及 `sudo` 提权），统一管理多台群晖 NAS、飞牛 fnOS、OpenWrt / iStoreOS 软路由与 Linux 主机。
+  - 自动识别群晖 Container Manager 原生项目、标准 Docker Compose 项目与独立容器；对系统套件托管容器自动设为只读保护，防止误操作破坏系统套件。
+- **单容器安全升级、在线改配置与流式日志**
+  - **不连带重启数据库**：升级多容器项目时仅替换目标容器镜像并独立重建，绝不误重启同项目下的数据库或其他关联服务，同时完整保留原 `docker-compose.yml` 注释与缩进，并自动保留原有的镜像加速源前缀。
+  - **网页端直接按新版配置更新**：当官方新版要求增改环境变量、端口或 YAML 配置时，可直接在更新弹窗内修改当前配置（内置文件夹路径与密码防误覆盖检测、一键恢复原配置，升级失败自动回滚原配置与运行状态）。
+  - **实时进度与终端日志**：实时展示镜像分层下载进度条与只读终端执行日志，多任务队列一目了然。
+- **更新历史记录与安全回退**
+  - 完整留存每次升级与回退前后的版本号、镜像摘要（Digest）及终端日志；回退前自动核验目标版本镜像可用性，确认安全后一键回退到升级前版本。
+- **树状容器监控、残留清理与定时推送**
+  - 树状分组展示各设备的项目与容器运行状态、运行时长、实时 CPU / 内存占用，支持一键移除容器或整个项目（可选一并清理镜像与项目目录）。
+  - 内置定时自动检查、Docker Hub / 私有仓库凭据原位配置，支持通过 **Telegram、Bark、企业微信、ntfy、Webhook** 推送新版本通知，全界面支持**中英双语**实时切换。
 
-- **单文件二进制 / Docker 容器**：内嵌前端静态资源（`cmd/dkstore`），纯 Go SQLite 零外部依赖。
-- **群晖 DSM 7 SPK 套件**：[`packaging/synology/`](./packaging/synology)（`go run ./tools/build_spk.go`）
-- **飞牛 fnOS FPK 应用包**：[`packaging/fnos/`](./packaging/fnos)（`go run ./tools/build_fpk.go`）
-- **OpenWrt / iStoreOS LuCI 插件（`.ipk` / `.apk` / `.run`）**：[`packaging/openwrt/`](./packaging/openwrt)（`go run ./tools/build_openwrt.go`）
-- **Linux systemd 服务配置**：[`packaging/linux/dkstore.service`](./packaging/linux/dkstore.service)
-- **全平台统一发布构建器**：[`tools/build_release.go`](./tools/build_release.go)（`go run ./tools/build_release.go -version v0.2.0`）
+---
 
-## 开发构建
+## 界面预览
 
-需要 Go 1.24+、Node 20+。
+### 1. 应用更新中心（真实版本号反查与风险分级）
+![应用更新中心](./assets/screenshots/updates-zh.png)
 
-```powershell
-# 构建前端静态资源
-cd web; npm install; npm run build; cd ..
+### 2. 指定版本切换与版本号前缀锁定
+![版本选择与前缀锁定](./assets/screenshots/version-picker-zh.png)
 
-# 启动后端服务
+### 3. 按新版配置在线修改更新（防覆盖保护与失败自动还原）
+![按新版配置更新](./assets/screenshots/config-update-zh.png)
+
+### 4. 容器运行状态树状监控与清理
+![容器运行状态](./assets/screenshots/containers-zh.png)
+
+### 5. 多设备统一接入与管理
+![设备管理](./assets/screenshots/hosts-zh.png)
+
+### 6. 升级历史记录、执行日志与一键回退
+![历史记录与版本回退](./assets/screenshots/history-zh.png)
+
+---
+
+## 快速安装
+
+前往 [**GitHub Releases**](https://github.com/kukushouhou/DKStore/releases) 下载对应平台的安装包，或直接使用 Docker 部署：
+
+### 方式一：群晖 Synology DSM 7.0+ 原生套件（`.spk`）
+1. 根据 NAS 处理器架构下载 `dkstore-x86_64-<版本>-0001.spk`（Intel / AMD）或 `dkstore-aarch64-<版本>-0001.spk`（ARM64）。
+2. 打开群晖 **套件中心** → 点击右上角 **手动安装**，上传 `.spk` 完成安装。
+3. 从 DSM 左上角主菜单点击 **DKStore 容器更新中心** 即可免二次密码直接进入（也可通过 `http://<群晖IP>:8090` 独立访问），首次进入向导可一键免 SSH 接入本机群晖容器。
+
+### 方式二：飞牛 fnOS 原生应用（`.fpk`）
+1. 下载 `dkstore-fnos-x86-<版本>.fpk`（x86_64）或 `dkstore-fnos-arm-<版本>.fpk`（ARM64）。
+2. 打开飞牛 **应用中心** → 点击左下角 **手动安装**，上传 `.fpk` 安装后从桌面图标直接打开。
+
+### 方式三：OpenWrt / iStoreOS 软路由插件（`.run` / `.ipk` / `.apk`）
+- **iStoreOS 一键安装（推荐）**：下载 `dkstore-openwrt-x86_64-<版本>.run` 或 `dkstore-openwrt-aarch64-<版本>.run`，在 **iStore → 手动安装** 上传 `.run` 包即可自动安装后台服务与 LuCI 页面。
+- **标准 OpenWrt**：OpenWrt 24.10 及以下下载 `luci-app-dkstore_<版本>-1_<架构>.ipk`（`opkg install`）；采用 `apk` 的新版本下载 `luci-app-dkstore-<版本>-r1-<架构>.apk`。安装后在后台 **服务 → DKStore** 打开（默认监听 `:8090`）。
+
+### 方式四：Docker Compose 部署
+创建 `docker-compose.yml` 并执行 `docker compose up -d`，浏览器访问 `http://<设备IP>:8780`：
+
+```yaml
+services:
+  dkstore:
+    image: ghcr.io/kukushouhou/dkstore:latest
+    container_name: dkstore
+    restart: unless-stopped
+    ports:
+      - "8780:8780"
+    volumes:
+      - ./data:/data
+      # 接入并更新本机 Docker 容器时挂载 docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock
+      # 如需直接在容器内在线修改本机 Compose 项目文件，请按宿主原路径挂载项目目录，例如：
+      # - /volume1/docker:/volume1/docker
+    labels:
+      dkstore.self: "true"
+    environment:
+      - TZ=Asia/Shanghai
+```
+
+### 方式五：Linux / Windows 独立二进制运行
+- **Linux（`systemd`）**：解压 `dkstore-linux-<amd64|arm64|armv7>-<版本>.tar.gz`，将 `dkstore` 放入 `/usr/local/bin/`，复制包内 `dkstore.service` 至 `/etc/systemd/system/` 后执行 `systemctl enable --now dkstore`（默认端口 `8090`）。
+- **Windows**：解压 `dkstore-windows-amd64-<版本>.zip` 运行 `dkstore.exe`，即可在电脑上通过局域网远程统一管理家里的多台 NAS 与软路由。
+
+---
+
+## 本地开发与构建
+
+环境要求：Go `1.24+`、Node.js `20+`（内嵌前端架构，编译后端二进制前需先构建 `web/dist/app`）。
+
+```bash
+# 1. 构建前端静态资源
+cd web && npm install && npm run build && cd ..
+
+# 2. 本地启动服务（http://localhost:8090）
 go run ./cmd/dkstore --listen :8090 --data ./data
 
-# 运行全部单元测试
-go test -v ./...
+# 3. 运行静态检查与单元测试
+go vet ./... && go test ./...
+
+# 4. 一键打包全平台发行产物至 dist/
+go run ./tools/build_release.go -version v0.2.0
 ```
+

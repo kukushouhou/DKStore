@@ -21,6 +21,7 @@ jobs:
       version: ${{ steps.check.outputs.version }}
       clean_version: ${{ steps.check.outputs.clean_version }}
       need_tag: ${{ steps.check.outputs.need_tag }}
+      repo_lower: ${{ steps.check.outputs.repo_lower }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -68,6 +69,7 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "clean_version=${VERSION#v}" >> "$GITHUB_OUTPUT"
           echo "need_tag=${NEED_TAG}" >> "$GITHUB_OUTPUT"
+          echo "repo_lower=$(printf '%s' "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
   release:
     needs: detect
@@ -156,6 +158,6 @@ jobs:
             VERSION=${{ needs.detect.outputs.version }}
             COMMIT=${{ github.sha }}
           tags: |
-            ghcr.io/${{ github.repository }}:${{ needs.detect.outputs.version }}
-            ghcr.io/${{ github.repository }}:${{ needs.detect.outputs.clean_version }}
-            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ needs.detect.outputs.repo_lower }}:${{ needs.detect.outputs.version }}
+            ghcr.io/${{ needs.detect.outputs.repo_lower }}:${{ needs.detect.outputs.clean_version }}
+            ghcr.io/${{ needs.detect.outputs.repo_lower }}:latest
