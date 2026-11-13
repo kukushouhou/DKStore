@@ -294,6 +294,7 @@ export interface FailedItem {
   serviceName: string
   hostName: string
   imageRef: string
+  registry?: string
   errorKind: string
   errorMsg: string
 }

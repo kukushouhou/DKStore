@@ -58,3 +58,18 @@ func TestParseTagAndSelect(t *testing.T) {
 		t.Fatalf("SelectBestDisplayTag = %q, want 1.8.5", best)
 	}
 }
+
+func TestNormalizeRegistry(t *testing.T) {
+	cases := map[string]string{
+		"https://ghcr.io/":                     "ghcr.io",
+		"http://192.168.31.8:5000/v2/":         "192.168.31.8:5000",
+		"  INDEX.DOCKER.IO ":                   "docker.io",
+		"registry.cn-hangzhou.aliyuncs.com":    "registry.cn-hangzhou.aliyuncs.com",
+		"https://registry-1.docker.io/v2/repo": "docker.io",
+	}
+	for in, want := range cases {
+		if got := NormalizeRegistry(in); got != want {
+			t.Errorf("NormalizeRegistry(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

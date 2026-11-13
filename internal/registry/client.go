@@ -1481,6 +1481,17 @@ func (c *Client) setCachedToken(key, tok string) {
 	c.tokens[key] = cachedToken{token: tok, expiresAt: time.Now().Add(4 * time.Minute)}
 }
 
+func (c *Client) clearCachedTokens(reg string) {
+	prefix := strings.ToLower(strings.TrimSpace(reg)) + "/"
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	for k := range c.tokens {
+		if strings.HasPrefix(k, prefix) {
+			delete(c.tokens, k)
+		}
+	}
+}
+
 // GetCache 从 SQLite registry_cache 读取未过期的缓存字节。
 func (c *Client) GetCache(ctx context.Context, key string) ([]byte, bool) {
 	return c.getCache(ctx, key)
@@ -1605,7 +1616,7 @@ func (c *Client) ListCredentials(ctx context.Context) ([]Creds, error) {
 
 // SaveCredential 保存私有仓库账号密码。
 func (c *Client) SaveCredential(ctx context.Context, in Creds) error {
-	reg := strings.ToLower(strings.TrimSpace(in.Registry))
+	reg := version.NormalizeRegistry(in.Registry)
 	if reg == "" || in.Username == "" || in.Secret == "" {
 		return i18n.NewEngineError(i18n.MsgRegistryCredIncomplete)
 	}
@@ -1624,14 +1635,18 @@ func (c *Client) SaveCredential(ctx context.Context, in Creds) error {
 		INSERT INTO registry_credential(registry, username, secret_ref) VALUES (?, ?, ?)
 		ON CONFLICT(registry) DO UPDATE SET username=excluded.username, secret_ref=excluded.secret_ref`,
 		reg, in.Username, secID)
+	if err == nil {
+		c.clearCachedTokens(reg)
+	}
 	return err
 }
 
 // DeleteCredential 删除私有仓库凭证。
 func (c *Client) DeleteCredential(ctx context.Context, reg string) error {
-	reg = strings.ToLower(strings.TrimSpace(reg))
+	reg = version.NormalizeRegistry(reg)
 	_, _ = c.st.DB.ExecContext(ctx, `DELETE FROM secret WHERE id=?`, "regsec_"+reg)
 	_, err := c.st.DB.ExecContext(ctx, `DELETE FROM registry_credential WHERE registry=?`, reg)
+	c.clearCachedTokens(reg)
 	return err
 }
 
@@ -1639,8 +1654,12 @@ func (c *Client) getCredential(ctx context.Context, reg string) (*Creds, error) 
 	if c.st == nil || c.box == nil {
 		return nil, nil
 	}
+	norm := version.NormalizeRegistry(reg)
 	var user, secRef string
-	err := c.st.DB.QueryRowContext(ctx, `SELECT username, secret_ref FROM registry_credential WHERE registry=?`, strings.ToLower(reg)).Scan(&user, &secRef)
+	err := c.st.DB.QueryRowContext(ctx, `SELECT username, secret_ref FROM registry_credential WHERE registry=?`, norm).Scan(&user, &secRef)
+	if err != nil && norm != strings.ToLower(strings.TrimSpace(reg)) {
+		err = c.st.DB.QueryRowContext(ctx, `SELECT username, secret_ref FROM registry_credential WHERE registry=?`, strings.ToLower(strings.TrimSpace(reg))).Scan(&user, &secRef)
+	}
 	if err != nil {
 		return nil, err
 	}

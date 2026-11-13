@@ -13,6 +13,7 @@ import {
   Modal,
   Row,
   Segmented,
+  Select,
   Space,
   Spin,
   Tag,
@@ -29,6 +30,26 @@ import UpdateQueuePanel from '../components/UpdateQueuePanel'
 import { useIsUltrawide, useOrderedQueueJobs } from '../hooks/useUpdateQueue'
 import { useI18n } from '../i18n'
 import { useUIStore } from '../store/ui'
+
+function extractRegistryDomain(item: { registry?: string; imageRef?: string }): string {
+  if (item.registry) return item.registry.trim().toLowerCase()
+  const raw = (item.imageRef || '').trim().split('@')[0]
+  if (!raw) return ''
+  const firstSlash = raw.indexOf('/')
+  if (firstSlash < 0) return 'docker.io'
+  const first = raw.slice(0, firstSlash).toLowerCase()
+  if (first.includes('.') || first.includes(':') || first === 'localhost') {
+    if (
+      first === 'index.docker.io' ||
+      first === 'registry-1.docker.io' ||
+      first === 'registry.hub.docker.com'
+    ) {
+      return 'docker.io'
+    }
+    return first
+  }
+  return 'docker.io'
+}
 
 export default function HomePage() {
   const { locale, t } = useI18n()
@@ -54,8 +75,20 @@ export default function HomePage() {
   const [hubForm] = Form.useForm<{ username: string; secret: string }>()
   const [hubSubmitting, setHubSubmitting] = useState(false)
 
+  // 私有仓库凭据原位设置弹窗状态
+  const [regCredModalOpen, setRegCredModalOpen] = useState(false)
+  const [regCredTarget, setRegCredTarget] = useState('')
+  const [regCredForm] = Form.useForm<{ registry: string; username: string; secret: string }>()
+  const [regCredSubmitting, setRegCredSubmitting] = useState(false)
+
   // 其他错误提示条展开状态
   const [failedExpanded, setFailedExpanded] = useState(false)
+
+  const regCredsQuery = useQuery({
+    queryKey: ['regCreds'],
+    queryFn: api.listRegCreds,
+    enabled: regCredModalOpen,
+  })
 
   const overview = useQuery({
     queryKey: ['overview', hostFilter, locale],
@@ -190,6 +223,68 @@ export default function HomePage() {
     () => (rawFailed ?? []).filter((f) => f.errorKind !== 'rate_limited'),
     [rawFailed],
   )
+
+  const authRequiredRegistries = useMemo(() => {
+    const seen = new Set<string>()
+    const list: string[] = []
+    for (const f of otherFailedItems) {
+      if (f.errorKind !== 'auth_required') continue
+      const reg = extractRegistryDomain(f)
+      if (reg && !seen.has(reg)) {
+        seen.add(reg)
+        list.push(reg)
+      }
+    }
+    return list
+  }, [otherFailedItems])
+
+  const openRegCredModal = (initialReg?: string) => {
+    const target = initialReg || authRequiredRegistries[0] || ''
+    const saved = regCredsQuery.data?.items?.find((c) => c.registry === target)
+    setRegCredTarget(target)
+    regCredForm.setFieldsValue({
+      registry: target,
+      username: saved?.username ?? '',
+      secret: '',
+    })
+    setRegCredModalOpen(true)
+  }
+
+  useEffect(() => {
+    if (!regCredModalOpen || !regCredTarget) return
+    const curUser = regCredForm.getFieldValue('username')
+    if (!curUser) {
+      const saved = regCredsQuery.data?.items?.find((c) => c.registry === regCredTarget)
+      if (saved?.username) {
+        regCredForm.setFieldValue('username', saved.username)
+      }
+    }
+  }, [regCredForm, regCredModalOpen, regCredTarget, regCredsQuery.data])
+
+  const handleSaveRegCredAndRecheck = async () => {
+    const raw = regCredForm.getFieldsValue()
+    const registry = (raw.registry || regCredTarget || '').trim()
+    const username = (raw.username || '').trim()
+    const secret = (raw.secret || '').trim()
+    if (!registry || !username || !secret) {
+      message.warning(t.home.regCredRequiredMsg)
+      return
+    }
+    setRegCredSubmitting(true)
+    try {
+      await api.saveRegCred({ registry, username, secret })
+      qc.invalidateQueries({ queryKey: ['regCreds'] })
+      setRegCredModalOpen(false)
+      regCredForm.setFieldValue('secret', '')
+      message.success(t.home.regCredSavedRechecking)
+      const p = await api.triggerCheck(hostFilter || undefined, true)
+      setLiveProgress(p)
+    } catch (e) {
+      showApiError(e)
+    } finally {
+      setRegCredSubmitting(false)
+    }
+  }
 
   const formatFailedItemLine = (f: FailedItem) => {
     const displayName = f.serviceName && f.serviceName !== 'main' ? f.serviceName : f.appName
@@ -433,9 +528,11 @@ export default function HomePage() {
             ) : undefined
           }
           action={
-            <Button type="link" size="small" onClick={() => navigate('/settings')}>
-              {t.home.failedGoCreds}
-            </Button>
+            authRequiredRegistries.length > 0 ? (
+              <Button type="link" size="small" onClick={() => openRegCredModal()}>
+                {t.home.failedGoCreds}
+              </Button>
+            ) : undefined
           }
         />
       )}
@@ -487,6 +584,68 @@ export default function HomePage() {
             <Input.Password
               placeholder={t.home.hubSecretPlaceholder}
               onPressEnter={handleSaveHubAndRecheck}
+            />
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 私有仓库凭据原位设置弹窗 */}
+      <Modal
+        open={regCredModalOpen}
+        title={t.home.regCredModalTitle}
+        onCancel={() => setRegCredModalOpen(false)}
+        okText={t.home.hubSaveAndRecheck}
+        cancelText={t.ignoreModal.cancel}
+        confirmLoading={regCredSubmitting}
+        onOk={handleSaveRegCredAndRecheck}
+        width={420}
+        destroyOnHidden
+      >
+        <Form
+          form={regCredForm}
+          layout="vertical"
+          initialValues={{ registry: regCredTarget }}
+          style={{ paddingTop: 8 }}
+        >
+          <Form.Item name="registry" label={t.home.regCredDomainLabel}>
+            {authRequiredRegistries.length > 1 ? (
+              <Select
+                options={authRequiredRegistries.map((r) => ({ label: r, value: r }))}
+                onChange={(val) => {
+                  setRegCredTarget(val)
+                  const saved = regCredsQuery.data?.items?.find((c) => c.registry === val)
+                  regCredForm.setFieldsValue({
+                    registry: val,
+                    username: saved?.username ?? '',
+                    secret: '',
+                  })
+                }}
+                style={{ fontFamily: token.fontFamilyCode }}
+              />
+            ) : (
+              <Input
+                readOnly
+                tabIndex={-1}
+                style={{
+                  fontFamily: token.fontFamilyCode,
+                  backgroundColor: token.colorFillAlter,
+                  cursor: 'default',
+                }}
+              />
+            )}
+          </Form.Item>
+          <Form.Item name="username" label={t.home.regCredUserLabel} required>
+            <Input placeholder={t.home.regCredUserPlaceholder} autoFocus />
+          </Form.Item>
+          <Form.Item
+            name="secret"
+            label={t.home.regCredSecretLabel}
+            required
+            style={{ marginBottom: 0 }}
+          >
+            <Input.Password
+              placeholder={t.home.regCredSecretPlaceholder}
+              onPressEnter={handleSaveRegCredAndRecheck}
             />
           </Form.Item>
         </Form>

@@ -214,6 +214,7 @@ type FailedItem struct {
 	ServiceName string `json:"serviceName"`
 	HostName    string `json:"hostName"`
 	ImageRef    string `json:"imageRef"`
+	Registry    string `json:"registry,omitempty"`
 	ErrorKind   string `json:"errorKind"`
 	ErrorMsg    string `json:"errorMsg"`
 }
@@ -600,6 +601,10 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 		card.Services = append(card.Services, item)
 
 		if fKind == string(classify.KindCheckFailed) {
+			var failedReg string
+			if pr, pErr := version.ParseImageRef(imageRef); pErr == nil {
+				failedReg = pr.Registry
+			}
 			failedList = append(failedList, FailedItem{
 				ServiceKey:  svcKey,
 				AppKey:      appKey,
@@ -607,6 +612,7 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 				ServiceName: svcName,
 				HostName:    h.Name,
 				ImageRef:    imageRef,
+				Registry:    failedReg,
 				ErrorKind:   errKind,
 				ErrorMsg:    localErrMsg,
 			})

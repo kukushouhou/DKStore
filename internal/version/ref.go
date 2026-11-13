@@ -81,8 +81,15 @@ func (p ParsedRef) WithTag(newTag string) string {
 	return p.Registry + "/" + repo + ":" + newTag
 }
 
-func normalizeRegistry(r string) string {
-	switch strings.ToLower(r) {
+// NormalizeRegistry 规范化仓库域名（去除可选协议头与尾部路径，并归一 Docker Hub / GHCR 常见镜像域名）。
+func NormalizeRegistry(r string) string {
+	s := strings.ToLower(strings.TrimSpace(r))
+	s = strings.TrimPrefix(s, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	if idx := strings.IndexByte(s, '/'); idx >= 0 {
+		s = s[:idx]
+	}
+	switch s {
 	case "index.docker.io", "registry-1.docker.io", "registry.hub.docker.com", "docker.io",
 		"docker.1ms.run", "docker.3ms.run", "docker.m.daocloud.io", "dockerproxy.com",
 		"docker.nju.edu.cn", "hub-mirror.c.163.com", "mirror.baidubce.com":
@@ -90,6 +97,10 @@ func normalizeRegistry(r string) string {
 	case "ghcr.io", "ghcr.nju.edu.cn", "ghcr.m.daocloud.io", "ghcr-proxy.com":
 		return "ghcr.io"
 	default:
-		return strings.ToLower(r)
+		return s
 	}
+}
+
+func normalizeRegistry(r string) string {
+	return NormalizeRegistry(r)
 }
