@@ -11,7 +11,7 @@ DKStore is an app-store-like update center designed for home NAS, routers, and L
 ## Key Capabilities
 
 - **Update-First Experience**: Clean app-store style view grouped into **Available Updates**, **Caution Updates** (major version bumps, database services, and breaking-change rules), and **Ignored** (`this_version` or `forever`).
-- **Install Once, Manage Everywhere**: Agentless remote management via SSH (`docker.sock` forwarding, `sudo -n`, or passwordless `sudo -S` over SSH) and local Unix socket.
+- **Install Once, Manage Everywhere**: Direct remote management via local Unix socket, Synology DSM WebAPI, or standard SSH (`docker.sock` forwarding, `sudo -n`, or `sudo -S` over SSH) without installing any client daemon on managed hosts.
 - **Native Coexistence with Synology DSM & Compose**:
   - Automatically discovers native Synology Container Manager projects (`SYNO.Docker.Project`), standard Docker Compose projects (`docker-compose.yml` + `.env`), and standalone containers.
   - Identifies platform Package Center containers (`vendor_managed`) as read-only so system packages are never damaged.

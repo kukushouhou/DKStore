@@ -11,7 +11,7 @@ DKStore 是面向家庭 NAS、软路由（OpenWrt / iStoreOS）与 Linux 主机�
 ## 核心能力
 
 - **更新优先，而非运维优先**：围绕**“可更新 / 需谨慎更新（跨大版本、数据库服务与高风险规则）/ 已忽略（仅忽略当前版本或永久忽略）”**三组卡片展示，提供清晰的更新原因与官方 Release Notes 跳转。
-- **一处安装，多端无 Agent 管理**：通过本机 `docker.sock` 或标准 SSH（支持 Socket 转发、免密 `sudo -n` 以及群晖管理员 `sudo -S` 标准输入提权）接入局域网内多台 Linux、群晖 NAS 与软路由设备。
+- **一处安装，多端直连管理（被管设备免装客户端）**：通过本机 `docker.sock`、群晖 DSM WebAPI 或标准 SSH（支持 Socket 转发、免密 `sudo -n` 以及管理员 `sudo -S` 标准输入提权）直接接入局域网内多台 Linux、群晖 NAS、飞牛 fnOS 与软路由设备。
 - **与群晖 Container Manager 及 Compose 原生并存**：
   - 自动识别群晖 Container Manager 原生项目（`SYNO.Docker.Project`）、标准 Docker Compose 项目（解析 `docker-compose.yml` 与 `.env` 变量）及独立容器。
   - 自动识别群晖套件中心等平台托管容器（`vendor_managed`）并设为只读保护，防止误改系统套件。
