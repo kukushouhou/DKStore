@@ -28,8 +28,8 @@ import {
   CloseCircleOutlined,
   CloudServerOutlined,
   CopyOutlined,
-  DeleteOutlined,
   DesktopOutlined,
+  DisconnectOutlined,
   EditOutlined,
   HddOutlined,
   KeyOutlined,
@@ -491,6 +491,10 @@ export default function HostsPage() {
                   <Popconfirm
                     key="del"
                     title={t.hosts.deleteConfirm}
+                    description={t.hosts.deleteConfirmDesc}
+                    okText={t.hosts.unbindOkBtn}
+                    cancelText={t.ignoreModal.cancel}
+                    okButtonProps={{ danger: true }}
                     onConfirm={async () => {
                       try {
                         await api.deleteHost(h.id)
@@ -503,7 +507,9 @@ export default function HostsPage() {
                       }
                     }}
                   >
-                    <Button type="text" danger size="small" icon={<DeleteOutlined />} />
+                    <Button type="text" danger size="small" icon={<DisconnectOutlined />}>
+                      {t.hosts.unbindHost}
+                    </Button>
                   </Popconfirm>,
                 ]}
               >
