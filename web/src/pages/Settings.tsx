@@ -1,23 +1,44 @@
 import { useEffect, useState } from 'react'
 import {
+  Alert,
   Button,
   Card,
   Col,
+  Divider,
+  Flex,
   Form,
   Input,
   List,
+  Progress,
   Row,
   Segmented,
   Select,
   Space,
   Tag,
+  Tooltip,
   Typography,
+  Upload,
   message,
   theme,
 } from 'antd'
-import { DeleteOutlined, GithubOutlined, PlusOutlined, ReloadOutlined, SendOutlined } from '@ant-design/icons'
+import {
+  DeleteOutlined,
+  GithubOutlined,
+  PlusOutlined,
+  ReloadOutlined,
+  SendOutlined,
+  UploadOutlined,
+} from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { api, showApiError, type AppSettings, type RegistryCred } from '../api/client'
+import {
+  api,
+  showApiError,
+  type AppSettings,
+  type RegistryCred,
+  type SelfUpdateConfig,
+  type SelfUpdateJob,
+} from '../api/client'
+import SelfUpdateSourceFields from '../components/SelfUpdateSourceFields'
 import { useI18n } from '../i18n'
 import { useUIStore, type Locale, type ThemeMode } from '../store/ui'
 
@@ -31,8 +52,80 @@ export default function SettingsPage() {
   const credsQuery = useQuery({ queryKey: ['regCreds'], queryFn: api.listRegCreds })
   const selfUpdateQuery = useQuery({
     queryKey: ['selfUpdate', locale],
-    queryFn: api.selfUpdateStatus,
+    queryFn: () => api.selfUpdateStatus(false),
   })
+
+  const [suCfgDraft, setSuCfg] = useState<SelfUpdateConfig | null>(null)
+  const suCfg: SelfUpdateConfig = suCfgDraft ??
+    selfUpdateQuery.data?.config ?? {
+      repo: 'kukushouhou/DKStore',
+      channel: 'github',
+      customHost: '',
+      customMode: 'prefix',
+    }
+  const [savingSuCfg, setSavingSuCfg] = useState(false)
+  const [recheckingSu, setRecheckingSu] = useState(false)
+  const [uploadingPkg, setUploadingPkg] = useState(false)
+  const [showNotes, setShowNotes] = useState(false)
+  const [safetyModalOpen, setSafetyModalOpen] = useState(false)
+  const [localJob, setLocalJob] = useState<SelfUpdateJob | null>(null)
+  const activeJob = localJob ?? selfUpdateQuery.data?.job ?? null
+
+  useEffect(() => {
+    if (!activeJob || (activeJob.state !== 'running' && activeJob.state !== 'restarting')) {
+      return
+    }
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+
+    const pollRunning = async () => {
+      try {
+        const st = await api.selfUpdateStatus(false)
+        if (cancelled) return
+        if (st.job) {
+          setLocalJob(st.job)
+          if (st.job.state === 'running') {
+            timer = setTimeout(pollRunning, 550)
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          setLocalJob((prev) => {
+            const base = prev ?? activeJob
+            return base ? { ...base, state: 'restarting', phase: 'restarting', percent: 100 } : null
+          })
+        }
+      }
+    }
+
+    const pollRestarting = async (attempt: number) => {
+      try {
+        const h = await api.health()
+        if (cancelled) return
+        if (h.status === 'ok') {
+          message.success(t.selfUpdate.upgradedReloading)
+          setTimeout(() => window.location.reload(), 300)
+          return
+        }
+      } catch {
+        // 切换瞬间连接重置属正常现象，继续轮询
+      }
+      if (!cancelled && attempt < 40) {
+        timer = setTimeout(() => void pollRestarting(attempt + 1), 650)
+      }
+    }
+
+    if (activeJob.state === 'running') {
+      timer = setTimeout(pollRunning, 550)
+    } else if (activeJob.state === 'restarting') {
+      timer = setTimeout(() => void pollRestarting(0), 950)
+    }
+
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [activeJob, t.selfUpdate.upgradedReloading])
 
   const [form] = Form.useForm<AppSettings>()
   const [credForm] = Form.useForm<RegistryCred>()
@@ -124,57 +217,211 @@ export default function SettingsPage() {
     }
   }
 
+  const onRefreshSelfUpdate = async () => {
+    setRecheckingSu(true)
+    try {
+      const fresh = await api.selfUpdateStatus(true)
+      qc.setQueryData(['selfUpdate', locale], fresh)
+    } catch (e) {
+      showApiError(e)
+    } finally {
+      setRecheckingSu(false)
+    }
+  }
+
+  const onSaveSelfUpdateCfg = async () => {
+    setSavingSuCfg(true)
+    try {
+      const res = await api.saveSelfUpdateConfig(suCfg)
+      setSuCfg(res.config)
+      message.success(t.selfUpdate.savedMsg)
+      const fresh = await api.selfUpdateStatus(true)
+      qc.setQueryData(['selfUpdate', locale], fresh)
+    } catch (e) {
+      showApiError(e)
+    } finally {
+      setSavingSuCfg(false)
+    }
+  }
+
+  const onApplyOnline = async () => {
+    try {
+      const res = await api.applySelfUpdate()
+      setLocalJob(res.job)
+    } catch (e) {
+      showApiError(e)
+    }
+  }
+
+  const onUploadPackage = async (file: File) => {
+    setUploadingPkg(true)
+    try {
+      const res = await api.uploadSelfUpdate(file)
+      setLocalJob(res.job)
+    } catch (e) {
+      showApiError(e)
+    } finally {
+      setUploadingPkg(false)
+    }
+  }
+
+  const isUpgrading = activeJob?.state === 'running' || activeJob?.state === 'restarting'
+  const phaseLabel =
+    activeJob?.phase === 'restarting'
+      ? t.selfUpdate.phaseRestarting
+      : activeJob?.phase === 'installing'
+        ? t.selfUpdate.phaseInstalling
+        : activeJob?.phase === 'verifying'
+          ? t.selfUpdate.phaseVerifying
+          : t.selfUpdate.phaseDownloading
+  const pkgSizeMB = selfUpdateQuery.data?.assetSize
+    ? ` (${(selfUpdateQuery.data.assetSize / (1024 * 1024)).toFixed(1)} MB)`
+    : ''
+
   return (
-    <Space direction="vertical" size="large" style={{ width: '100%' }}>
+    <Space orientation="vertical" size="large" style={{ width: '100%' }}>
       <Typography.Title level={3} style={{ margin: 0 }}>
         {t.settings.title}
       </Typography.Title>
 
       <Card
-        title={t.settings.selfUpdateTitle}
+        title={t.selfUpdate.cardTitle}
         extra={
-          <Button
-            size="small"
-            icon={<ReloadOutlined />}
-            loading={selfUpdateQuery.isFetching}
-            onClick={() => selfUpdateQuery.refetch()}
-          />
-        }
-      >
-        <Space direction="vertical" size="small" style={{ width: '100%' }}>
-          <Space wrap>
-            <Typography.Text type="secondary">{t.settings.curVersionLabel}:</Typography.Text>
-            <Tag style={{ fontFamily: token.fontFamilyCode, margin: 0 }}>
-              {selfUpdateQuery.data?.currentVersion || 'v0.2.0'}
-            </Tag>
-            <Typography.Text type="secondary">{t.settings.latestVersionLabel}:</Typography.Text>
-            <Tag
-              color={selfUpdateQuery.data?.hasUpdate ? 'processing' : 'success'}
-              style={{ fontFamily: token.fontFamilyCode, margin: 0 }}
+          <Space size={8}>
+            <Upload
+              showUploadList={false}
+              beforeUpload={(file) => {
+                void onUploadPackage(file)
+                return false
+              }}
             >
-              {selfUpdateQuery.data?.latestVersion || selfUpdateQuery.data?.currentVersion || 'v0.2.0'}
-            </Tag>
-            <Tag color={selfUpdateQuery.data?.hasUpdate ? 'processing' : 'success'} style={{ margin: 0 }}>
-              {selfUpdateQuery.data?.hasUpdate ? t.settings.newVersionBadge : t.settings.upToDateBadge}
-            </Tag>
-            {selfUpdateQuery.data?.releaseUrl && (
               <Button
                 size="small"
-                type="link"
-                icon={<GithubOutlined />}
-                href={selfUpdateQuery.data.releaseUrl}
-                target="_blank"
-                rel="noreferrer"
+                icon={<UploadOutlined />}
+                loading={uploadingPkg}
+                disabled={isUpgrading}
               >
-                {t.settings.viewReleaseBtn}
+                {t.selfUpdate.uploadBtn}
+              </Button>
+            </Upload>
+            <Tooltip title={t.selfUpdate.checkBtnTip}>
+              <Button
+                size="small"
+                icon={<ReloadOutlined />}
+                loading={recheckingSu || selfUpdateQuery.isFetching}
+                disabled={isUpgrading}
+                onClick={onRefreshSelfUpdate}
+              />
+            </Tooltip>
+          </Space>
+        }
+      >
+        <Space orientation="vertical" size={14} style={{ width: '100%' }}>
+          {selfUpdateQuery.data?.rolledBackError && (
+            <Alert
+              type="warning"
+              showIcon
+              title={selfUpdateQuery.data.rolledBackError}
+            />
+          )}
+
+          <Flex align="center" justify="space-between" wrap gap={8}>
+            <Space wrap>
+              <Typography.Text type="secondary">{t.settings.curVersionLabel}:</Typography.Text>
+              <Tag style={{ fontFamily: token.fontFamilyCode, margin: 0 }}>
+                {selfUpdateQuery.data?.currentVersion || 'v0.3.0'}
+              </Tag>
+              <Typography.Text type="secondary">{t.settings.latestVersionLabel}:</Typography.Text>
+              <Tag
+                color={selfUpdateQuery.data?.hasUpdate ? 'processing' : 'success'}
+                style={{ fontFamily: token.fontFamilyCode, margin: 0 }}
+              >
+                {selfUpdateQuery.data?.latestVersion || selfUpdateQuery.data?.currentVersion || 'v0.3.0'}
+              </Tag>
+              <Tag color={selfUpdateQuery.data?.hasUpdate ? 'processing' : 'success'} style={{ margin: 0 }}>
+                {selfUpdateQuery.data?.hasUpdate ? t.settings.newVersionBadge : t.settings.upToDateBadge}
+              </Tag>
+              {selfUpdateQuery.data?.releaseNotes ? (
+                <Button
+                  size="small"
+                  type="link"
+                  style={{ padding: 0 }}
+                  onClick={() => setShowNotes((v) => !v)}
+                >
+                  {t.selfUpdate.notesToggle}
+                </Button>
+              ) : (
+                selfUpdateQuery.data?.releaseUrl && (
+                  <Button
+                    size="small"
+                    type="link"
+                    icon={<GithubOutlined />}
+                    href={selfUpdateQuery.data.releaseUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {t.settings.viewReleaseBtn}
+                  </Button>
+                )
+              )}
+            </Space>
+
+            {selfUpdateQuery.data?.hasUpdate && (
+              <Button type="primary" loading={isUpgrading} onClick={onApplyOnline}>
+                {t.selfUpdate.updateNowBtn}
+                {pkgSizeMB}
               </Button>
             )}
-          </Space>
-          {selfUpdateQuery.data?.hasUpdate && selfUpdateQuery.data?.commandHint && (
-            <Typography.Text code style={{ fontSize: token.fontSizeSM }}>
-              {selfUpdateQuery.data.commandHint}
-            </Typography.Text>
+          </Flex>
+
+          {showNotes && selfUpdateQuery.data?.releaseNotes && (
+            <div
+              style={{
+                padding: '10px 14px',
+                borderRadius: token.borderRadius,
+                background: token.colorFillAlter,
+                border: `1px solid ${token.colorBorderSecondary}`,
+                fontSize: token.fontSizeSM,
+                whiteSpace: 'pre-wrap',
+                maxHeight: 220,
+                overflowY: 'auto',
+              }}
+            >
+              {selfUpdateQuery.data.releaseNotes}
+            </div>
           )}
+
+          {activeJob && activeJob.state !== 'idle' && (
+            <div style={{ maxWidth: 460 }}>
+              <Typography.Text
+                type={activeJob.state === 'failed' ? 'danger' : 'secondary'}
+                style={{ fontSize: token.fontSizeSM, display: 'block', marginBottom: 4 }}
+              >
+                {activeJob.state === 'failed' ? activeJob.error : phaseLabel}
+              </Typography.Text>
+              <Progress
+                percent={activeJob.percent}
+                size="small"
+                status={activeJob.state === 'failed' ? 'exception' : 'active'}
+              />
+            </div>
+          )}
+
+          <Divider style={{ margin: '2px 0' }} />
+
+          <SelfUpdateSourceFields
+            layout="horizontal"
+            value={suCfg}
+            onChange={setSuCfg}
+            defaultRepo={selfUpdateQuery.data?.defaultRepo}
+            officialMirror={selfUpdateQuery.data?.officialMirror}
+            presetMirrors={selfUpdateQuery.data?.presetMirrors}
+            onSave={onSaveSelfUpdateCfg}
+            saving={savingSuCfg}
+            safetyModalOpen={safetyModalOpen}
+            onSafetyModalChange={setSafetyModalOpen}
+            showInlineSafetyLink
+          />
         </Space>
       </Card>
 

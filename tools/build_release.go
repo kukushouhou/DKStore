@@ -11,11 +11,13 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -72,7 +74,12 @@ func main() {
 		{key: "windows-amd64", goos: "windows", goarch: "amd64", outBin: "dkstore-windows-amd64.exe"},
 	}
 
-	ldflags := fmt.Sprintf("-s -w -X github.com/kukushouhou/DKStore/internal/version.Version=v%s -X github.com/kukushouhou/DKStore/internal/version.Commit=%s", ver, commit)
+	repoSlug := strings.TrimSpace(os.Getenv("GITHUB_REPOSITORY"))
+	if repoSlug == "" {
+		repoSlug = "kukushouhou/DKStore"
+	}
+
+	ldflags := fmt.Sprintf("-s -w -X github.com/kukushouhou/DKStore/internal/version.Version=v%s -X github.com/kukushouhou/DKStore/internal/version.Commit=%s -X github.com/kukushouhou/DKStore/internal/version.DefaultRepo=%s", ver, commit, repoSlug)
 	for _, b := range builds {
 		fmt.Printf("==> Compiling %s (v%s, %s)...\n", b.key, ver, commit)
 		outPath := filepath.Join(binCacheDir, b.outBin)
@@ -127,11 +134,16 @@ func main() {
 	}
 	fmt.Printf("Built Archive: %s\n", zipPath)
 
-	// 4. 生成 SHA256SUMS.txt
+	// 4. 生成 SHA256SUMS.txt 与静态自更新清单 latest.json
 	if err := writeSHA256Sums(distDir); err != nil {
 		panic(err)
 	}
 	fmt.Printf("Built Checksums: %s\n", filepath.Join(distDir, "SHA256SUMS.txt"))
+
+	if err := writeLatestManifest(rootDir, distDir, ver); err != nil {
+		panic(err)
+	}
+	fmt.Printf("Built Manifest: %s\n", filepath.Join(distDir, "latest.json"))
 }
 
 func writeLinuxTarGz(outPath string, binBytes, serviceBytes, readmeEN, readmeZH []byte) error {
@@ -203,7 +215,7 @@ func writeSHA256Sums(distDir string) error {
 	}
 	var names []string
 	for _, e := range entries {
-		if e.IsDir() || e.Name() == "SHA256SUMS.txt" || e.Name() == "RELEASE_NOTES.md" {
+		if e.IsDir() || e.Name() == "SHA256SUMS.txt" || e.Name() == "RELEASE_NOTES.md" || e.Name() == "latest.json" {
 			continue
 		}
 		names = append(names, e.Name())
@@ -220,4 +232,91 @@ func writeSHA256Sums(distDir string) error {
 		lines = append(lines, fmt.Sprintf("%s  %s", hex.EncodeToString(sum[:]), name))
 	}
 	return os.WriteFile(filepath.Join(distDir, "SHA256SUMS.txt"), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+}
+
+func writeLatestManifest(rootDir, distDir, ver string) error {
+	type assetItem struct {
+		Name   string `json:"name"`
+		Size   int64  `json:"size"`
+		SHA256 string `json:"sha256"`
+	}
+	manifest := struct {
+		Version     string               `json:"version"`
+		PublishedAt string               `json:"publishedAt"`
+		NotesZh     string               `json:"notesZh,omitempty"`
+		NotesEn     string               `json:"notesEn,omitempty"`
+		Assets      map[string]assetItem `json:"assets"`
+	}{
+		Version:     "v" + ver,
+		PublishedAt: time.Now().UTC().Format(time.RFC3339),
+		Assets:      make(map[string]assetItem),
+	}
+
+	assetFiles := map[string]string{
+		"linux-amd64":   fmt.Sprintf("dkstore-linux-amd64-%s.tar.gz", ver),
+		"linux-arm64":   fmt.Sprintf("dkstore-linux-arm64-%s.tar.gz", ver),
+		"linux-armv7":   fmt.Sprintf("dkstore-linux-armv7-%s.tar.gz", ver),
+		"windows-amd64": fmt.Sprintf("dkstore-windows-amd64-%s.zip", ver),
+	}
+	for plat, name := range assetFiles {
+		b, err := os.ReadFile(filepath.Join(distDir, name))
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(b)
+		manifest.Assets[plat] = assetItem{
+			Name:   name,
+			Size:   int64(len(b)),
+			SHA256: hex.EncodeToString(sum[:]),
+		}
+	}
+
+	if clBytes, err := os.ReadFile(filepath.Join(rootDir, "CHANGELOG.md")); err == nil {
+		zh, en := extractManifestNotes(string(clBytes), ver)
+		manifest.NotesZh = zh
+		manifest.NotesEn = en
+	}
+
+	out, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(distDir, "latest.json"), append(out, '\n'), 0o644)
+}
+
+func extractManifestNotes(content, cleanVer string) (string, string) {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	reExact := regexp.MustCompile(fmt.Sprintf(`^##\s+\[?v?%s\]?(?:\s|$|-)`, regexp.QuoteMeta(cleanVer)))
+	sec := sliceSection(lines, reExact)
+	if sec == "" {
+		reUnrel := regexp.MustCompile(`(?i)^##\s+\[?(?:开发中\s*/\s*)?unreleased\]?(?:\s|$|-)|^##\s+\[?开发中\]?(?:\s|$|-)`)
+		sec = sliceSection(lines, reUnrel)
+	}
+	if sec == "" {
+		return "", ""
+	}
+	parts := strings.SplitN(sec, "\n---\n", 2)
+	if len(parts) == 2 {
+		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+	}
+	return strings.TrimSpace(sec), strings.TrimSpace(sec)
+}
+
+func sliceSection(lines []string, headerRe *regexp.Regexp) string {
+	inSec := false
+	var buf []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !inSec {
+			if headerRe.MatchString(trimmed) {
+				inSec = true
+			}
+			continue
+		}
+		if strings.HasPrefix(trimmed, "## ") {
+			break
+		}
+		buf = append(buf, line)
+	}
+	return strings.TrimSpace(strings.Join(buf, "\n"))
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/kukushouhou/DKStore/internal/notify"
 	"github.com/kukushouhou/DKStore/internal/registry"
 	"github.com/kukushouhou/DKStore/internal/secret"
+	"github.com/kukushouhou/DKStore/internal/selfupdate"
 	"github.com/kukushouhou/DKStore/internal/store"
 	"github.com/kukushouhou/DKStore/internal/updater"
 	"github.com/kukushouhou/DKStore/internal/version"
@@ -39,14 +40,21 @@ func main() {
 }
 
 func run() error {
-	if len(os.Args) >= 2 && (os.Args[1] == "--rpcd" || os.Args[1] == "-rpcd") {
-		return runRPCD(os.Args[2:])
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "--rpcd", "-rpcd":
+			return runRPCD(os.Args[2:])
+		case "--print-version", "--version", "-version", "-v":
+			fmt.Println(version.Version)
+			return nil
+		}
 	}
 	cfg, err := config.Load(os.Args[1:])
 	if err != nil {
 		return err
 	}
 	log := newLogger(cfg.LogLevel)
+	selfupdate.MaybeBootstrap(cfg.DataDir, log)
 	log.Info("DKStore 启动", "version", version.Version, "commit", version.Commit, "data", cfg.DataDir)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -75,6 +83,13 @@ func run() error {
 	ntfSvc := notify.New(st)
 	chkSvc := checker.New(log, st, hostReg, invSvc, regCli, ignSvc, ntfSvc)
 	upSvc := updater.New(log, st, hostReg, invSvc, regCli)
+	reloadCh := make(chan string, 1)
+	selfUpdSvc := selfupdate.New(log, st, cfg.DataDir, func(execTarget string) {
+		select {
+		case reloadCh <- execTarget:
+		default:
+		}
+	})
 
 	chkSvc.StartScheduler(ctx)
 	// 启动时若从未检查过且存在主机，自动后台触发一次初始检查
@@ -97,16 +112,17 @@ func run() error {
 	}
 
 	handler := api.New(api.Deps{
-		Log:     log,
-		Store:   st,
-		Auth:    authSvc,
-		Hosts:   hostReg,
-		Reg:     regCli,
-		Ignore:  ignSvc,
-		Notify:  ntfSvc,
-		Checker: chkSvc,
-		Updater: upSvc,
-		Assets:  assets,
+		Log:        log,
+		Store:      st,
+		Auth:       authSvc,
+		Hosts:      hostReg,
+		Reg:        regCli,
+		Ignore:     ignSvc,
+		Notify:     ntfSvc,
+		Checker:    chkSvc,
+		Updater:    upSvc,
+		SelfUpdate: selfUpdSvc,
+		Assets:     assets,
 	}).Handler()
 
 	srv := &http.Server{
@@ -156,25 +172,43 @@ func run() error {
 		}()
 	}
 
+	go func() {
+		time.Sleep(800 * time.Millisecond)
+		selfupdate.MarkBootHealthy(cfg.DataDir)
+	}()
+
+	var reloadBin string
 	select {
 	case err, ok := <-errCh:
 		if ok && err != nil {
 			return err
 		}
+	case reloadBin = <-reloadCh:
+		log.Info("收到自更新热切换信号，正在优雅释放端口与数据库后切换新版本…", "target", reloadBin)
 	case <-ctx.Done():
 	}
 
 	log.Info("正在停止…")
+	stop()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if unixSrv != nil {
 		_ = unixSrv.Shutdown(shutdownCtx)
 		_ = os.Remove(cfg.UnixSocket)
 	}
+	var srvErr error
 	if cfg.Listen != "" {
-		return srv.Shutdown(shutdownCtx)
+		srvErr = srv.Shutdown(shutdownCtx)
 	}
-	return nil
+	if reloadBin != "" {
+		hostReg.Close()
+		_ = st.Close()
+		if err := selfupdate.ExecReload(reloadBin, cfg.DataDir); err != nil {
+			return fmt.Errorf("切换新版进程失败: %w", err)
+		}
+		return nil
+	}
+	return srvErr
 }
 
 func newLogger(level string) *slog.Logger {

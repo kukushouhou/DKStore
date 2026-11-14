@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Alert,
+  Badge,
   Button,
   Flex,
   Grid,
@@ -85,6 +86,13 @@ export default function AppLayout() {
     queryKey: ['settings'],
     queryFn: api.getSettings,
     enabled: canSubscribeEvents,
+  })
+
+  const selfUpdateNavQuery = useQuery({
+    queryKey: ['selfUpdate', locale],
+    queryFn: () => api.selfUpdateStatus(false),
+    enabled: canSubscribeEvents,
+    staleTime: 10 * 60 * 1000,
   })
 
   // 同步后端保存的 progressStyle（默认 layered）
@@ -233,7 +241,17 @@ export default function AppLayout() {
     { key: '/containers', icon: <ContainerOutlined />, label: t.nav.containers },
     { key: '/hosts', icon: <CloudServerOutlined />, label: t.nav.hosts },
     { key: '/history', icon: <HistoryOutlined />, label: t.nav.history },
-    { key: '/settings', icon: <SettingOutlined />, label: t.nav.settings },
+    {
+      key: '/settings',
+      icon: <SettingOutlined />,
+      label: selfUpdateNavQuery.data?.hasUpdate ? (
+        <Badge dot color={token.colorPrimary} offset={[5, -1]}>
+          <span>{t.nav.settings}</span>
+        </Badge>
+      ) : (
+        t.nav.settings
+      ),
+    },
   ]
   const selected = items.find((i) => i.key !== '/' && pathname.startsWith(i.key))?.key ?? '/'
 

@@ -11,7 +11,7 @@ RUN npm run build
 # ---- 后端构建（交叉编译，无 CGO）----
 FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
 ARG TARGETOS TARGETARCH TARGETVARIANT
-ARG VERSION=dev COMMIT=none
+ARG VERSION=dev COMMIT=none REPO=kukushouhou/DKStore
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -19,7 +19,7 @@ COPY . .
 COPY --from=web /src/web/dist/app ./web/dist/app
 RUN GOARM=${TARGETVARIANT#v} CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath \
-      -ldflags "-s -w -X github.com/kukushouhou/DKStore/internal/version.Version=${VERSION} -X github.com/kukushouhou/DKStore/internal/version.Commit=${COMMIT}" \
+      -ldflags "-s -w -X github.com/kukushouhou/DKStore/internal/version.Version=${VERSION} -X github.com/kukushouhou/DKStore/internal/version.Commit=${COMMIT} -X github.com/kukushouhou/DKStore/internal/version.DefaultRepo=${REPO}" \
       -o /out/dkstore ./cmd/dkstore
 
 # ---- 运行镜像 ----

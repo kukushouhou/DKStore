@@ -1,11 +1,14 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import {
   ArrowRightOutlined,
+  CheckCircleFilled,
   CheckOutlined,
   CopyOutlined,
   DesktopOutlined,
+  ExclamationCircleFilled,
   GlobalOutlined,
   InfoCircleOutlined,
+  LoadingOutlined,
   LockOutlined,
 } from '@ant-design/icons'
 import {
@@ -26,9 +29,17 @@ import {
   theme,
 } from 'antd'
 import { useQueryClient } from '@tanstack/react-query'
-import { api, ApiError, type AuthStatus, type HostInput } from '../api/client'
+import {
+  api,
+  ApiError,
+  showApiError,
+  type AuthStatus,
+  type HostInput,
+  type SelfUpdateConfig,
+} from '../api/client'
 import AuthToolbar from '../components/AuthToolbar'
 import DKStoreLogo from '../components/DKStoreLogo'
+import SelfUpdateSourceFields from '../components/SelfUpdateSourceFields'
 import { useI18n } from '../i18n'
 
 const MIN_PW = 6
@@ -108,10 +119,43 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
   const { t } = useI18n()
   const { token } = theme.useToken()
   const qc = useQueryClient()
-  const [step, setStep] = useState<1 | 2>(1)
+  const [step, setStep] = useState<1 | 2 | 3>(1)
   const [pw, setPw] = useState('')
   const [pw2, setPw2] = useState('')
   const [saving, setSaving] = useState(false)
+
+  // 步骤 3（更新源选择与前两步期间后台 GitHub 连通性探测）
+  const [probeState, setProbeState] = useState<'probing' | 'ok' | 'unreachable'>('probing')
+  const [suCfg, setSuCfg] = useState<SelfUpdateConfig>({
+    repo: 'kukushouhou/DKStore',
+    channel: 'github',
+    customHost: '',
+    customMode: 'prefix',
+  })
+  const [safetyModalOpen, setSafetyModalOpen] = useState(false)
+  const [finishing, setFinishing] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const poll = async () => {
+      try {
+        const res = await api.probeGitHubDefault()
+        if (cancelled) return
+        setProbeState(res.state)
+        if (res.state === 'probing') {
+          timer = setTimeout(poll, 1200)
+        }
+      } catch {
+        if (!cancelled) setProbeState('unreachable')
+      }
+    }
+    void poll()
+    return () => {
+      cancelled = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [])
 
   // 步骤 2（套件安装模式：当场绑定本机表单状态）
   const [spkMode, setSpkMode] = useState<'dsm_api' | 'ssh'>('dsm_api')
@@ -154,16 +198,14 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
       setPw('')
       setPw2('')
       message.success(t.auth.setupDone)
+      onStepChange?.(true)
       if (authStatus?.hasLocalHost) {
-        onStepChange?.(false)
-        await qc.invalidateQueries()
-        onDone()
+        setStep(3)
       } else {
         setHostName(t.auth.spkDefaultName)
-        onStepChange?.(true)
         setStep(2)
-        await qc.invalidateQueries()
       }
+      await qc.invalidateQueries()
     } catch (e) {
       message.error((e as Error).message)
       qc.invalidateQueries({ queryKey: ['authStatus'] })
@@ -204,9 +246,8 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
       setOtpModalOpen(false)
       setOtpCode('')
       message.success(t.hosts.saved)
-      onStepChange?.(false)
       await qc.invalidateQueries()
-      onDone()
+      setStep(3)
     } catch (e) {
       if (e instanceof ApiError && (e.code === 'need_otp' || e.testResult?.needOtp)) {
         if (e.testResult?.deviceTokenNonce) {
@@ -226,8 +267,21 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
     localStorage.setItem('dkstore_skipped_local', '1')
     localStorage.removeItem('dkstore_dismiss_local_remind')
     setSkipConfirmOpen(false)
-    onStepChange?.(false)
-    onDone()
+    setStep(3)
+  }
+
+  const finishWizard = async () => {
+    setFinishing(true)
+    try {
+      await api.saveSelfUpdateConfig(suCfg)
+      onStepChange?.(false)
+      await qc.invalidateQueries()
+      onDone()
+    } catch (e) {
+      showApiError(e)
+    } finally {
+      setFinishing(false)
+    }
   }
 
   const skipConfirmModal = (
@@ -251,7 +305,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
     </Modal>
   )
 
-  const renderStepPill = (activeStep: 1 | 2) => (
+  const renderStepPill = (activeStep: 1 | 2 | 3) => (
     <div
       style={{
         display: 'inline-flex',
@@ -272,17 +326,37 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
           fontWeight: 600,
         }}
       >
-        {activeStep === 2 ? '✓ ' : '1. '}
+        {activeStep > 1 ? '✓ ' : '1. '}
         {t.auth.step1Short}
       </span>
+      {!hasAutoLocal && (
+        <>
+          <span style={{ color: token.colorTextQuaternary }}>·</span>
+          <span
+            style={{
+              color:
+                activeStep === 2
+                  ? token.colorPrimary
+                  : activeStep > 2
+                    ? token.colorSuccess
+                    : token.colorTextTertiary,
+              fontWeight: activeStep >= 2 ? 600 : 400,
+            }}
+          >
+            {activeStep > 2 ? '✓ ' : '2. '}
+            {t.auth.step2Short}
+          </span>
+        </>
+      )}
       <span style={{ color: token.colorTextQuaternary }}>·</span>
       <span
         style={{
-          color: activeStep === 2 ? token.colorPrimary : token.colorTextTertiary,
-          fontWeight: activeStep === 2 ? 600 : 400,
+          color: activeStep === 3 ? token.colorPrimary : token.colorTextTertiary,
+          fontWeight: activeStep === 3 ? 600 : 400,
         }}
       >
-        2. {t.auth.step2Short}
+        {hasAutoLocal ? '2. ' : '3. '}
+        {t.auth.step3Short}
       </span>
     </div>
   )
@@ -563,6 +637,76 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
     </div>
   )
 
+  // 步骤 3：更新源设置（始终进入，根据前两步期间后台 GitHub 检测状态切换标题文案）
+  if (step === 3) {
+    const wizardTitle =
+      probeState === 'ok'
+        ? t.selfUpdate.wizardTitleOk
+        : probeState === 'probing'
+          ? t.selfUpdate.wizardTitleProbing
+          : t.selfUpdate.wizardTitleFail
+    const wizardDesc =
+      probeState === 'ok'
+        ? t.selfUpdate.wizardDescOk
+        : probeState === 'probing'
+          ? t.selfUpdate.wizardDescProbing
+          : t.selfUpdate.wizardDescFail
+    const statusIcon =
+      probeState === 'ok' ? (
+        <CheckCircleFilled style={{ color: token.colorSuccess }} />
+      ) : probeState === 'probing' ? (
+        <LoadingOutlined style={{ color: token.colorPrimary }} />
+      ) : (
+        <ExclamationCircleFilled style={{ color: token.colorWarning }} />
+      )
+
+    return renderSplitShell(
+      <div>
+        {renderStepPill(3)}
+        <div style={{ marginBottom: 20 }}>
+          <Flex align="center" gap={8}>
+            {statusIcon}
+            <Typography.Title level={4} style={{ margin: 0 }}>
+              {wizardTitle}
+            </Typography.Title>
+          </Flex>
+          <Typography.Text
+            type="secondary"
+            style={{ fontSize: token.fontSizeSM, display: 'block', marginTop: 4 }}
+          >
+            {wizardDesc}
+          </Typography.Text>
+        </div>
+
+        <SelfUpdateSourceFields
+          layout="vertical"
+          value={suCfg}
+          onChange={setSuCfg}
+          safetyModalOpen={safetyModalOpen}
+          onSafetyModalChange={setSafetyModalOpen}
+        />
+
+        <Divider style={{ margin: '18px 0 14px' }} />
+
+        <Flex justify="space-between" align="center" wrap gap={8}>
+          <Button
+            type="link"
+            size="small"
+            icon={<InfoCircleOutlined />}
+            style={{ padding: 0 }}
+            onClick={() => setSafetyModalOpen(true)}
+          >
+            {t.selfUpdate.safetyLink}
+          </Button>
+          <Button type="primary" loading={finishing} onClick={finishWizard}>
+            {t.auth.setupFinishBtn}
+          </Button>
+        </Flex>
+      </div>,
+      580,
+    )
+  }
+
   // 步骤 2
   if (step === 2) {
     const isDockerMode = authStatus?.installMode === 'docker'
@@ -715,7 +859,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
 
           <Flex justify="flex-end">
             <Button type="primary" onClick={() => setSkipConfirmOpen(true)}>
-              {t.auth.dockerSkipBtn}
+              {t.auth.dockerNextBtn}
             </Button>
           </Flex>
         </div>,
@@ -982,7 +1126,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
           <Space size={8}>
             <Button onClick={() => setSkipConfirmOpen(true)}>{t.auth.spkSkipBtn}</Button>
             <Button type="primary" loading={connecting} onClick={() => submitSpkHost()}>
-              {t.auth.spkConnectBtn}
+              {t.auth.spkNextBtn}
             </Button>
           </Space>
         </Flex>
@@ -1053,7 +1197,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
   // 步骤 1：设置管理员密码
   return renderSplitShell(
     <div>
-      {!hasAutoLocal && renderStepPill(1)}
+      {renderStepPill(1)}
       <div style={{ marginBottom: 20 }}>
         <Typography.Title level={4} style={{ margin: 0 }}>
           {t.auth.setupTitle}
@@ -1126,7 +1270,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
             fontWeight: 500,
           }}
         >
-          {hasAutoLocal ? t.auth.setupFinishBtn : t.auth.setupBtn}
+          {t.auth.setupBtn}
         </Button>
       </Space>
     </div>,

@@ -30,16 +30,17 @@ import (
 
 // Deps 汇总 API 层所需的全部业务服务。
 type Deps struct {
-	Log     *slog.Logger
-	Store   *store.Store
-	Auth    *auth.Service
-	Hosts   *host.Registry
-	Reg     *registry.Client
-	Ignore  *ignore.Service
-	Notify  *notify.Service
-	Checker *checker.Service
-	Updater *updater.Service
-	Assets  fs.FS
+	Log        *slog.Logger
+	Store      *store.Store
+	Auth       *auth.Service
+	Hosts      *host.Registry
+	Reg        *registry.Client
+	Ignore     *ignore.Service
+	Notify     *notify.Service
+	Checker    *checker.Service
+	Updater    *updater.Service
+	SelfUpdate *selfupdate.Service
+	Assets     fs.FS
 }
 
 // Server 组装 HTTP 路由。
@@ -49,6 +50,9 @@ type Server struct {
 
 // New 创建 API 服务。
 func New(d Deps) *Server {
+	if d.SelfUpdate == nil {
+		d.SelfUpdate = selfupdate.New(d.Log, d.Store, "", nil)
+	}
 	if d.Updater != nil {
 		if d.Ignore != nil {
 			d.Updater.SetIgnore(d.Ignore)
@@ -125,7 +129,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/updates/{id}", s.requireAuth(s.handleGetUpdateJob))
 	mux.HandleFunc("GET /api/v1/updates/{id}/rollback-check", s.requireAuth(s.handleVerifyRollback))
 	mux.HandleFunc("POST /api/v1/updates/{id}/rollback", s.requireAuth(s.handleExecuteRollback))
+	mux.HandleFunc("GET /api/v1/self-update/probe-github", s.handleSelfUpdateProbeGitHub)
 	mux.HandleFunc("GET /api/v1/self-update/status", s.requireAuth(s.handleSelfUpdateStatus))
+	mux.HandleFunc("PUT /api/v1/self-update/config", s.requireAuth(s.handleSaveSelfUpdateConfig))
+	mux.HandleFunc("POST /api/v1/self-update/test", s.requireAuth(s.handleTestSelfUpdateSource))
+	mux.HandleFunc("POST /api/v1/self-update/apply", s.requireAuth(s.handleApplySelfUpdate))
+	mux.HandleFunc("POST /api/v1/self-update/upload", s.requireAuth(s.handleUploadSelfUpdate))
 
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		lang := s.langOf(r)
@@ -1056,9 +1065,123 @@ func (s *Server) handleExecuteRollback(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, job)
 }
 
+func (s *Server) handleSelfUpdateProbeGitHub(w http.ResponseWriter, r *http.Request) {
+	if s.d.Auth != nil {
+		st := s.d.Auth.Status(r.Context(), r)
+		if st.Mode != auth.ModeSetupRequired && !st.Authenticated {
+			writeError(w, s.langOf(r), http.StatusUnauthorized, "unauthorized", "")
+			return
+		}
+	}
+	res := s.d.SelfUpdate.GetDefaultGitHubProbe()
+	writeJSON(w, http.StatusOK, res)
+}
+
 func (s *Server) handleSelfUpdateStatus(w http.ResponseWriter, r *http.Request) {
-	st := selfupdate.Check(r.Context(), s.langOf(r))
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("refresh")))
+	refresh := q == "1" || q == "true"
+	st := s.d.SelfUpdate.CheckStatus(r.Context(), s.langOf(r), refresh)
 	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) handleSaveSelfUpdateConfig(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
+	var in selfupdate.Config
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	saved, err := s.d.SelfUpdate.SaveConfig(r.Context(), in)
+	if err != nil {
+		msg := err.Error()
+		if locErr := localizeSelfUpdateCfgErr(lang, err); locErr != "" {
+			msg = locErr
+		}
+		writeError(w, lang, http.StatusBadRequest, "bad_request", msg)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":           true,
+		"config":       saved,
+		"effectiveUrl": selfupdate.EffectiveBaseURL(saved),
+	})
+}
+
+func (s *Server) handleTestSelfUpdateSource(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
+	var in selfupdate.Config
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	res, err := s.d.SelfUpdate.TestSource(r.Context(), in, lang)
+	if err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleApplySelfUpdate(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
+	job, err := s.d.SelfUpdate.ApplyOnline(r.Context(), lang)
+	if err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "job": job})
+}
+
+func (s *Server) handleUploadSelfUpdate(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
+	r.Body = http.MaxBytesReader(w, r.Body, 160<<20)
+
+	ct := strings.ToLower(r.Header.Get("Content-Type"))
+	if strings.HasPrefix(ct, "multipart/form-data") {
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		f, hdr, err := r.FormFile("file")
+		if err != nil {
+			writeError(w, lang, http.StatusBadRequest, "bad_request", "missing file")
+			return
+		}
+		defer f.Close()
+		job, err := s.d.SelfUpdate.ApplyUpload(f, hdr.Filename, lang)
+		if err != nil {
+			writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "job": job})
+		return
+	}
+
+	filename := strings.TrimSpace(r.Header.Get("X-File-Name"))
+	job, err := s.d.SelfUpdate.ApplyUpload(r.Body, filename, lang)
+	if err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "job": job})
+}
+
+func localizeSelfUpdateCfgErr(lang i18n.Lang, err error) string {
+	if lang == i18n.EnUS {
+		return err.Error()
+	}
+	switch {
+	case errors.Is(err, selfupdate.ErrInvalidRepo):
+		return "源码仓库格式不正确，请填写 owner/repo 格式（如 kukushouhou/DKStore）"
+	case errors.Is(err, selfupdate.ErrCustomHostEmpty):
+		return "请选择或输入镜像地址"
+	case errors.Is(err, selfupdate.ErrCustomHostInvalid):
+		return "镜像地址格式不正确，请输入有效的 http/https 域名"
+	case errors.Is(err, selfupdate.ErrMirrorRepoLocked):
+		return "官方镜像源仅支持官方主仓库 kukushouhou/DKStore"
+	default:
+		return err.Error()
+	}
 }
 
 func (s *Server) staticHandler() http.Handler {

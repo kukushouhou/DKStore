@@ -2,7 +2,8 @@
 package version
 
 var (
-	Version = "dev"
-	Commit  = "none"
-	Date    = "unknown"
+	Version     = "dev"
+	Commit      = "none"
+	Date        = "unknown"
+	DefaultRepo = "kukushouhou/DKStore"
 )

@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"sync"
@@ -22,6 +23,7 @@ const (
 	cookieName       = "dkstore_session"
 	deviceCookieName = "dkstore_device_session"
 	passwordSetKey   = "admin_password_hash"
+	sessionsStoreKey = "auth_sessions"
 
 	// MinPasswordLen 是管理员密码的最小长度（字符数）。
 	MinPasswordLen = 6
@@ -96,6 +98,7 @@ func New(st *store.Store, host HostVerifier) *Service {
 	}
 	s.getHash = s.dbGetHash
 	s.setHash = s.dbSetHash
+	s.loadPersistedSessions()
 	return s
 }
 
@@ -279,13 +282,22 @@ func (s *Service) IsAuthenticated(ctx context.Context, r *http.Request) bool {
 	return ok
 }
 
+func hashSessionToken(tok string) string {
+	sum := sha256.Sum256([]byte(tok))
+	return hex.EncodeToString(sum[:])
+}
+
 func (s *Service) hasSession(r *http.Request) bool {
 	c, err := r.Cookie(cookieName)
 	if err != nil || c.Value == "" {
 		return false
 	}
+	digest := hashSessionToken(c.Value)
 	s.mu.RLock()
-	exp, ok := s.sessions[c.Value]
+	exp, ok := s.sessions[digest]
+	if !ok {
+		exp, ok = s.sessions[c.Value]
+	}
 	s.mu.RUnlock()
 	return ok && time.Now().Before(exp)
 }
@@ -356,8 +368,11 @@ func checkPassword(pw string) error {
 // Logout 清除当前会话。
 func (s *Service) Logout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(cookieName); err == nil && c.Value != "" {
+		digest := hashSessionToken(c.Value)
 		s.mu.Lock()
+		delete(s.sessions, digest)
 		delete(s.sessions, c.Value)
+		s.persistSessionsLocked()
 		s.mu.Unlock()
 	}
 	if dc, err := r.Cookie(deviceCookieName); err == nil && dc.Value != "" {
@@ -389,7 +404,8 @@ func (s *Service) issueCookie(w http.ResponseWriter) {
 			delete(s.sessions, k)
 		}
 	}
-	s.sessions[tok] = exp
+	s.sessions[hashSessionToken(tok)] = exp
+	s.persistSessionsLocked()
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{
 		Name:     cookieName,
@@ -399,6 +415,47 @@ func (s *Service) issueCookie(w http.ResponseWriter) {
 		SameSite: http.SameSiteLaxMode,
 		Expires:  exp,
 	})
+}
+
+func (s *Service) loadPersistedSessions() {
+	if s.st == nil || s.st.DB == nil {
+		return
+	}
+	var raw string
+	if err := s.st.DB.QueryRowContext(context.Background(), `SELECT v FROM setting WHERE k=?`, sessionsStoreKey).Scan(&raw); err != nil || raw == "" {
+		return
+	}
+	var saved map[string]int64
+	if json.Unmarshal([]byte(raw), &saved) != nil {
+		return
+	}
+	now := time.Now()
+	for k, unixSec := range saved {
+		exp := time.Unix(unixSec, 0)
+		if now.Before(exp) {
+			s.sessions[k] = exp
+		}
+	}
+}
+
+func (s *Service) persistSessionsLocked() {
+	if s.st == nil || s.st.DB == nil {
+		return
+	}
+	now := time.Now()
+	out := make(map[string]int64, len(s.sessions))
+	for k, exp := range s.sessions {
+		if now.Before(exp) {
+			out[k] = exp.Unix()
+		}
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return
+	}
+	_, _ = s.st.DB.ExecContext(context.Background(),
+		`INSERT INTO setting(k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`,
+		sessionsStoreKey, string(b))
 }
 
 func (s *Service) dbGetHash(ctx context.Context) string {

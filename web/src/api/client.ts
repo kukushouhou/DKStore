@@ -624,6 +624,33 @@ export interface RollbackVerifyResult {
   dataWarning?: string
 }
 
+export interface SelfUpdateConfig {
+  repo: string
+  channel: 'github' | 'mirror' | 'custom'
+  customHost: string
+  customMode: 'prefix' | 'host'
+}
+
+export interface SelfUpdateJob {
+  state: 'idle' | 'running' | 'restarting' | 'succeeded' | 'failed'
+  phase: string
+  percent: number
+  downloadedBytes: number
+  totalBytes: number
+  targetVersion?: string
+  error?: string
+  updatedAt: number
+}
+
+export interface SelfUpdateProbeResult {
+  state: 'probing' | 'ok' | 'unreachable'
+  ok: boolean
+  latencyMs?: number
+  latestVersion?: string
+  effectiveUrl?: string
+  error?: string
+}
+
 export interface SelfUpdateStatus {
   currentVersion: string
   commit: string
@@ -631,8 +658,19 @@ export interface SelfUpdateStatus {
   hasUpdate: boolean
   installMode: string
   releaseUrl: string
+  releaseNotes?: string
+  assetName?: string
+  assetSize?: number
   preserveNote: string
   commandHint: string
+  config: SelfUpdateConfig
+  effectiveUrl: string
+  defaultRepo: string
+  officialMirror: string
+  presetMirrors: string[]
+  rolledBackError?: string
+  checkError?: string
+  job?: SelfUpdateJob
 }
 
 export const api = {
@@ -777,5 +815,41 @@ export const api = {
     request<RollbackVerifyResult>(`/updates/${encodeURIComponent(id)}/rollback-check`),
   executeRollback: (id: string) =>
     request<UpdateJobItem>(`/updates/${encodeURIComponent(id)}/rollback`, { method: 'POST' }),
-  selfUpdateStatus: () => request<SelfUpdateStatus>('/self-update/status'),
+  health: () =>
+    request<{ status: string; version: string; commit: string; time: number }>('/health'),
+  probeGitHubDefault: () => request<SelfUpdateProbeResult>('/self-update/probe-github'),
+  selfUpdateStatus: (refresh = false) =>
+    request<SelfUpdateStatus>(refresh ? '/self-update/status?refresh=1' : '/self-update/status'),
+  saveSelfUpdateConfig: (cfg: SelfUpdateConfig) =>
+    request<{ ok: boolean; config: SelfUpdateConfig; effectiveUrl: string }>('/self-update/config', {
+      method: 'PUT',
+      body: JSON.stringify(cfg),
+    }),
+  testSelfUpdateSource: (cfg: SelfUpdateConfig) =>
+    request<SelfUpdateProbeResult>('/self-update/test', {
+      method: 'POST',
+      body: JSON.stringify(cfg),
+    }),
+  applySelfUpdate: () =>
+    request<{ ok: boolean; job: SelfUpdateJob }>('/self-update/apply', { method: 'POST' }),
+  uploadSelfUpdate: async (file: File) => {
+    const locale = useUIStore.getState().locale
+    const fd = new FormData()
+    fd.append('file', file)
+    const res = await fetch(`${apiBase()}/self-update/upload`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'X-DKStore-Lang': locale,
+        'Accept-Language': locale,
+      },
+      body: fd,
+    })
+    const body = await res.json().catch(() => null)
+    if (!res.ok) {
+      const err = body?.error
+      throw new ApiError(res.status, err?.code ?? 'http_error', err?.message ?? `HTTP ${res.status}`)
+    }
+    return body as { ok: boolean; job: SelfUpdateJob }
+  },
 }
