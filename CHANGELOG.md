@@ -6,6 +6,22 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+## [v0.3.0] - 2026-11-14
+
+### 新功能
+- **设备管理实时资源与多盘空间监控**：设备卡片新增宿主机真实 CPU 占用、物理内存占用与存储空间剩余容量展示（全面兼容群晖管理后台免 SSH 连接、远程 SSH 与本机直连模式），支持本地快照秒开与定时/手动刷新；多存储空间设备采用同行多段进度条独立着色并支持悬停查看单卷明细，离线态保持同构等高骨架对齐 ([`971a7c8`](https://github.com/kukushouhou/DKStore/commit/971a7c8))
+
+### 问题修复
+- **按新版配置更新时的容器移除保护与清理确认**：按多配置文件组合核对新版配置是否减少原有容器（准确区分更换镜像地址、修改容器名称与移除容器），在多容器项目与单容器配置更新双入口实时给出客观提醒，并在提交时直接复用删除确认弹窗选择是否同步清理旧镜像与关联目录（已被新配置中其他容器或同设备其他应用引用的目录与子文件夹自动置灰禁用，并在路径后括号标明具体引用方）；未确认前服务端直接拦截改写、常规更新不再附带孤儿容器清理，同时补齐配置回退重建失败时的错误提示 ([`e554c82`](https://github.com/kukushouhou/DKStore/commit/e554c82))
+
+---
+
+### Features
+- **Real-Time Device CPU, Memory & Multi-Disk Storage Metrics**: Added real-time host CPU usage, physical memory usage, and remaining disk capacity to device cards across Synology DSM WebAPI (SSH-free), remote SSH, and local socket modes, backed by instant SQLite snapshots plus periodic and manual refresh; multi-volume hosts render side-by-side segmented progress bars with per-volume hover details while keeping uniform card skeletons when offline ([`971a7c8`](https://github.com/kukushouhou/DKStore/commit/971a7c8))
+
+### Fixes
+- **Container Removal Protection & Reused Cleanup Confirmation on Config Updates**: Compare effective multi-file Compose container sets before applying updated configurations (accurately distinguishing image repository swaps, container renames, and container removals), show live objective reminders across both project and single-container config update modals, and reuse the deletion modal to choose optional image and folder cleanup while automatically disabling any parent/child folder or volume referenced by other containers with inline referencer labels; block unconfirmed container removals on the server, restrict orphan container cleanup strictly to confirmed removals, and report rebuild errors during automatic configuration rollback ([`e554c82`](https://github.com/kukushouhou/DKStore/commit/e554c82))
+
 ## [v0.2.0] - 2026-11-14
 
 ### 新功能
