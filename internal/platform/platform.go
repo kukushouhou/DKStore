@@ -39,19 +39,35 @@ type UpdateCapableAdapter interface {
 	HasLocalImage(ctx context.Context, imageIDOrRef string) bool
 }
 
+// LocalMeta 描述项目或容器的本地自定义信息（备注名、标签、访问入口与备注）。
+type LocalMeta struct {
+	Alias      string   `json:"alias,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
+	AccessMode string   `json:"accessMode,omitempty"` // auto | custom | none
+	Scheme     string   `json:"scheme,omitempty"`     // "" | http | https
+	FixedPort  string   `json:"fixedPort,omitempty"`
+	CustomURL  string   `json:"customUrl,omitempty"`
+	Note       string   `json:"note,omitempty"`
+}
+
 // ContainerRuntimeStat 描述单个容器的实时运行状态与资源占用。
 type ContainerRuntimeStat struct {
-	ID         string  `json:"id"`
-	Name       string  `json:"name"`
-	Service    string  `json:"service,omitempty"`
-	Image      string  `json:"image"`
-	State      string  `json:"state"`            // running | exited | stopped | restarting | paused
-	Health     string  `json:"health,omitempty"` // healthy | unhealthy | starting | ""
-	Uptime     string  `json:"uptime,omitempty"` // 如 "Up 3 days" 或基于 StartedAt 计算的时长秒数
-	StartedAt  int64   `json:"startedAt,omitempty"`
-	CPUPercent float64 `json:"cpuPercent"` // 0-100+ 百分比（保留 1-2 位小数）
-	MemUsage   int64   `json:"memUsage"`   // 字节数
-	MemLimit   int64   `json:"memLimit"`   // 字节数
+	ID         string        `json:"id"`
+	MetaKey    string        `json:"metaKey,omitempty"`
+	Name       string        `json:"name"`
+	Service    string        `json:"service,omitempty"`
+	Image      string        `json:"image"`
+	IconURL    string        `json:"iconUrl,omitempty"`
+	CustomIcon string        `json:"-"`
+	State      string        `json:"state"`            // running | exited | stopped | restarting | paused
+	Health     string        `json:"health,omitempty"` // healthy | unhealthy | starting | ""
+	Uptime     string        `json:"uptime,omitempty"` // 如 "Up 3 days" 或基于 StartedAt 计算的时长秒数
+	StartedAt  int64         `json:"startedAt,omitempty"`
+	CPUPercent float64       `json:"cpuPercent"` // 0-100+ 百分比（保留 1-2 位小数）
+	MemUsage   int64         `json:"memUsage"`   // 字节数
+	MemLimit   int64         `json:"memLimit"`   // 字节数
+	Ports      []PortBinding `json:"ports,omitempty"`
+	Meta       *LocalMeta    `json:"meta,omitempty"`
 }
 
 // AppRuntimeTree 描述应用（多容器项目或独立容器）的树状实时运行状态。
@@ -59,13 +75,16 @@ type AppRuntimeTree struct {
 	Key          string                 `json:"key"`
 	HostID       string                 `json:"hostId"`
 	HostName     string                 `json:"hostName"`
+	HostAddress  string                 `json:"hostAddress,omitempty"`
 	Name         string                 `json:"name"`
+	IconURL      string                 `json:"iconUrl,omitempty"`
 	Source       SourceKind             `json:"source"`
 	RunningCount int                    `json:"runningCount"`
 	TotalCount   int                    `json:"totalCount"`
 	CPUPercent   float64                `json:"cpuPercent"`
 	MemUsage     int64                  `json:"memUsage"`
 	StatsReady   bool                   `json:"statsReady"`
+	Meta         *LocalMeta             `json:"meta,omitempty"`
 	Containers   []ContainerRuntimeStat `json:"containers"`
 }
 
@@ -403,4 +422,5 @@ type Service struct {
 	ImageID      string            `json:"imageId"`
 	RepoDigests  []string          `json:"repoDigests"`
 	Labels       map[string]string `json:"labels,omitempty"`
+	Ports        []PortBinding     `json:"ports,omitempty"`
 }

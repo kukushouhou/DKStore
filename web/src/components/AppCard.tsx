@@ -1,7 +1,6 @@
 import { useCallback, useMemo, useState } from 'react'
 import {
   Alert,
-  Avatar,
   Badge,
   Button,
   Card,
@@ -17,10 +16,15 @@ import {
   message,
   theme,
 } from 'antd'
-import { ArrowRightOutlined, DownOutlined, SyncOutlined } from '@ant-design/icons'
+import {
+  ArrowRightOutlined,
+  DownOutlined,
+  EditOutlined,
+  ExportOutlined,
+  SyncOutlined,
+} from '@ant-design/icons'
 import {
   api,
-  resolveIconUrl,
   showApiError,
   type AppCardItem,
   type ServiceItem,
@@ -28,9 +32,17 @@ import {
 } from '../api/client'
 import { useI18n } from '../i18n'
 import { useUIStore } from '../store/ui'
+import AppIconAvatar from './AppIconAvatar'
+import ContainerMetaModal from './ContainerMetaModal'
 import DeleteAppModal from './DeleteAppModal'
 import DetailDrawer from './DetailDrawer'
 import IgnorePolicyModal from './IgnorePolicyModal'
+import {
+  buildMetaContextFromCard,
+  getHomeCardDisplayInfo,
+  pickUserTagColor,
+  resolveHomeCardUrl,
+} from './metaUtils'
 import ProjectUpdateModal from './ProjectUpdateModal'
 import VersionPickerModal from './VersionPickerModal'
 import { unwrapConcreteVersion } from './versionUtils'
@@ -47,28 +59,23 @@ function formatBytes(bytes: number): string {
   return `${val.toFixed(idx > 1 ? 1 : 0)} ${units[idx]}`
 }
 
-const avatarColors = ['#1677ff', '#13c2c2', '#722ed1', '#eb2f96', '#fa8c16', '#52c41a']
-
-function pickColor(name: string): string {
-  let h = 0
-  for (let i = 0; i < name.length; i++) {
-    h = (h * 31 + name.charCodeAt(i)) | 0
-  }
-  return avatarColors[Math.abs(h) % avatarColors.length]
-}
-
-function getInitials(name: string): string {
-  const cleaned = name.replace(/[^a-zA-Z0-9\u4e00-\u9fa5]/g, '')
-  return (cleaned.slice(0, 2) || name.slice(0, 2) || 'AP').toUpperCase()
-}
-
 interface AppCardProps {
   app: AppCardItem
   isChecking?: boolean
+  allTags?: string[]
+  activeTag?: string
+  onTagClick?: (tag: string) => void
   onChanged: () => void
 }
 
-export default function AppCard({ app, isChecking = false, onChanged }: AppCardProps) {
+export default function AppCard({
+  app,
+  isChecking = false,
+  allTags = [],
+  activeTag = '',
+  onTagClick,
+  onChanged,
+}: AppCardProps) {
   const { token } = theme.useToken()
   const { t } = useI18n()
 
@@ -78,10 +85,7 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
   const upsertUpdateJob = useUIStore((s) => s.upsertUpdateJob)
   const setActiveLogJobId = useUIStore((s) => s.setActiveLogJobId)
 
-  const iconSrc = resolveIconUrl(app.iconUrl)
-  const [failedIconSrc, setFailedIconSrc] = useState<string | null>(null)
-  const imgErr = Boolean(iconSrc && failedIconSrc === iconSrc)
-
+  const [metaOpen, setMetaOpen] = useState(false)
   const [pickerSvc, setPickerSvc] = useState<ServiceItem | null>(null)
   const [pickerInitialTab, setPickerInitialTab] = useState<'version' | 'config'>('version')
   const [ignoreOpen, setIgnoreOpen] = useState(false)
@@ -114,11 +118,15 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
     app.source === 'compose' || app.source === 'dsm_project' || isMultiContainer
 
   const projectName = app.projectName || (isMultiContainer ? app.appName : undefined)
-  const subtitle = isMultiContainer
-    ? projectName && projectName !== app.name
-      ? `${app.hostName} · ${t.home.projectSubPrefix}${projectName}`
-      : `${app.hostName} · ${t.home.servicesCount.replace('{count}', String(totalServiceCount))}`
-    : app.hostName
+  const { title: displayTitle, subtitle, tags: userTags } = useMemo(
+    () => getHomeCardDisplayInfo(app, t.home.projectSubPrefix, t.home.servicesCount),
+    [app, t.home.projectSubPrefix, t.home.servicesCount],
+  )
+  const accessUrl = useMemo(() => resolveHomeCardUrl(app), [app])
+  const metaCtx = useMemo(
+    () => (metaOpen ? buildMetaContextFromCard(app, t.metaModal.wholeProject) : null),
+    [app, metaOpen, t.metaModal.wholeProject],
+  )
 
   const primaryService: ServiceItem | null = useMemo(() => {
     const updatable = app.services.find(
@@ -384,7 +392,6 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
     : app.services.map((s) => s.key)
 
   const updatingNow = activeJobsForApp.length > 0 || Boolean(updatingSvcKey)
-  const hasValidIcon = Boolean(iconSrc && !imgErr)
 
   return (
     <>
@@ -404,66 +411,112 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
           borderColor: isCaution && !isChecking ? token.colorWarningBorder : undefined,
         }}
       >
-        {/* 上半区：图标名称副标题 + 单行版本状态 */}
+        {/* 上半区：图标名称副标题 + 独立标签行 */}
         <div>
-          <Flex align="center" gap={12}>
-            <Avatar
-              shape="square"
-              size={42}
-              src={
-                hasValidIcon ? (
-                  <img
-                    src={iconSrc!}
-                    alt={app.name}
-                    onError={() => setFailedIconSrc(iconSrc ?? null)}
-                    style={{ objectFit: 'contain' }}
-                  />
-                ) : undefined
-              }
-              onError={() => {
-                setFailedIconSrc(iconSrc ?? null)
-                return false
-              }}
-              style={{
-                borderRadius: token.borderRadius,
-                backgroundColor: hasValidIcon ? token.colorBgContainer : pickColor(app.name),
-                border: hasValidIcon ? `1px solid ${token.colorBorderSecondary}` : 'none',
-                padding: hasValidIcon ? 5 : 0,
-                flexShrink: 0,
-                fontWeight: 600,
-                opacity: isChecking ? 0.85 : 1,
-              }}
-            >
-              {getInitials(app.name)}
-            </Avatar>
+          <Flex align="flex-start" justify="space-between" gap={8}>
+            <Flex align="center" gap={12} style={{ minWidth: 0, flex: 1 }}>
+              <AppIconAvatar
+                name={displayTitle}
+                fallbackColorSeed={app.name}
+                iconUrl={app.iconUrl}
+                size={42}
+                dimmed={isChecking}
+              />
 
-            <div style={{ minWidth: 0, flex: 1 }}>
-              <Flex align="center" gap={6} style={{ minWidth: 0 }}>
-                <Typography.Text strong ellipsis={{ tooltip: app.name }} style={{ fontSize: 15 }}>
-                  {app.name}
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <Flex align="center" gap={4} style={{ minWidth: 0 }}>
+                  <Typography.Text
+                    strong
+                    ellipsis={{ tooltip: displayTitle }}
+                    style={{ fontSize: 15 }}
+                  >
+                    {displayTitle}
+                  </Typography.Text>
+                  <Tooltip title={t.home.editInfoTip}>
+                    <Button
+                      type="text"
+                      size="small"
+                      aria-label={t.home.editInfoTip}
+                      icon={<EditOutlined style={{ fontSize: 13 }} />}
+                      onClick={() => setMetaOpen(true)}
+                      style={{
+                        width: 22,
+                        height: 22,
+                        minWidth: 22,
+                        padding: 0,
+                        color: token.colorTextTertiary,
+                        flexShrink: 0,
+                      }}
+                    />
+                  </Tooltip>
+                  {!isChecking && renderNotRunningBadge()}
+                  {!isChecking && renderRoleBadge()}
+                  {!isChecking && renderIgnoredBadge()}
+                  {app.hostStatus === 'offline' && (
+                    <Tag variant="filled" color="error" style={{ margin: 0, flexShrink: 0 }}>
+                      {t.home.tagOffline}
+                    </Tag>
+                  )}
+                </Flex>
+
+                <Typography.Text
+                  type="secondary"
+                  ellipsis={{ tooltip: subtitle }}
+                  style={{ fontSize: token.fontSizeSM, display: 'block', marginTop: 2 }}
+                >
+                  {subtitle}
                 </Typography.Text>
-                {!isChecking && renderNotRunningBadge()}
-                {!isChecking && renderRoleBadge()}
-                {!isChecking && renderIgnoredBadge()}
-                {app.hostStatus === 'offline' && (
-                  <Tag variant="filled" color="error" style={{ margin: 0, flexShrink: 0 }}>
-                    {t.home.tagOffline}
-                  </Tag>
-                )}
-              </Flex>
+              </div>
+            </Flex>
 
-              <Typography.Text
-                type="secondary"
-                ellipsis={{ tooltip: subtitle }}
-                style={{ fontSize: token.fontSizeSM, display: 'block', marginTop: 2 }}
-              >
-                {subtitle}
-              </Typography.Text>
-            </div>
+            {accessUrl && (
+              <Tooltip title={t.home.openWebTip.replace('{url}', accessUrl)}>
+                <Button
+                  type="text"
+                  size="small"
+                  aria-label={t.home.openWebTip.replace('{url}', accessUrl)}
+                  icon={<ExportOutlined />}
+                  href={accessUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    color: token.colorTextSecondary,
+                    flexShrink: 0,
+                    marginRight: -4,
+                    marginTop: -2,
+                  }}
+                />
+              </Tooltip>
+            )}
           </Flex>
 
-          {/* 中部单行版本区 */}
-          <div style={{ marginTop: 14 }}>
+          {userTags.length > 0 && (
+            <Flex wrap="wrap" gap={6} style={{ marginTop: 10 }}>
+              {userTags.map((tg) => {
+                const active = activeTag === tg
+                return (
+                  <Tag
+                    key={tg}
+                    variant={active ? 'solid' : 'filled'}
+                    color={active ? 'blue' : pickUserTagColor(tg)}
+                    onClick={onTagClick ? () => onTagClick(tg) : undefined}
+                    style={{
+                      margin: 0,
+                      cursor: onTagClick ? 'pointer' : 'default',
+                      userSelect: 'none',
+                    }}
+                  >
+                    {tg}
+                  </Tag>
+                )
+              })}
+            </Flex>
+          )}
+        </div>
+
+        {/* 下半锚定区：中部版本状态 + 升级进度 + 底部操作栏（确保同排有无标签卡片底部基准线齐平） */}
+        <div style={{ marginTop: 14 }}>
+          <div>
             {isChecking ? (
               <Tag
                 icon={<SyncOutlined spin />}
@@ -633,9 +686,8 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
               style={{ marginTop: 10, padding: '6px 10px' }}
             />
           ))}
-        </div>
 
-        {/* 底部对齐操作栏 */}
+          {/* 底部对齐操作栏 */}
         <Flex
           align="center"
           justify="space-between"
@@ -770,7 +822,16 @@ export default function AppCard({ app, isChecking = false, onChanged }: AppCardP
             </Space>
           )}
         </Flex>
+        </div>
       </Card>
+
+      <ContainerMetaModal
+        open={metaOpen}
+        context={metaCtx}
+        allTags={allTags}
+        onClose={() => setMetaOpen(false)}
+        onSaved={onChanged}
+      />
 
       {/* 单容器谨慎更新确认弹窗 */}
       <Modal

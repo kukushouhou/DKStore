@@ -63,6 +63,9 @@ type Adapter struct {
 	statsMu       sync.Mutex
 	prevDSMStats  map[string]dsmCPUStats
 	prevDSMStatAt time.Time
+
+	portsMu    sync.Mutex
+	portsByCID map[string][]platform.PortBinding
 }
 
 // New 创建群晖 DSM 平台适配器。当 tr == nil 时工作在纯 DSM WebAPI 免 SSH 模式。
@@ -816,6 +819,190 @@ func applyDSMEnvToProfile(prof map[string]any, env []platform.EnvVar) {
 	prof["env_variables"] = items
 }
 
+func extractDSMPortItems(items []map[string]any) []platform.PortBinding {
+	var out []platform.PortBinding
+	for _, m := range items {
+		hPort := firstNonEmpty(anyString(m["host_port"]), anyString(m["HostPort"]), anyString(m["PublicPort"]))
+		cPort := firstNonEmpty(anyString(m["container_port"]), anyString(m["ContainerPort"]), anyString(m["PrivatePort"]))
+		proto := firstNonEmpty(anyString(m["type"]), anyString(m["Protocol"]), anyString(m["Type"]))
+		hostIP := firstNonEmpty(anyString(m["host_ip"]), anyString(m["HostIp"]), anyString(m["IP"]))
+		if hPort == "" {
+			continue
+		}
+		out = append(out, platform.PortBinding{
+			HostIP:        hostIP,
+			HostPort:      hPort,
+			ContainerPort: cPort,
+			Protocol:      proto,
+		})
+	}
+	return out
+}
+
+func extractDSMPortMap(pbMap map[string]any) []platform.PortBinding {
+	var out []platform.PortBinding
+	for k, v := range pbMap {
+		cPort, proto, hasProto := strings.Cut(k, "/")
+		if !hasProto || proto == "" {
+			proto = "tcp"
+		}
+		list, _ := v.([]any)
+		for _, item := range list {
+			m, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			out = append(out, platform.PortBinding{
+				HostIP:        anyString(m["HostIp"]),
+				HostPort:      anyString(m["HostPort"]),
+				ContainerPort: cPort,
+				Protocol:      proto,
+			})
+		}
+	}
+	return out
+}
+
+func extractDSMListWebPorts(c dsmContainerListItem) []platform.PortBinding {
+	var raw []platform.PortBinding
+	raw = append(raw, extractDSMPortItems(c.Ports)...)
+	raw = append(raw, extractDSMPortItems(c.PortBindings)...)
+	raw = append(raw, extractDSMPortItems(c.DockerPorts)...)
+	return platform.FilterAndSortWebPorts(raw)
+}
+
+func extractDSMDetailedWebPorts(c dsmContainerDetailed, listItem *dsmContainerListItem) []platform.PortBinding {
+	var raw []platform.PortBinding
+	if len(c.NetworkSettings.Ports) > 0 {
+		raw = append(raw, extractDSMPortMap(c.NetworkSettings.Ports)...)
+	}
+	if hcPB, ok := c.HostConfig["PortBindings"].(map[string]any); ok {
+		raw = append(raw, extractDSMPortMap(hcPB)...)
+	}
+	if listItem != nil {
+		raw = append(raw, extractDSMListWebPorts(*listItem)...)
+	}
+	if len(raw) == 0 && strings.EqualFold(anyString(c.HostConfig["NetworkMode"]), "host") && len(c.Config.ExposedPorts) > 0 {
+		for k := range c.Config.ExposedPorts {
+			cPort, proto, hasProto := strings.Cut(k, "/")
+			if !hasProto || proto == "" || strings.EqualFold(proto, "tcp") {
+				raw = append(raw, platform.PortBinding{
+					HostPort:      strings.TrimSpace(cPort),
+					ContainerPort: strings.TrimSpace(cPort),
+					Protocol:      "tcp",
+				})
+			}
+		}
+	}
+	return platform.FilterAndSortWebPorts(raw)
+}
+
+func (a *Adapter) ensureContainerPortsCached(ctx context.Context, containers []dsmContainerListItem) {
+	if a.dsmCli == nil || len(containers) == 0 {
+		return
+	}
+	type pending struct {
+		id   string
+		name string
+	}
+	liveIDs := make(map[string]bool, len(containers))
+	var todo []pending
+
+	a.portsMu.Lock()
+	if a.portsByCID == nil {
+		a.portsByCID = make(map[string][]platform.PortBinding, len(containers))
+	}
+	for _, c := range containers {
+		if c.ID == "" {
+			continue
+		}
+		liveIDs[c.ID] = true
+		if _, ok := a.portsByCID[c.ID]; ok {
+			continue
+		}
+		if inline := extractDSMListWebPorts(c); len(inline) > 0 {
+			a.portsByCID[c.ID] = inline
+			continue
+		}
+		cName := strings.TrimPrefix(strings.TrimSpace(c.Name), "/")
+		if cName != "" {
+			todo = append(todo, pending{id: c.ID, name: cName})
+		}
+	}
+	for k := range a.portsByCID {
+		if !liveIDs[k] {
+			delete(a.portsByCID, k)
+		}
+	}
+	a.portsMu.Unlock()
+
+	if len(todo) == 0 {
+		return
+	}
+	sem := make(chan struct{}, 6)
+	var wg sync.WaitGroup
+	for _, item := range todo {
+		wg.Add(1)
+		go func(it pending) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
+			pCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+			defer cancel()
+			pts, err := a.dsmCli.GetContainerWebPorts(pCtx, it.name)
+			if err != nil {
+				return
+			}
+			if pts == nil {
+				pts = []platform.PortBinding{}
+			}
+			a.portsMu.Lock()
+			a.portsByCID[it.id] = pts
+			a.portsMu.Unlock()
+		}(item)
+	}
+	wg.Wait()
+}
+
+func (a *Adapter) lookupContainerPorts(c dsmContainerListItem) []platform.PortBinding {
+	if inline := extractDSMListWebPorts(c); len(inline) > 0 {
+		return inline
+	}
+	if c.ID == "" {
+		return nil
+	}
+	a.portsMu.Lock()
+	pts := a.portsByCID[c.ID]
+	a.portsMu.Unlock()
+	if len(pts) == 0 {
+		return nil
+	}
+	return append([]platform.PortBinding(nil), pts...)
+}
+
+func pickDSMCustomIcon(labels map[string]string) string {
+	for _, k := range []string{"net.unraid.docker.icon", "org.opencontainers.image.icon"} {
+		u := strings.TrimSpace(labels[k])
+		if strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
+			return u
+		}
+	}
+	return ""
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
 func extractDSMPorts(prof map[string]any) []platform.PortBinding {
 	out := []platform.PortBinding{}
 	raw, ok := prof["port_bindings"].([]any)
@@ -1479,6 +1666,7 @@ func (a *Adapter) listAppsViaDSMAPI(ctx context.Context) ([]platform.App, error)
 	if err != nil {
 		return nil, err
 	}
+	a.ensureContainerPortsCached(ctx, containers)
 	images, _ := a.dsmCli.ListImages(ctx)
 	digestByRepoTag := make(map[string]string, len(images)*2)
 	digestByImageID := make(map[string]string, len(images))
@@ -1570,6 +1758,7 @@ func (a *Adapter) listAppsViaDSMAPI(ctx context.Context) ([]platform.App, error)
 				imgRef = c.Image
 			}
 			svc, exists := svcMap[svcName]
+			cPorts := extractDSMDetailedWebPorts(c, nil)
 			if !exists {
 				digests := lookupDigests(imgRef, c.Image)
 				svc = &platform.Service{
@@ -1580,9 +1769,12 @@ func (a *Adapter) listAppsViaDSMAPI(ctx context.Context) ([]platform.App, error)
 					ImageID:     c.Image,
 					RepoDigests: digests,
 					Labels:      c.Config.Labels,
+					Ports:       cPorts,
 				}
 				svcMap[svcName] = svc
 				svcOrder = append(svcOrder, svcName)
+			} else if len(cPorts) > 0 {
+				svc.Ports = platform.FilterAndSortWebPorts(append(svc.Ports, cPorts...))
 			}
 			svc.ContainerIDs = append(svc.ContainerIDs, c.ID)
 		}
@@ -1687,12 +1879,16 @@ func (a *Adapter) listAppsViaDSMAPI(ctx context.Context) ([]platform.App, error)
 				svcName = name
 			}
 			svcKey := fmt.Sprintf("%s/%s", appKey, svcName)
+			cPorts := a.lookupContainerPorts(c)
 			merged := false
 			for i := range app.Services {
 				if app.Services[i].Key == svcKey {
 					app.Services[i].ContainerIDs = append(app.Services[i].ContainerIDs, c.ID)
 					if state == "running" {
 						app.Services[i].State = "running"
+					}
+					if len(cPorts) > 0 {
+						app.Services[i].Ports = platform.FilterAndSortWebPorts(append(app.Services[i].Ports, cPorts...))
 					}
 					merged = true
 					break
@@ -1708,6 +1904,7 @@ func (a *Adapter) listAppsViaDSMAPI(ctx context.Context) ([]platform.App, error)
 					ImageID:      c.ImageID,
 					RepoDigests:  digests,
 					Labels:       c.Labels,
+					Ports:        cPorts,
 				})
 			}
 			continue
@@ -1732,6 +1929,7 @@ func (a *Adapter) listAppsViaDSMAPI(ctx context.Context) ([]platform.App, error)
 					ImageID:      c.ImageID,
 					RepoDigests:  digests,
 					Labels:       c.Labels,
+					Ports:        a.lookupContainerPorts(c),
 				},
 			},
 		})
@@ -1969,6 +2167,7 @@ func (a *Adapter) listRuntimeAppsViaDSMAPI(ctx context.Context, withStats bool) 
 	if contErr != nil {
 		return nil, contErr
 	}
+	a.ensureContainerPortsCached(ctx, containers)
 
 	var statsMap map[string]dsmContainerStat
 	if withStats {
@@ -2107,6 +2306,7 @@ func (a *Adapter) listRuntimeAppsViaDSMAPI(ctx context.Context, withStats bool) 
 			Name:       cName,
 			Service:    strings.TrimSpace(c.Labels["com.docker.compose.service"]),
 			Image:      containerImageRef(c),
+			CustomIcon: pickDSMCustomIcon(c.Labels),
 			State:      state,
 			Health:     strings.ToLower(strings.TrimSpace(c.State.Health.Status)),
 			Uptime:     c.UpStatus,
@@ -2114,6 +2314,7 @@ func (a *Adapter) listRuntimeAppsViaDSMAPI(ctx context.Context, withStats bool) 
 			CPUPercent: cpu,
 			MemUsage:   memU,
 			MemLimit:   memL,
+			Ports:      a.lookupContainerPorts(c),
 		}, state, cpu, memU
 	}
 
@@ -2218,11 +2419,24 @@ func (a *Adapter) listRuntimeAppsViaDSMAPI(ctx context.Context, withStats bool) 
 					cpu, memU, memL = lookupStat(c.ID, cName)
 				}
 
+				var listPtr *dsmContainerListItem
+				if hasList {
+					listPtr = &listItem
+				}
+				customIcon := pickDSMCustomIcon(c.Config.Labels)
+				if customIcon == "" && hasList {
+					customIcon = pickDSMCustomIcon(listItem.Labels)
+				}
+				cPorts := extractDSMDetailedWebPorts(c, listPtr)
+				if len(cPorts) == 0 && hasList {
+					cPorts = a.lookupContainerPorts(listItem)
+				}
 				cStat := platform.ContainerRuntimeStat{
 					ID:         shortID(c.ID),
 					Name:       cName,
 					Service:    strings.TrimSpace(c.Config.Labels["com.docker.compose.service"]),
 					Image:      imgRef,
+					CustomIcon: customIcon,
 					State:      state,
 					Health:     health,
 					Uptime:     uptime,
@@ -2230,6 +2444,7 @@ func (a *Adapter) listRuntimeAppsViaDSMAPI(ctx context.Context, withStats bool) 
 					CPUPercent: cpu,
 					MemUsage:   memU,
 					MemLimit:   memL,
+					Ports:      cPorts,
 				}
 				tree.TotalCount++
 				if state == "running" {

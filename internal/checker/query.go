@@ -12,6 +12,7 @@ import (
 	"github.com/kukushouhou/DKStore/internal/host"
 	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/ignore"
+	"github.com/kukushouhou/DKStore/internal/meta"
 	"github.com/kukushouhou/DKStore/internal/platform"
 	"github.com/kukushouhou/DKStore/internal/registry"
 	"github.com/kukushouhou/DKStore/internal/version"
@@ -143,67 +144,72 @@ func (s *Service) saveFinding(
 
 // ServiceItem 是前端展示的服务级状态。
 type ServiceItem struct {
-	Key              string         `json:"key"`
-	Name             string         `json:"name"`
-	State            string         `json:"state"`
-	ImageRef         string         `json:"imageRef"`
-	IconURL          string         `json:"iconUrl,omitempty"`
-	RepoDigest       string         `json:"repoDigest,omitempty"`
-	CurrentTags      []string       `json:"currentTags,omitempty"`
-	Kind             string         `json:"kind"`               // none | digest_update | version_update | check_failed | uncomparable
-	Category         string         `json:"category,omitempty"` // normal | caution
-	Reason           string         `json:"reason,omitempty"`
-	IsDatabase       bool           `json:"isDatabase,omitempty"`
-	DatabaseName     string         `json:"databaseName,omitempty"`
-	RoleKind         string         `json:"roleKind,omitempty"` // database | mq | middleware
-	ReasonText       string         `json:"reasonText,omitempty"`
-	CurrentVersion   string         `json:"currentVersion,omitempty"`
-	TargetVersion    string         `json:"targetVersion,omitempty"`
-	RawTargetVer     string         `json:"rawTargetVersion,omitempty"`
-	TargetRef        string         `json:"targetRef,omitempty"`
-	TargetDigest     string         `json:"targetDigest,omitempty"`
-	TargetTags       []string       `json:"targetTags,omitempty"`
-	CurrentUpdatedAt int64          `json:"currentUpdatedAt,omitempty"`
-	TargetUpdatedAt  int64          `json:"targetUpdatedAt,omitempty"`
-	Hint             string         `json:"hint,omitempty"`
-	ErrorKind        string         `json:"errorKind,omitempty"`
-	ErrorMsg         string         `json:"errorMsg,omitempty"`
-	Links            rules.RepoLink `json:"links"`
-	Ignored          bool           `json:"ignored"`
-	IgnoreMode       string         `json:"ignoreMode,omitempty"`
-	IgnorePrefix     string         `json:"ignorePrefix,omitempty"`
-	IgnoreTargetTag  string         `json:"ignoreTargetTag,omitempty"`
-	CheckedAt        int64          `json:"checkedAt,omitempty"`
+	Key              string                 `json:"key"`
+	MetaKey          string                 `json:"metaKey,omitempty"`
+	Name             string                 `json:"name"`
+	State            string                 `json:"state"`
+	ImageRef         string                 `json:"imageRef"`
+	IconURL          string                 `json:"iconUrl,omitempty"`
+	RepoDigest       string                 `json:"repoDigest,omitempty"`
+	CurrentTags      []string               `json:"currentTags,omitempty"`
+	Ports            []platform.PortBinding `json:"ports,omitempty"`
+	Meta             *platform.LocalMeta    `json:"meta,omitempty"`
+	Kind             string                 `json:"kind"`               // none | digest_update | version_update | check_failed | uncomparable
+	Category         string                 `json:"category,omitempty"` // normal | caution
+	Reason           string                 `json:"reason,omitempty"`
+	IsDatabase       bool                   `json:"isDatabase,omitempty"`
+	DatabaseName     string                 `json:"databaseName,omitempty"`
+	RoleKind         string                 `json:"roleKind,omitempty"` // database | mq | middleware
+	ReasonText       string                 `json:"reasonText,omitempty"`
+	CurrentVersion   string                 `json:"currentVersion,omitempty"`
+	TargetVersion    string                 `json:"targetVersion,omitempty"`
+	RawTargetVer     string                 `json:"rawTargetVersion,omitempty"`
+	TargetRef        string                 `json:"targetRef,omitempty"`
+	TargetDigest     string                 `json:"targetDigest,omitempty"`
+	TargetTags       []string               `json:"targetTags,omitempty"`
+	CurrentUpdatedAt int64                  `json:"currentUpdatedAt,omitempty"`
+	TargetUpdatedAt  int64                  `json:"targetUpdatedAt,omitempty"`
+	Hint             string                 `json:"hint,omitempty"`
+	ErrorKind        string                 `json:"errorKind,omitempty"`
+	ErrorMsg         string                 `json:"errorMsg,omitempty"`
+	Links            rules.RepoLink         `json:"links"`
+	Ignored          bool                   `json:"ignored"`
+	IgnoreMode       string                 `json:"ignoreMode,omitempty"`
+	IgnorePrefix     string                 `json:"ignorePrefix,omitempty"`
+	IgnoreTargetTag  string                 `json:"ignoreTargetTag,omitempty"`
+	CheckedAt        int64                  `json:"checkedAt,omitempty"`
 }
 
 // AppCard 是首页三组卡片（可更新 / 需谨慎更新 / 无需更新）及详情抽屉的数据结构（附录 D.2）。
 type AppCard struct {
-	Key               string         `json:"key"`
-	HostID            string         `json:"hostId"`
-	HostName          string         `json:"hostName"`
-	HostStatus        string         `json:"hostStatus"`
-	Name              string         `json:"name"`
-	AppName           string         `json:"appName"`
-	ProjectName       string         `json:"projectName,omitempty"`
-	TotalServiceCount int            `json:"totalServiceCount"`
-	Source            string         `json:"source"` // standalone | compose | dsm_project | vendor_managed
-	Group             string         `json:"group"`  // normal | caution | no_update
-	IconURL           string         `json:"iconUrl,omitempty"`
-	SummaryCurrent    string         `json:"summaryCurrent,omitempty"`
-	SummaryTarget     string         `json:"summaryTarget,omitempty"`
-	ReasonText        string         `json:"reasonText,omitempty"`
-	IsDatabase        bool           `json:"isDatabase"`
-	DatabaseName      string         `json:"databaseName,omitempty"`
-	RoleKind          string         `json:"roleKind,omitempty"` // database | mq | middleware
-	Links             rules.RepoLink `json:"links"`
-	UpdateSvcKeys     []string       `json:"updateServiceKeys,omitempty"`
-	Ignored           bool           `json:"ignored"`
-	IgnoreMode        string         `json:"ignoreMode,omitempty"`
-	IgnorePrefix      string         `json:"ignorePrefix,omitempty"`
-	IgnoreTargetTag   string         `json:"ignoreTargetTag,omitempty"`
-	ComposeEditable   bool           `json:"composeEditable"`
-	Services          []ServiceItem  `json:"services"`
-	AllServices       []ServiceItem  `json:"allServices,omitempty"`
+	Key               string              `json:"key"`
+	HostID            string              `json:"hostId"`
+	HostName          string              `json:"hostName"`
+	HostAddress       string              `json:"hostAddress,omitempty"`
+	HostStatus        string              `json:"hostStatus"`
+	Name              string              `json:"name"`
+	AppName           string              `json:"appName"`
+	ProjectName       string              `json:"projectName,omitempty"`
+	TotalServiceCount int                 `json:"totalServiceCount"`
+	Source            string              `json:"source"` // standalone | compose | dsm_project | vendor_managed
+	Group             string              `json:"group"`  // normal | caution | no_update
+	IconURL           string              `json:"iconUrl,omitempty"`
+	Meta              *platform.LocalMeta `json:"meta,omitempty"`
+	SummaryCurrent    string              `json:"summaryCurrent,omitempty"`
+	SummaryTarget     string              `json:"summaryTarget,omitempty"`
+	ReasonText        string              `json:"reasonText,omitempty"`
+	IsDatabase        bool                `json:"isDatabase"`
+	DatabaseName      string              `json:"databaseName,omitempty"`
+	RoleKind          string              `json:"roleKind,omitempty"` // database | mq | middleware
+	Links             rules.RepoLink      `json:"links"`
+	UpdateSvcKeys     []string            `json:"updateServiceKeys,omitempty"`
+	Ignored           bool                `json:"ignored"`
+	IgnoreMode        string              `json:"ignoreMode,omitempty"`
+	IgnorePrefix      string              `json:"ignorePrefix,omitempty"`
+	IgnoreTargetTag   string              `json:"ignoreTargetTag,omitempty"`
+	ComposeEditable   bool                `json:"composeEditable"`
+	Services          []ServiceItem       `json:"services"`
+	AllServices       []ServiceItem       `json:"allServices,omitempty"`
 }
 
 // FailedItem 汇总无法检查的服务。
@@ -226,6 +232,7 @@ type OverviewResponse struct {
 	Caution       []AppCard    `json:"caution"`
 	NoUpdate      []AppCard    `json:"noUpdate"`
 	Ignored       []AppCard    `json:"ignored"`
+	AllTags       []string     `json:"allTags,omitempty"`
 	UpToDateCount int          `json:"upToDateCount"`
 	TotalAppCount int          `json:"totalAppCount"`
 	Failed        []FailedItem `json:"failed"`
@@ -478,10 +485,11 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 		hostMap[h.ID] = h
 	}
 	ignoreRules, _ := s.ign.ListAll(ctx)
+	metaMap, allTags, _ := meta.ListAll(ctx, s.st)
 
 	q := `
 		SELECT a.key, a.host_id, a.name, a.source, COALESCE(a.project_json,''),
-		       s.key, s.name, COALESCE(s.state,''), COALESCE(s.image_ref,''), COALESCE(s.repo_digest,''), COALESCE(s.current_tags_json,''), COALESCE(s.labels_json,''),
+		       s.key, s.name, COALESCE(s.state,''), COALESCE(s.image_ref,''), COALESCE(s.repo_digest,''), COALESCE(s.current_tags_json,''), COALESCE(s.labels_json,''), COALESCE(s.ports_json,''),
 		       COALESCE(f.kind,'none'), COALESCE(f.category,''), COALESCE(f.reason,''),
 		       COALESCE(f.current_version,''), COALESCE(f.target_version,''), COALESCE(f.target_ref,''),
 		       COALESCE(f.target_digest,''), COALESCE(f.target_tags_json,''), COALESCE(f.hint,''),
@@ -510,15 +518,15 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 
 	for rows.Next() {
 		var (
-			appKey, hostID, appName, appSource, projJSON                        string
-			svcKey, svcName, state, imageRef, repoDigest, curTagsJ, labelsJSON  string
-			fKind, fCat, fReason, curVer, tgtVer, tgtRef                        string
-			tgtDigest, tgtTagsJ, fHint, errKind, errMsg, linksJ                 string
-			checkedAt                                                           int64
+			appKey, hostID, appName, appSource, projJSON                                string
+			svcKey, svcName, state, imageRef, repoDigest, curTagsJ, labelsJSON, portsJ  string
+			fKind, fCat, fReason, curVer, tgtVer, tgtRef                                string
+			tgtDigest, tgtTagsJ, fHint, errKind, errMsg, linksJ                         string
+			checkedAt                                                                   int64
 		)
 		if err := rows.Scan(
 			&appKey, &hostID, &appName, &appSource, &projJSON,
-			&svcKey, &svcName, &state, &imageRef, &repoDigest, &curTagsJ, &labelsJSON,
+			&svcKey, &svcName, &state, &imageRef, &repoDigest, &curTagsJ, &labelsJSON, &portsJ,
 			&fKind, &fCat, &fReason, &curVer, &tgtVer, &tgtRef,
 			&tgtDigest, &tgtTagsJ, &fHint, &errKind, &errMsg, &linksJ, &checkedAt,
 		); err != nil {
@@ -534,10 +542,12 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 				Key:             appKey,
 				HostID:          hostID,
 				HostName:        h.Name,
+				HostAddress:     host.EffectiveWebHost(h),
 				HostStatus:      h.Status,
 				Name:            appName,
 				AppName:         appName,
 				Source:          appSource,
+				Meta:            metaMap[appKey],
 				ComposeEditable: isComposeEditable(appSource, h.Transport, projJSON),
 			}
 			appMap[appKey] = card
@@ -549,6 +559,10 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 		_ = json.Unmarshal([]byte(tgtTagsJ), &tgtTags)
 		var storedLinks rules.RepoLink
 		_ = json.Unmarshal([]byte(linksJ), &storedLinks)
+		var svcPorts []platform.PortBinding
+		if portsJ != "" {
+			_ = json.Unmarshal([]byte(portsJ), &svcPorts)
+		}
 
 		if curVer == "" {
 			curVer = fallbackCurrentVersion(imageRef, curTags, labelsJSON)
@@ -567,14 +581,25 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 		rule, hasRule := ignoreRules[svcKey]
 		isIgnored, ignMode, ignPrefix, ignTargetTag := evaluateServiceIgnoreState(rule, hasRule, fKind, curVer, tgtDigest, tgtVer)
 
+		svcMetaKey := platform.ContainerMetaKey(appKey, svcName, svcName)
+		var svcMeta *platform.LocalMeta
+		if svcMetaKey == appKey {
+			svcMeta = card.Meta
+		} else {
+			svcMeta = metaMap[svcMetaKey]
+		}
+
 		item := ServiceItem{
 			Key:             svcKey,
+			MetaKey:         svcMetaKey,
 			Name:            svcName,
 			State:           state,
 			ImageRef:        imageRef,
 			IconURL:         iconURLForService(svcKey),
 			RepoDigest:      repoDigest,
 			CurrentTags:     curTags,
+			Ports:           svcPorts,
+			Meta:            svcMeta,
 			Kind:            fKind,
 			Category:        fCat,
 			Reason:          reasonCode,
@@ -636,6 +661,7 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 		Caution:       []AppCard{},
 		NoUpdate:      []AppCard{},
 		Ignored:       []AppCard{},
+		AllTags:       allTags,
 		Failed:        failedList,
 		LastCheckedAt: maxChecked,
 		Progress:      s.CurrentProgress(),
@@ -672,10 +698,11 @@ func (s *Service) GetApp(ctx context.Context, appKey string, lang i18n.Lang) (*A
 		hostMap[h.ID] = h
 	}
 	ignoreRules, _ := s.ign.ListAll(ctx)
+	metaMap, _, _ := meta.ListAll(ctx, s.st)
 
 	rows, err := s.st.DB.QueryContext(ctx, `
 		SELECT a.key, a.host_id, a.name, a.source, COALESCE(a.project_json,''),
-		       s.key, s.name, COALESCE(s.state,''), COALESCE(s.image_ref,''), COALESCE(s.repo_digest,''), COALESCE(s.current_tags_json,''), COALESCE(s.labels_json,''),
+		       s.key, s.name, COALESCE(s.state,''), COALESCE(s.image_ref,''), COALESCE(s.repo_digest,''), COALESCE(s.current_tags_json,''), COALESCE(s.labels_json,''), COALESCE(s.ports_json,''),
 		       COALESCE(f.kind,'none'), COALESCE(f.category,''), COALESCE(f.reason,''),
 		       COALESCE(f.current_version,''), COALESCE(f.target_version,''), COALESCE(f.target_ref,''),
 		       COALESCE(f.target_digest,''), COALESCE(f.target_tags_json,''), COALESCE(f.hint,''),
@@ -693,15 +720,15 @@ func (s *Service) GetApp(ctx context.Context, appKey string, lang i18n.Lang) (*A
 	var card *AppCard
 	for rows.Next() {
 		var (
-			aKey, hostID, appName, appSource, projJSON                          string
-			svcKey, svcName, state, imageRef, repoDigest, curTagsJ, labelsJSON  string
-			fKind, fCat, fReason, curVer, tgtVer, tgtRef                        string
-			tgtDigest, tgtTagsJ, fHint, errKind, errMsg, linksJ                 string
-			checkedAt                                                           int64
+			aKey, hostID, appName, appSource, projJSON                                  string
+			svcKey, svcName, state, imageRef, repoDigest, curTagsJ, labelsJSON, portsJ  string
+			fKind, fCat, fReason, curVer, tgtVer, tgtRef                                string
+			tgtDigest, tgtTagsJ, fHint, errKind, errMsg, linksJ                         string
+			checkedAt                                                                   int64
 		)
 		if err := rows.Scan(
 			&aKey, &hostID, &appName, &appSource, &projJSON,
-			&svcKey, &svcName, &state, &imageRef, &repoDigest, &curTagsJ, &labelsJSON,
+			&svcKey, &svcName, &state, &imageRef, &repoDigest, &curTagsJ, &labelsJSON, &portsJ,
 			&fKind, &fCat, &fReason, &curVer, &tgtVer, &tgtRef,
 			&tgtDigest, &tgtTagsJ, &fHint, &errKind, &errMsg, &linksJ, &checkedAt,
 		); err != nil {
@@ -713,11 +740,13 @@ func (s *Service) GetApp(ctx context.Context, appKey string, lang i18n.Lang) (*A
 				Key:             aKey,
 				HostID:          hostID,
 				HostName:        h.Name,
+				HostAddress:     host.EffectiveWebHost(h),
 				HostStatus:      h.Status,
 				Name:            appName,
 				AppName:         appName,
 				Source:          appSource,
 				Group:           "no_update",
+				Meta:            metaMap[aKey],
 				ComposeEditable: isComposeEditable(appSource, h.Transport, projJSON),
 			}
 		}
@@ -727,6 +756,10 @@ func (s *Service) GetApp(ctx context.Context, appKey string, lang i18n.Lang) (*A
 		_ = json.Unmarshal([]byte(tgtTagsJ), &tgtTags)
 		var storedLinks rules.RepoLink
 		_ = json.Unmarshal([]byte(linksJ), &storedLinks)
+		var svcPorts []platform.PortBinding
+		if portsJ != "" {
+			_ = json.Unmarshal([]byte(portsJ), &svcPorts)
+		}
 
 		if curVer == "" {
 			curVer = fallbackCurrentVersion(imageRef, curTags, labelsJSON)
@@ -745,14 +778,25 @@ func (s *Service) GetApp(ctx context.Context, appKey string, lang i18n.Lang) (*A
 		rule, hasRule := ignoreRules[svcKey]
 		isIgnored, ignMode, ignPrefix, ignTargetTag := evaluateServiceIgnoreState(rule, hasRule, fKind, curVer, tgtDigest, tgtVer)
 
+		svcMetaKey := platform.ContainerMetaKey(aKey, svcName, svcName)
+		var svcMeta *platform.LocalMeta
+		if svcMetaKey == aKey {
+			svcMeta = card.Meta
+		} else {
+			svcMeta = metaMap[svcMetaKey]
+		}
+
 		item := ServiceItem{
 			Key:             svcKey,
+			MetaKey:         svcMetaKey,
 			Name:            svcName,
 			State:           state,
 			ImageRef:        imageRef,
 			IconURL:         iconURLForService(svcKey),
 			RepoDigest:      repoDigest,
 			CurrentTags:     curTags,
+			Ports:           svcPorts,
+			Meta:            svcMeta,
 			Kind:            fKind,
 			Category:        fCat,
 			Reason:          reasonCode,
@@ -841,6 +885,34 @@ func (s *Service) GetApp(ctx context.Context, appKey string, lang i18n.Lang) (*A
 	return card, nil
 }
 
+func pickPrimaryServiceItem(projName string, svcs []ServiceItem) ServiceItem {
+	if len(svcs) <= 1 {
+		return svcs[0]
+	}
+	bestIdx := 0
+	bestScore := 1 << 20
+	projLower := strings.ToLower(strings.TrimSpace(projName))
+	for i, s := range svcs {
+		score := i
+		if s.IsDatabase || s.RoleKind == "database" || s.RoleKind == "mq" || s.RoleKind == "middleware" {
+			score += 100
+		}
+		nLower := strings.ToLower(strings.TrimSpace(s.Name))
+		if nLower == projLower || nLower == "app" || nLower == "web" || nLower == "server" ||
+			strings.HasPrefix(nLower, projLower+"-") || strings.HasPrefix(nLower, projLower+"_") {
+			score -= 30
+		}
+		if len(s.Ports) > 0 {
+			score -= 15
+		}
+		if score < bestScore {
+			bestScore = score
+			bestIdx = i
+		}
+	}
+	return svcs[bestIdx]
+}
+
 // splitAppCards 将一个 App 下的服务按 (normal / caution / no_update) 切分为对应分组的卡片（附录 D.2）。
 // 单容器项目始终保留项目名（避免显示内部 compose service 名如 app/web）；多容器项目下每个待更新组件独立成卡并标明所属项目。
 func splitAppCards(base *AppCard) (normalCards, cautionCards, noUpdateCards []AppCard, upToDate bool) {
@@ -863,7 +935,7 @@ func splitAppCards(base *AppCard) (normalCards, cautionCards, noUpdateCards []Ap
 	isMultiSvcApp := len(base.Services) > 1
 
 	makeCard := func(group string, svcs []ServiceItem) AppCard {
-		primary := svcs[0]
+		primary := pickPrimaryServiceItem(base.Name, svcs)
 		c := *base
 		c.AppName = base.Name
 		c.TotalServiceCount = len(base.Services)

@@ -10,19 +10,25 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/kukushouhou/DKStore/internal/classify"
 	"github.com/kukushouhou/DKStore/internal/hostauth"
 	"github.com/kukushouhou/DKStore/internal/i18n"
+	"github.com/kukushouhou/DKStore/internal/meta"
 	"github.com/kukushouhou/DKStore/internal/platform"
 	"github.com/kukushouhou/DKStore/internal/platform/docker"
 	"github.com/kukushouhou/DKStore/internal/platform/synology"
 	"github.com/kukushouhou/DKStore/internal/secret"
 	"github.com/kukushouhou/DKStore/internal/store"
 	"github.com/kukushouhou/DKStore/internal/transport"
+	"github.com/kukushouhou/DKStore/internal/version"
+	"github.com/kukushouhou/DKStore/rules"
 )
 
 // Host 是对外展示与持久化的主机记录（不含任何密码或私钥明文）。
@@ -514,6 +520,22 @@ func (r *Registry) saveHostRuntimeSnapshot(ctx context.Context, hostID string, w
 			updated_at=excluded.updated_at`,
 		hostID, string(b), now,
 	)
+
+	// 同步回填运行容器的对外端口映射到 service 表，确保首页在首次检查前或热升级后也能即时获取端口入口
+	for _, app := range toSave {
+		for _, c := range app.Containers {
+			if len(c.Ports) == 0 {
+				continue
+			}
+			sk := runtimeContainerServiceKey(app.Key, c)
+			if sk == "" {
+				continue
+			}
+			if pb, err := json.Marshal(c.Ports); err == nil {
+				_, _ = r.st.DB.ExecContext(wCtx, `UPDATE service SET ports_json=? WHERE key=? AND gone_at IS NULL`, string(pb), sk)
+			}
+		}
+	}
 }
 
 func mergeRuntimeStats(fresh []platform.AppRuntimeTree, prev []platform.AppRuntimeTree) []platform.AppRuntimeTree {
@@ -635,7 +657,7 @@ func (r *Registry) ListCachedRuntimeContainers(ctx context.Context, hostIDFilter
 			out = append(out, fallback...)
 		}
 	}
-	return out, nil
+	return r.enrichRuntimeTrees(ctx, targets, out), nil
 }
 
 func (r *Registry) synthesizeRuntimeFromInventory(ctx context.Context, h Host) []platform.AppRuntimeTree {
@@ -746,7 +768,181 @@ func (r *Registry) ListRuntimeContainers(ctx context.Context, hostIDFilter strin
 	for _, apps := range perHost {
 		out = append(out, apps...)
 	}
-	return out, nil
+	return r.enrichRuntimeTrees(ctx, targets, out), nil
+}
+
+// EffectiveWebHost 提取用于拼接容器 Web 访问入口的设备主机名或局域网 IP；
+// 本机设备（local）或回环地址返回空串，由前端自动采用当前浏览器访问域名/IP。
+func EffectiveWebHost(h Host) string {
+	if h.Transport == "local" {
+		return ""
+	}
+	var raw string
+	if h.Transport == "dsm_api" {
+		raw = strings.TrimSpace(h.DSMURL)
+		if raw != "" {
+			if !strings.Contains(raw, "://") {
+				raw = "http://" + raw
+			}
+			if u, err := url.Parse(raw); err == nil && u.Hostname() != "" {
+				raw = u.Hostname()
+			}
+		}
+		if raw == "" {
+			raw = strings.TrimSpace(h.Address)
+		}
+	} else {
+		raw = strings.TrimSpace(h.Address)
+	}
+	raw = extractBareHost(raw)
+	if raw == "" || raw == "127.0.0.1" || raw == "::1" || strings.EqualFold(raw, "localhost") {
+		return ""
+	}
+	return raw
+}
+
+func extractBareHost(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if strings.Contains(s, "://") {
+		if u, err := url.Parse(s); err == nil && u.Hostname() != "" {
+			return u.Hostname()
+		}
+	}
+	if h, _, err := net.SplitHostPort(s); err == nil {
+		return strings.Trim(h, "[]")
+	}
+	return strings.Trim(s, "[]")
+}
+
+func runtimeContainerServiceKey(appKey string, c platform.ContainerRuntimeStat) string {
+	appKey = strings.TrimSpace(appKey)
+	if appKey == "" {
+		return ""
+	}
+	if strings.Contains(appKey, "/container/") {
+		return appKey + "/main"
+	}
+	if svc := strings.TrimSpace(c.Service); svc != "" {
+		return appKey + "/" + svc
+	}
+	if cname := strings.TrimPrefix(strings.TrimSpace(c.Name), "/"); cname != "" {
+		return appKey + "/" + cname
+	}
+	return ""
+}
+
+func isSidecarStateful(serviceName, containerName, imageRef string) bool {
+	if pr, err := version.ParseImageRef(imageRef); err == nil {
+		if dbRule, _ := rules.Default().MatchDatabase(pr.Registry, pr.Repository); dbRule != nil {
+			return true
+		}
+	}
+	for _, cand := range []string{serviceName, containerName} {
+		if _, _, ok := classify.InferStatefulRole(cand); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func pickPrimaryTreeIcon(tree platform.AppRuntimeTree) string {
+	if len(tree.Containers) == 0 {
+		return ""
+	}
+	if len(tree.Containers) == 1 {
+		return tree.Containers[0].IconURL
+	}
+	bestIdx := 0
+	bestScore := 1 << 20
+	projLower := strings.ToLower(strings.TrimSpace(tree.Name))
+	for i, c := range tree.Containers {
+		if c.IconURL == "" {
+			continue
+		}
+		score := i
+		if isSidecarStateful(c.Service, c.Name, c.Image) {
+			score += 100
+		}
+		svcLower := strings.ToLower(strings.TrimSpace(c.Service))
+		nameLower := strings.ToLower(strings.TrimSpace(c.Name))
+		if svcLower == projLower || nameLower == projLower ||
+			svcLower == "app" || svcLower == "web" || svcLower == "server" ||
+			strings.HasPrefix(svcLower, projLower+"-") || strings.HasPrefix(nameLower, projLower+"-server") {
+			score -= 30
+		}
+		if len(c.Ports) > 0 {
+			score -= 15
+		}
+		if score < bestScore {
+			bestScore = score
+			bestIdx = i
+		}
+	}
+	return tree.Containers[bestIdx].IconURL
+}
+
+func (r *Registry) enrichRuntimeTrees(ctx context.Context, targets []Host, trees []platform.AppRuntimeTree) []platform.AppRuntimeTree {
+	if len(trees) == 0 {
+		return trees
+	}
+	hostByID := make(map[string]Host, len(targets))
+	for _, h := range targets {
+		hostByID[h.ID] = h
+	}
+
+	var metaMap map[string]*platform.LocalMeta
+	svcPortsMap := make(map[string][]platform.PortBinding)
+	if r.st != nil && r.st.DB != nil {
+		metaMap, _, _ = meta.ListAll(ctx, r.st)
+		pRows, err := r.st.DB.QueryContext(ctx, `SELECT key, COALESCE(ports_json,'') FROM service WHERE gone_at IS NULL AND ports_json IS NOT NULL AND ports_json != ''`)
+		if err == nil {
+			for pRows.Next() {
+				var sk, pj string
+				if pRows.Scan(&sk, &pj) == nil && pj != "" {
+					var pts []platform.PortBinding
+					if json.Unmarshal([]byte(pj), &pts) == nil && len(pts) > 0 {
+						svcPortsMap[sk] = pts
+					}
+				}
+			}
+			pRows.Close()
+		}
+	}
+
+	for i := range trees {
+		t := &trees[i]
+		if h, ok := hostByID[t.HostID]; ok {
+			t.HostAddress = EffectiveWebHost(h)
+		}
+		if metaMap != nil {
+			t.Meta = metaMap[t.Key]
+		}
+		for j := range t.Containers {
+			c := &t.Containers[j]
+			c.MetaKey = platform.ContainerMetaKey(t.Key, c.Service, c.Name)
+			if metaMap != nil {
+				if c.MetaKey == t.Key {
+					c.Meta = t.Meta
+				} else {
+					c.Meta = metaMap[c.MetaKey]
+				}
+			}
+			sk := runtimeContainerServiceKey(t.Key, *c)
+			if len(c.Ports) == 0 && sk != "" {
+				if pts := svcPortsMap[sk]; len(pts) > 0 {
+					c.Ports = pts
+				}
+			}
+			if sk != "" || c.Image != "" {
+				c.IconURL = "/api/v1/icons?serviceKey=" + url.QueryEscape(sk) + "&image=" + url.QueryEscape(c.Image)
+			}
+		}
+		t.IconURL = pickPrimaryTreeIcon(*t)
+	}
+	return trees
 }
 
 func (r *Registry) querySingleHostMetrics(ctx context.Context, h Host) (*platform.HostRuntimeStat, error) {

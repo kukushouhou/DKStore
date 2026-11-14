@@ -140,11 +140,29 @@ export interface HostsListResponse {
   localStatus?: string
 }
 
+export interface LocalMeta {
+  alias?: string
+  tags?: string[]
+  accessMode?: 'auto' | 'custom' | 'none' | ''
+  scheme?: 'http' | 'https' | ''
+  fixedPort?: string
+  customUrl?: string
+  note?: string
+}
+
+export interface SaveMetaItem {
+  targetKey: string
+  hostId: string
+  meta: LocalMeta
+}
+
 export interface ContainerRuntimeStat {
   id: string
+  metaKey?: string
   name: string
   service?: string
   image: string
+  iconUrl?: string
   state: string
   health?: string
   uptime?: string
@@ -152,19 +170,24 @@ export interface ContainerRuntimeStat {
   cpuPercent: number
   memUsage: number
   memLimit: number
+  ports?: ServicePortItem[]
+  meta?: LocalMeta
 }
 
 export interface AppRuntimeTree {
   key: string
   hostId: string
   hostName: string
+  hostAddress?: string
   name: string
+  iconUrl?: string
   source: 'standalone' | 'compose' | 'dsm_project' | 'vendor_managed'
   runningCount: number
   totalCount: number
   cpuPercent: number
   memUsage: number
   statsReady?: boolean
+  meta?: LocalMeta
   containers: ContainerRuntimeStat[]
 }
 
@@ -260,11 +283,15 @@ export type UpdatePolicyMode = 'all' | 'skip_latest' | 'prefix' | 'forever'
 
 export interface ServiceItem {
   key: string
+  metaKey?: string
   name: string
   state: string
   imageRef: string
+  iconUrl?: string
   repoDigest?: string
   currentTags?: string[]
+  ports?: ServicePortItem[]
+  meta?: LocalMeta
   kind: 'none' | 'digest_update' | 'version_update' | 'check_failed' | 'uncomparable'
   category?: 'normal' | 'caution'
   reason?: string
@@ -295,12 +322,14 @@ export interface AppCardItem {
   key: string
   hostId: string
   hostName: string
+  hostAddress?: string
   hostStatus: string
   appName?: string
   name: string
   projectName?: string
   totalServiceCount?: number
   iconUrl?: string
+  meta?: LocalMeta
   source: 'standalone' | 'compose' | 'dsm_project' | 'vendor_managed'
   group: 'normal' | 'caution' | 'no_update' | 'ignored' | 'up_to_date'
   summaryCurrent?: string
@@ -351,6 +380,7 @@ export interface OverviewResponse {
   caution: AppCardItem[]
   noUpdate?: AppCardItem[]
   ignored?: AppCardItem[]
+  allTags?: string[]
   upToDateCount: number
   totalAppCount: number
   failed?: FailedItem[]
@@ -706,10 +736,16 @@ export const api = {
       params.set('stats', '0')
     }
     const qs = params.toString()
-    return request<{ items: AppRuntimeTree[]; cached?: boolean }>(
+    return request<{ items: AppRuntimeTree[]; allTags?: string[]; cached?: boolean }>(
       qs ? `/containers?${qs}` : '/containers',
     )
   },
+
+  saveMeta: (items: SaveMetaItem[]) =>
+    request<{ ok: boolean }>('/meta', {
+      method: 'PUT',
+      body: JSON.stringify({ items }),
+    }),
 
   getSettings: () => request<AppSettings>('/settings'),
   saveSettings: (cfg: AppSettings) =>

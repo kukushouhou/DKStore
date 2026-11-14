@@ -37,6 +37,8 @@ type Adapter struct {
 	statsMu     sync.Mutex
 	prevCPU     map[string]cpuSample
 	prevHostCPU *hostCPUSample
+	hostPortsMu sync.Mutex
+	hostPorts   map[string][]platform.PortBinding
 }
 
 // New 创建原生 Docker 适配器。
@@ -146,14 +148,25 @@ func (a *Adapter) detectPlatformVersion(ctx context.Context, info dockerInfoResp
 	return platVer
 }
 
+type dockerSummaryPort struct {
+	IP          string `json:"IP"`
+	PrivatePort int    `json:"PrivatePort"`
+	PublicPort  int    `json:"PublicPort"`
+	Type        string `json:"Type"`
+}
+
 type containerSummary struct {
-	ID      string            `json:"Id"`
-	Names   []string          `json:"Names"`
-	Image   string            `json:"Image"`
-	State   string            `json:"State"`
-	Status  string            `json:"Status"`
-	Created int64             `json:"Created"`
-	Labels  map[string]string `json:"Labels"`
+	ID         string              `json:"Id"`
+	Names      []string            `json:"Names"`
+	Image      string              `json:"Image"`
+	State      string              `json:"State"`
+	Status     string              `json:"Status"`
+	Created    int64               `json:"Created"`
+	Labels     map[string]string   `json:"Labels"`
+	Ports      []dockerSummaryPort `json:"Ports"`
+	HostConfig struct {
+		NetworkMode string `json:"NetworkMode"`
+	} `json:"HostConfig"`
 }
 
 type containerInspect struct {
@@ -164,13 +177,115 @@ type containerInspect struct {
 	} `json:"State"`
 	Image  string `json:"Image"`
 	Config struct {
-		Image  string            `json:"Image"`
-		Env    []string          `json:"Env"`
-		Labels map[string]string `json:"Labels"`
+		Image        string            `json:"Image"`
+		Env          []string          `json:"Env"`
+		Labels       map[string]string `json:"Labels"`
+		ExposedPorts map[string]any    `json:"ExposedPorts"`
 	} `json:"Config"`
+	HostConfig      map[string]any `json:"HostConfig"`
+	NetworkSettings struct {
+		Ports map[string]any `json:"Ports"`
+	} `json:"NetworkSettings"`
 	Mounts []struct {
 		Source string `json:"Source"`
 	} `json:"Mounts"`
+}
+
+func extractSummaryWebPorts(ports []dockerSummaryPort) []platform.PortBinding {
+	if len(ports) == 0 {
+		return nil
+	}
+	raw := make([]platform.PortBinding, 0, len(ports))
+	for _, p := range ports {
+		if p.PublicPort <= 0 {
+			continue
+		}
+		raw = append(raw, platform.PortBinding{
+			HostIP:        p.IP,
+			HostPort:      strconv.Itoa(p.PublicPort),
+			ContainerPort: strconv.Itoa(p.PrivatePort),
+			Protocol:      p.Type,
+		})
+	}
+	return platform.FilterAndSortWebPorts(raw)
+}
+
+func extractInspectWebPorts(csPorts []dockerSummaryPort, detail containerInspect) []platform.PortBinding {
+	var raw []platform.PortBinding
+	for _, p := range csPorts {
+		if p.PublicPort > 0 {
+			raw = append(raw, platform.PortBinding{
+				HostIP:        p.IP,
+				HostPort:      strconv.Itoa(p.PublicPort),
+				ContainerPort: strconv.Itoa(p.PrivatePort),
+				Protocol:      p.Type,
+			})
+		}
+	}
+	if len(detail.NetworkSettings.Ports) > 0 {
+		raw = append(raw, extractDockerPorts(map[string]any{"PortBindings": detail.NetworkSettings.Ports})...)
+	}
+	raw = append(raw, extractDockerPorts(detail.HostConfig)...)
+	if len(raw) == 0 {
+		netMode, _ := detail.HostConfig["NetworkMode"].(string)
+		if strings.EqualFold(strings.TrimSpace(netMode), "host") && len(detail.Config.ExposedPorts) > 0 {
+			for k := range detail.Config.ExposedPorts {
+				cPort, proto, hasProto := strings.Cut(k, "/")
+				if !hasProto || proto == "" || strings.EqualFold(proto, "tcp") {
+					raw = append(raw, platform.PortBinding{
+						HostPort:      strings.TrimSpace(cPort),
+						ContainerPort: strings.TrimSpace(cPort),
+						Protocol:      "tcp",
+					})
+				}
+			}
+		}
+	}
+	return platform.FilterAndSortWebPorts(raw)
+}
+
+func (a *Adapter) resolveHostModeWebPorts(ctx context.Context, cid string) []platform.PortBinding {
+	if cid == "" {
+		return nil
+	}
+	a.hostPortsMu.Lock()
+	if a.hostPorts == nil {
+		a.hostPorts = make(map[string][]platform.PortBinding)
+	}
+	if pts, ok := a.hostPorts[cid]; ok {
+		a.hostPortsMu.Unlock()
+		if len(pts) == 0 {
+			return nil
+		}
+		return append([]platform.PortBinding(nil), pts...)
+	}
+	a.hostPortsMu.Unlock()
+
+	iCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	var detail containerInspect
+	if err := a.getJSON(iCtx, "/containers/"+url.PathEscape(cid)+"/json", &detail); err != nil {
+		return nil
+	}
+	pts := extractInspectWebPorts(nil, detail)
+	stored := pts
+	if stored == nil {
+		stored = []platform.PortBinding{}
+	}
+	a.hostPortsMu.Lock()
+	a.hostPorts[cid] = stored
+	a.hostPortsMu.Unlock()
+	return pts
+}
+
+func pickCustomIconLabel(labels map[string]string) string {
+	for _, k := range []string{"net.unraid.docker.icon", "org.opencontainers.image.icon"} {
+		u := strings.TrimSpace(labels[k])
+		if strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
+			return u
+		}
+	}
+	return ""
 }
 
 var reFnOSAppCenterPath = regexp.MustCompile(`^/vol\d+/@(appcenter|appconf|appdata|apphome|appshare)(/|$)`)
@@ -299,6 +414,7 @@ func (a *Adapter) ListApps(ctx context.Context) ([]platform.App, error) {
 				app.Source = platform.SourceVendorManaged
 			}
 			svcKey := fmt.Sprintf("%s/%s", appKey, svcName)
+			svcPorts := extractInspectWebPorts(cs.Ports, detail)
 			svc, sExists := serviceMap[svcKey]
 			if !sExists {
 				svc = &platform.Service{
@@ -310,12 +426,16 @@ func (a *Adapter) ListApps(ctx context.Context) ([]platform.App, error) {
 					ImageID:      detail.Image,
 					RepoDigests:  repoDigests,
 					Labels:       filterLabels(labels),
+					Ports:        svcPorts,
 				}
 				serviceMap[svcKey] = svc
 			} else {
 				svc.ContainerIDs = append(svc.ContainerIDs, detail.ID[:minLen(len(detail.ID), 12)])
 				if detail.State.Status == "running" {
 					svc.State = "running"
+				}
+				if len(svcPorts) > 0 {
+					svc.Ports = platform.FilterAndSortWebPorts(append(svc.Ports, svcPorts...))
 				}
 			}
 			continue
@@ -346,6 +466,7 @@ func (a *Adapter) ListApps(ctx context.Context) ([]platform.App, error) {
 					ImageID:      detail.Image,
 					RepoDigests:  repoDigests,
 					Labels:       filterLabels(labels),
+					Ports:        extractInspectWebPorts(cs.Ports, detail),
 				},
 			},
 		})
@@ -628,11 +749,16 @@ func (a *Adapter) ListRuntimeAppsWithOptions(ctx context.Context, withStats bool
 			state = "unknown"
 		}
 		sv := statsMap[cs.ID]
+		cPorts := extractSummaryWebPorts(cs.Ports)
+		if len(cPorts) == 0 && strings.EqualFold(strings.TrimSpace(cs.HostConfig.NetworkMode), "host") {
+			cPorts = a.resolveHostModeWebPorts(ctx, cs.ID)
+		}
 		cStat := platform.ContainerRuntimeStat{
 			ID:         cs.ID[:minLen(len(cs.ID), 12)],
 			Name:       cName,
 			Service:    strings.TrimSpace(cs.Labels["com.docker.compose.service"]),
 			Image:      cs.Image,
+			CustomIcon: pickCustomIconLabel(cs.Labels),
 			State:      state,
 			Health:     parseHealthFromStatus(cs.Status),
 			Uptime:     cs.Status,
@@ -640,6 +766,7 @@ func (a *Adapter) ListRuntimeAppsWithOptions(ctx context.Context, withStats bool
 			CPUPercent: sv.cpu,
 			MemUsage:   sv.memUsage,
 			MemLimit:   sv.memLimit,
+			Ports:      cPorts,
 		}
 
 		projName := strings.TrimSpace(cs.Labels["com.docker.compose.project"])

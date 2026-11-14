@@ -22,17 +22,34 @@ const (
 )
 
 func (s *Server) handleGetIcon(w http.ResponseWriter, r *http.Request) {
+	if s.d.Reg == nil {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 	svcKey := strings.TrimSpace(r.URL.Query().Get("serviceKey"))
-	if svcKey == "" || s.d.Store == nil || s.d.Reg == nil {
+	imgParam := strings.TrimSpace(r.URL.Query().Get("image"))
+	if svcKey == "" && imgParam == "" {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 
 	var imageRef, labelsJSON string
-	err := s.d.Store.DB.QueryRowContext(r.Context(), `
-		SELECT COALESCE(image_ref,''), COALESCE(labels_json,'')
-		FROM service WHERE key=?`, svcKey).Scan(&imageRef, &labelsJSON)
-	if err != nil || strings.TrimSpace(imageRef) == "" {
+	if s.d.Store != nil && svcKey != "" {
+		_ = s.d.Store.DB.QueryRowContext(r.Context(), `
+			SELECT COALESCE(image_ref,''), COALESCE(labels_json,'')
+			FROM service WHERE key=?`, svcKey).Scan(&imageRef, &labelsJSON)
+	}
+	if strings.TrimSpace(imageRef) == "" && imgParam != "" {
+		if s.d.Store != nil {
+			_ = s.d.Store.DB.QueryRowContext(r.Context(), `
+				SELECT COALESCE(image_ref,''), COALESCE(labels_json,'')
+				FROM service WHERE image_ref=? AND gone_at IS NULL LIMIT 1`, imgParam).Scan(&imageRef, &labelsJSON)
+		}
+		if strings.TrimSpace(imageRef) == "" {
+			imageRef = imgParam
+		}
+	}
+	if strings.TrimSpace(imageRef) == "" {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}

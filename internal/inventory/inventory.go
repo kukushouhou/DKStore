@@ -96,9 +96,15 @@ func (s *Service) saveHostInventory(ctx context.Context, hostID string, info *pl
 					labelsJSON = string(b)
 				}
 			}
+			var portsJSON string
+			if len(svc.Ports) > 0 {
+				if b, err := json.Marshal(svc.Ports); err == nil {
+					portsJSON = string(b)
+				}
+			}
 			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO service(key, app_key, name, image_ref, image_id, repo_digest, platform, state, labels_json, gone_at, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+				INSERT INTO service(key, app_key, name, image_ref, image_id, repo_digest, platform, state, labels_json, ports_json, gone_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
 				ON CONFLICT(key) DO UPDATE SET
 					name=excluded.name,
 					image_ref=excluded.image_ref,
@@ -107,9 +113,10 @@ func (s *Service) saveHostInventory(ctx context.Context, hostID string, info *pl
 					platform=excluded.platform,
 					state=excluded.state,
 					labels_json=excluded.labels_json,
+					ports_json=excluded.ports_json,
 					gone_at=NULL,
 					updated_at=excluded.updated_at`,
-				svc.Key, a.Key, svc.Name, svc.ImageRef, svc.ImageID, repoDigest, platStr, svc.State, labelsJSON, now,
+				svc.Key, a.Key, svc.Name, svc.ImageRef, svc.ImageID, repoDigest, platStr, svc.State, labelsJSON, portsJSON, now,
 			); err != nil {
 				return err
 			}

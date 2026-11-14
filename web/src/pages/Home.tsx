@@ -58,6 +58,7 @@ export default function HomePage() {
   const navigate = useNavigate()
 
   const [hostFilter, setHostFilter] = useState<string>('')
+  const [tagFilter, setTagFilter] = useState<string>('')
   const liveProgress = useUIStore((s) => s.liveProgress)
   const setLiveProgress = useUIStore((s) => s.setLiveProgress)
   const queueCollapsed = useUIStore((s) => s.queueCollapsed)
@@ -98,10 +99,56 @@ export default function HomePage() {
   const progress = liveProgress ?? overview.data?.progress
   const isRunning = progress?.running ?? false
 
-  const normalList = overview.data?.normal ?? []
-  const cautionList = overview.data?.caution ?? []
-  const noUpdateList = overview.data?.noUpdate ?? overview.data?.ignored ?? []
-  const updateCount = normalList.length + cautionList.length
+  const rawNormalList = useMemo(() => overview.data?.normal ?? [], [overview.data?.normal])
+  const rawCautionList = useMemo(() => overview.data?.caution ?? [], [overview.data?.caution])
+  const rawNoUpdateList = useMemo(
+    () => overview.data?.noUpdate ?? overview.data?.ignored ?? [],
+    [overview.data?.ignored, overview.data?.noUpdate],
+  )
+  const updateCount = rawNormalList.length + rawCautionList.length
+
+  const tagCounts = useMemo(() => {
+    const appTagsByKey = new Map<string, Set<string>>()
+    for (const card of [...rawNormalList, ...rawCautionList, ...rawNoUpdateList]) {
+      let set = appTagsByKey.get(card.key)
+      if (!set) {
+        set = new Set<string>()
+        appTagsByKey.set(card.key, set)
+      }
+      for (const tg of card.meta?.tags ?? []) {
+        if (tg.trim()) set.add(tg.trim())
+      }
+      const svcs = card.allServices?.length ? card.allServices : card.services
+      for (const s of svcs) {
+        for (const tg of s.meta?.tags ?? []) {
+          if (tg.trim()) set.add(tg.trim())
+        }
+      }
+    }
+    const counts = new Map<string, number>()
+    for (const set of appTagsByKey.values()) {
+      for (const tg of set) {
+        counts.set(tg, (counts.get(tg) ?? 0) + 1)
+      }
+    }
+    return Array.from(counts.entries()).sort((a, b) => a[0].localeCompare(b[0]))
+  }, [rawCautionList, rawNoUpdateList, rawNormalList])
+
+  const effectiveTagFilter = useMemo(
+    () => (tagFilter && tagCounts.some(([tg]) => tg === tagFilter) ? tagFilter : ''),
+    [tagCounts, tagFilter],
+  )
+
+  const matchesCardTag = (card: AppCardItem): boolean => {
+    if (!effectiveTagFilter) return true
+    if (card.meta?.tags?.includes(effectiveTagFilter)) return true
+    const svcs = card.allServices?.length ? card.allServices : card.services
+    return svcs.some((s) => s.meta?.tags?.includes(effectiveTagFilter))
+  }
+
+  const normalList = rawNormalList.filter(matchesCardTag)
+  const cautionList = rawCautionList.filter(matchesCardTag)
+  const noUpdateList = rawNoUpdateList.filter(matchesCardTag)
 
   useEffect(() => {
     document.title = updateCount > 0 ? `(${updateCount}) DKStore` : 'DKStore'
@@ -337,6 +384,9 @@ export default function HomePage() {
               <AppCard
                 app={item}
                 isChecking={isCardChecking(item)}
+                allTags={overview.data?.allTags}
+                activeTag={effectiveTagFilter}
+                onTagClick={(tg) => setTagFilter((prev) => (prev === tg ? '' : tg))}
                 onChanged={() => qc.invalidateQueries({ queryKey: ['overview'] })}
               />
             </div>
@@ -455,18 +505,33 @@ export default function HomePage() {
         <UpdateQueuePanel mode="inline" />
       )}
 
-      {/* 多设备筛选 */}
-      {hosts.length > 1 && (
-        <div>
-          <Segmented
-            value={hostFilter}
-            onChange={(v) => setHostFilter(String(v))}
-            options={[
-              { label: t.home.allHosts, value: '' },
-              ...hosts.map((h) => ({ label: h.name, value: h.id })),
-            ]}
-          />
-        </div>
+      {/* 多设备筛选与标签筛选（无标签且单设备时自动不渲染） */}
+      {(hosts.length > 1 || tagCounts.length > 0) && (
+        <Space wrap size={12}>
+          {hosts.length > 1 && (
+            <Segmented
+              value={hostFilter}
+              onChange={(v) => setHostFilter(String(v))}
+              options={[
+                { label: t.home.allHosts, value: '' },
+                ...hosts.map((h) => ({ label: h.name, value: h.id })),
+              ]}
+            />
+          )}
+          {tagCounts.length > 0 && (
+            <Segmented
+              value={effectiveTagFilter}
+              onChange={(v) => setTagFilter(String(v))}
+              options={[
+                { label: t.home.allTags, value: '' },
+                ...tagCounts.map(([tg, cnt]) => ({
+                  label: `${tg} (${cnt})`,
+                  value: tg,
+                })),
+              ]}
+            />
+          )}
+        </Space>
       )}
 
       {/* 情况 A：Docker Hub 100 次/6小时未登录限流专用提醒条 */}

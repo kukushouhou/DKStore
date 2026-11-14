@@ -19,7 +19,9 @@ import {
 import {
   DeleteOutlined,
   DownOutlined,
+  EditOutlined,
   ExpandAltOutlined,
+  ExportOutlined,
   HddOutlined,
   PlusOutlined,
   ReloadOutlined,
@@ -31,18 +33,17 @@ import {
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router'
 import { api, type AppRuntimeTree, type ContainerRuntimeStat } from '../api/client'
+import AppIconAvatar from '../components/AppIconAvatar'
+import ContainerMetaModal from '../components/ContainerMetaModal'
 import DeleteAppModal from '../components/DeleteAppModal'
+import {
+  buildMetaContextFromTree,
+  pickUserTagColor,
+  resolveContainerUrl,
+  resolveTreeAccessUrl,
+  type MetaModalContext,
+} from '../components/metaUtils'
 import { useI18n } from '../i18n'
-
-const TAG_COLORS = ['purple', 'blue', 'cyan', 'magenta', 'orange', 'green'] as const
-
-function pickTagColor(name: string) {
-  let h = 0
-  for (let i = 0; i < name.length; i++) {
-    h = (h * 31 + name.charCodeAt(i)) | 0
-  }
-  return TAG_COLORS[Math.abs(h) % TAG_COLORS.length]
-}
 
 function formatMem(bytes: number): string {
   if (!bytes || bytes <= 0) return '0 MB'
@@ -104,9 +105,14 @@ export default function ContainersPage() {
 
   const [hostFilter, setHostFilter] = useState<string>('')
   const [stateFilter, setStateFilter] = useState<'all' | 'running' | 'stopped'>('all')
+  const [tagFilter, setTagFilter] = useState<string>('')
   const [keyword, setKeyword] = useState('')
   const [collapsedKeys, setCollapsedKeys] = useState<Record<string, boolean>>({})
   const [deletingApp, setDeletingApp] = useState<AppRuntimeTree | null>(null)
+  const [editingTarget, setEditingTarget] = useState<{
+    appKey: string
+    containerMetaKey?: string
+  } | null>(null)
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000))
 
   useEffect(() => {
@@ -186,18 +192,51 @@ export default function ContainersPage() {
         state: { xs: 4, md: 3 },
         uptime: { xs: 0, md: 3 },
         resource: { xs: 4, md: 3 },
-        image: { xs: 0, md: 4 },
-        action: { xs: 2, md: 1 },
+        image: { xs: 0, md: 3 },
+        action: { xs: 2, md: 2 },
       }
     : {
         name: { xs: 11, md: 8 },
         host: { xs: 0, md: 0 },
         state: { xs: 5, md: 3 },
         uptime: { xs: 0, md: 3 },
-        resource: { xs: 6, md: 3 },
-        image: { xs: 0, md: 6 },
-        action: { xs: 2, md: 1 },
+        resource: { xs: 5, md: 3 },
+        image: { xs: 0, md: 5 },
+        action: { xs: 3, md: 2 },
       }
+
+  const allTagsPool = useMemo(
+    () =>
+      statsQuery.data?.allTags ??
+      fastQuery.data?.allTags ??
+      cachedQuery.data?.allTags ??
+      [],
+    [cachedQuery.data?.allTags, fastQuery.data?.allTags, statsQuery.data?.allTags],
+  )
+
+  const tagCounts = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const app of rawTrees) {
+      const set = new Set<string>()
+      for (const tg of app.meta?.tags ?? []) {
+        if (tg.trim()) set.add(tg.trim())
+      }
+      for (const c of app.containers) {
+        for (const tg of c.meta?.tags ?? []) {
+          if (tg.trim()) set.add(tg.trim())
+        }
+      }
+      for (const tg of set) {
+        counts.set(tg, (counts.get(tg) ?? 0) + 1)
+      }
+    }
+    return Array.from(counts.entries()).sort((a, b) => a[0].localeCompare(b[0]))
+  }, [rawTrees])
+
+  const effectiveTagFilter = useMemo(
+    () => (tagFilter && tagCounts.some(([tg]) => tg === tagFilter) ? tagFilter : ''),
+    [tagCounts, tagFilter],
+  )
 
   const counts = useMemo(() => {
     let all = 0
@@ -217,17 +256,40 @@ export default function ContainersPage() {
     const q = keyword.trim().toLowerCase()
     const result: AppRuntimeTree[] = []
     for (const app of rawTrees) {
+      const appTags = app.meta?.tags ?? []
+      if (effectiveTagFilter) {
+        const appHasTag = appTags.includes(effectiveTagFilter)
+        const anyChildHasTag = app.containers.some((c) =>
+          c.meta?.tags?.includes(effectiveTagFilter),
+        )
+        if (!appHasTag && !anyChildHasTag) continue
+      }
+
+      const appAlias = (app.meta?.alias || '').toLowerCase()
       const appOrHostMatches = q
-        ? app.name.toLowerCase().includes(q) || app.hostName.toLowerCase().includes(q)
+        ? app.name.toLowerCase().includes(q) ||
+          appAlias.includes(q) ||
+          appTags.some((tg) => tg.toLowerCase().includes(q)) ||
+          app.hostName.toLowerCase().includes(q)
         : true
+
+      const appHasActiveTag = effectiveTagFilter ? appTags.includes(effectiveTagFilter) : true
+
       const matchedContainers = app.containers.filter((c) => {
         const isRunning = c.state === 'running'
         if (stateFilter === 'running' && !isRunning) return false
         if (stateFilter === 'stopped' && isRunning) return false
+        if (effectiveTagFilter && !appHasActiveTag && !c.meta?.tags?.includes(effectiveTagFilter)) {
+          return false
+        }
         if (!q) return true
         if (appOrHostMatches) return true
+        const cAlias = (c.meta?.alias || '').toLowerCase()
+        const cTags = c.meta?.tags ?? []
         return (
           c.name.toLowerCase().includes(q) ||
+          cAlias.includes(q) ||
+          cTags.some((tg) => tg.toLowerCase().includes(q)) ||
           (c.service && c.service.toLowerCase().includes(q)) ||
           c.image.toLowerCase().includes(q)
         )
@@ -240,7 +302,7 @@ export default function ContainersPage() {
       }
     }
     return result
-  }, [rawTrees, stateFilter, keyword])
+  }, [rawTrees, stateFilter, effectiveTagFilter, keyword])
 
   const multiContainerKeys = useMemo(
     () => filteredTrees.filter((a) => a.containers.length > 1).map((a) => a.key),
@@ -395,25 +457,130 @@ export default function ContainersPage() {
     </Tooltip>
   )
 
-  const renderInitialBadge = (name: string) => (
-    <Tag
-      color={pickTagColor(name)}
-      style={{
-        margin: 0,
-        minWidth: 26,
-        height: 24,
-        paddingInline: 6,
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        fontWeight: 600,
-        fontSize: token.fontSizeSM,
-        flexShrink: 0,
-      }}
-    >
-      {name.slice(0, 2).toUpperCase()}
-    </Tag>
+  const editingMetaContext: MetaModalContext | null = useMemo(() => {
+    if (!editingTarget) return null
+    const tree = rawTrees.find((a) => a.key === editingTarget.appKey)
+    if (!tree) return null
+    const targetC = editingTarget.containerMetaKey
+      ? tree.containers.find(
+          (c) =>
+            (c.metaKey || `${tree.key}/ctr/${c.name}`) === editingTarget.containerMetaKey,
+        )
+      : undefined
+    return buildMetaContextFromTree(tree, targetC, t.metaModal.wholeProject)
+  }, [editingTarget, rawTrees, t.metaModal.wholeProject])
+
+  const renderResourceCell = (
+    isRunning: boolean,
+    statsReady: boolean,
+    cpuPercent: number,
+    memUsage: number,
+    strong = false,
+  ) => {
+    if (!isRunning) {
+      return <Typography.Text style={{ fontSize: token.fontSizeSM }}>-</Typography.Text>
+    }
+    if (!statsReady) {
+      return (
+        <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+          {t.containers.statsLoading}
+        </Typography.Text>
+      )
+    }
+    return (
+      <div style={{ lineHeight: 1.4 }}>
+        <div>
+          <Typography.Text
+            type="secondary"
+            style={{ fontSize: token.fontSizeSM, marginRight: 6 }}
+          >
+            {t.containers.cpuLabel}
+          </Typography.Text>
+          <Typography.Text
+            strong={strong}
+            style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
+          >
+            {`${cpuPercent.toFixed(1)}%`}
+          </Typography.Text>
+        </div>
+        <div>
+          <Typography.Text
+            type="secondary"
+            style={{ fontSize: token.fontSizeSM, marginRight: 6 }}
+          >
+            {t.containers.memLabel}
+          </Typography.Text>
+          <Typography.Text
+            type="secondary"
+            style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
+          >
+            {formatMem(memUsage)}
+          </Typography.Text>
+        </div>
+      </div>
+    )
+  }
+
+  const renderEditIconBtn = (onClick: (e: React.MouseEvent) => void) => (
+    <Tooltip title={t.containers.editInfoTip}>
+      <Button
+        type="text"
+        size="small"
+        aria-label={t.containers.editInfoTip}
+        icon={<EditOutlined style={{ fontSize: 13 }} />}
+        onClick={onClick}
+        style={{
+          width: 22,
+          height: 22,
+          minWidth: 22,
+          padding: 0,
+          color: token.colorTextTertiary,
+          flexShrink: 0,
+        }}
+      />
+    </Tooltip>
   )
+
+  const renderUserTags = (tags?: string[]) => {
+    if (!tags || tags.length === 0) return null
+    return tags.map((tg) => {
+      const active = effectiveTagFilter === tg
+      return (
+        <Tag
+          key={tg}
+          variant={active ? 'solid' : 'filled'}
+          color={active ? 'blue' : pickUserTagColor(tg)}
+          onClick={(e) => {
+            e.stopPropagation()
+            setTagFilter((prev) => (prev === tg ? '' : tg))
+          }}
+          style={{ margin: 0, cursor: 'pointer', userSelect: 'none', flexShrink: 0 }}
+        >
+          {tg}
+        </Tag>
+      )
+    })
+  }
+
+  const renderOpenIconBtn = (url: string | null) => {
+    if (!url) return null
+    const tip = t.containers.openWebTip.replace('{url}', url)
+    return (
+      <Tooltip title={tip}>
+        <Button
+          type="text"
+          size="small"
+          aria-label={tip}
+          icon={<ExportOutlined />}
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          style={{ color: token.colorTextSecondary }}
+        />
+      </Tooltip>
+    )
+  }
 
   if (!hostsQuery.isPending && hosts.length === 0) {
     return (
@@ -490,6 +657,19 @@ export default function ContainersPage() {
               },
             ]}
           />
+          {tagCounts.length > 0 && (
+            <Segmented
+              value={effectiveTagFilter}
+              onChange={(v) => setTagFilter(String(v))}
+              options={[
+                { label: t.containers.allTags, value: '' },
+                ...tagCounts.map(([tg, cnt]) => ({
+                  label: `${tg} (${cnt})`,
+                  value: tg,
+                })),
+              ]}
+            />
+          )}
         </Space>
         <Input
           allowClear
@@ -534,17 +714,22 @@ export default function ContainersPage() {
             </Col>
           </Row>
 
-          {/* 树状行列表 */}
+          {/* 树状双行列表 */}
           {filteredTrees.map((app, appIdx) => {
             const isProject = app.containers.length > 1
             const collapsed = Boolean(collapsedKeys[app.key])
             const isLastApp = appIdx === filteredTrees.length - 1
             const statsReady = app.statsReady !== false
+            const appAlias = (app.meta?.alias || '').trim()
+            const appTitle = appAlias || app.name
+            const hasAppAlias = Boolean(appAlias && appAlias !== app.name)
+            const appUrl = resolveTreeAccessUrl(app)
 
-            // 单容器项目行
+            // 单容器项目行（标准双行：左侧 38px 真实图标撑满两行 + 双行名称标签 + 双行 CPU/内存）
             if (!isProject && app.containers.length === 1) {
               const c = app.containers[0]
               const isRunning = c.state === 'running'
+              const canDelete = app.source !== 'vendor_managed'
               return (
                 <Row
                   key={app.key}
@@ -558,31 +743,64 @@ export default function ContainersPage() {
                   }}
                 >
                   <Col {...colSpan.name}>
-                    <Flex align="center" gap={10} style={{ paddingLeft: 22, paddingRight: 8, minWidth: 0 }}>
-                      {renderInitialBadge(app.name)}
-                      <Typography.Text strong ellipsis={{ tooltip: app.name }} style={{ maxWidth: 220 }}>
-                        {app.name}
-                      </Typography.Text>
-                      <Tag
-                        color={
-                          app.source === 'dsm_project'
-                            ? 'geekblue'
-                            : app.source === 'compose'
-                              ? 'blue'
-                              : app.source === 'vendor_managed'
-                                ? 'purple'
-                                : undefined
-                        }
-                        style={{ margin: 0, flexShrink: 0 }}
-                      >
-                        {app.source === 'dsm_project'
-                          ? t.home.tagDSM
-                          : app.source === 'compose'
-                            ? t.home.tagCompose
-                            : app.source === 'vendor_managed'
-                              ? t.home.tagVendor
-                              : t.home.tagStandalone}
-                      </Tag>
+                    <Flex
+                      align="center"
+                      gap={12}
+                      style={{ paddingLeft: 22, paddingRight: 8, minWidth: 0 }}
+                    >
+                      <AppIconAvatar
+                        name={appTitle}
+                        fallbackColorSeed={app.name}
+                        iconUrl={app.iconUrl || c.iconUrl}
+                        size={38}
+                      />
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <Flex align="center" gap={4} style={{ minWidth: 0 }}>
+                          <Typography.Text
+                            strong
+                            ellipsis={{ tooltip: appTitle }}
+                            style={{ fontSize: token.fontSize }}
+                          >
+                            {appTitle}
+                          </Typography.Text>
+                          {renderEditIconBtn(() => setEditingTarget({ appKey: app.key }))}
+                        </Flex>
+                        <Flex wrap="wrap" align="center" gap={6} style={{ marginTop: 3 }}>
+                          {hasAppAlias && (
+                            <Typography.Text
+                              type="secondary"
+                              style={{
+                                fontSize: token.fontSizeSM,
+                                fontFamily: token.fontFamilyCode,
+                              }}
+                            >
+                              {app.name}
+                            </Typography.Text>
+                          )}
+                          <Tag
+                            variant="filled"
+                            color={
+                              app.source === 'dsm_project'
+                                ? 'geekblue'
+                                : app.source === 'compose'
+                                  ? 'blue'
+                                  : app.source === 'vendor_managed'
+                                    ? 'purple'
+                                    : undefined
+                            }
+                            style={{ margin: 0, flexShrink: 0 }}
+                          >
+                            {app.source === 'dsm_project'
+                              ? t.home.tagDSM
+                              : app.source === 'compose'
+                                ? t.home.tagCompose
+                                : app.source === 'vendor_managed'
+                                  ? t.home.tagVendor
+                                  : t.home.tagStandalone}
+                          </Tag>
+                          {renderUserTags(app.meta?.tags ?? c.meta?.tags)}
+                        </Flex>
+                      </div>
                     </Flex>
                   </Col>
                   {showHostCol && <Col {...colSpan.host}>{renderHostCell(app.hostName)}</Col>}
@@ -593,47 +811,40 @@ export default function ContainersPage() {
                     </Typography.Text>
                   </Col>
                   <Col {...colSpan.resource}>
-                    {!isRunning ? (
-                      <Typography.Text style={{ fontSize: token.fontSizeSM }}>-</Typography.Text>
-                    ) : !statsReady ? (
-                      <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-                        {t.containers.statsLoading}
-                      </Typography.Text>
-                    ) : (
-                      <Typography.Text
-                        style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
-                      >
-                        {`${c.cpuPercent.toFixed(1)}% · ${formatMem(c.memUsage)}`}
-                      </Typography.Text>
-                    )}
+                    {renderResourceCell(isRunning, statsReady, c.cpuPercent, c.memUsage)}
                   </Col>
                   <Col {...colSpan.image}>{renderImageCell(c.image)}</Col>
                   <Col {...colSpan.action} style={{ textAlign: 'right' }}>
-                    {app.source === 'vendor_managed' ? (
+                    {!appUrl && !canDelete ? (
                       <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                         -
                       </Typography.Text>
                     ) : (
-                      <Tooltip
-                        title={
-                          app.source === 'compose' || app.source === 'dsm_project'
-                            ? t.containers.deleteProjectBtn
-                            : t.containers.deleteContainerBtn
-                        }
-                      >
-                        <Button
-                          type="text"
-                          danger
-                          size="small"
-                          aria-label={
-                            app.source === 'compose' || app.source === 'dsm_project'
-                              ? t.containers.deleteProjectBtn
-                              : t.containers.deleteContainerBtn
-                          }
-                          icon={<DeleteOutlined />}
-                          onClick={() => setDeletingApp(app)}
-                        />
-                      </Tooltip>
+                      <Space size={2}>
+                        {renderOpenIconBtn(appUrl)}
+                        {canDelete && (
+                          <Tooltip
+                            title={
+                              app.source === 'compose' || app.source === 'dsm_project'
+                                ? t.containers.deleteProjectBtn
+                                : t.containers.deleteContainerBtn
+                            }
+                          >
+                            <Button
+                              type="text"
+                              danger
+                              size="small"
+                              aria-label={
+                                app.source === 'compose' || app.source === 'dsm_project'
+                                  ? t.containers.deleteProjectBtn
+                                  : t.containers.deleteContainerBtn
+                              }
+                              icon={<DeleteOutlined />}
+                              onClick={() => setDeletingApp(app)}
+                            />
+                          </Tooltip>
+                        )}
+                      </Space>
                     )}
                   </Col>
                 </Row>
@@ -646,6 +857,7 @@ export default function ContainersPage() {
             const uniqueImages = Array.from(
               new Set(app.containers.map((c) => c.image).filter(Boolean)),
             )
+            const canDeleteProject = app.source !== 'vendor_managed'
 
             return (
               <div
@@ -674,17 +886,53 @@ export default function ContainersPage() {
                     <Flex align="center" gap={10} style={{ paddingRight: 8, minWidth: 0 }}>
                       <Typography.Text
                         type="secondary"
-                        style={{ fontSize: token.fontSizeSM, width: 12, display: 'inline-block', flexShrink: 0 }}
+                        style={{
+                          fontSize: token.fontSizeSM,
+                          width: 12,
+                          display: 'inline-block',
+                          flexShrink: 0,
+                        }}
                       >
                         {collapsed ? <RightOutlined /> : <DownOutlined />}
                       </Typography.Text>
-                      {renderInitialBadge(app.name)}
-                      <Typography.Text strong ellipsis={{ tooltip: app.name }} style={{ maxWidth: 220 }}>
-                        {app.name}
-                      </Typography.Text>
-                      <Tag color="blue" style={{ margin: 0, flexShrink: 0 }}>
-                        {t.containers.projectTag.replace('{count}', String(app.totalCount))}
-                      </Tag>
+                      <AppIconAvatar
+                        name={appTitle}
+                        fallbackColorSeed={app.name}
+                        iconUrl={app.iconUrl}
+                        size={38}
+                      />
+                      <div style={{ minWidth: 0, flex: 1 }}>
+                        <Flex align="center" gap={4} style={{ minWidth: 0 }}>
+                          <Typography.Text
+                            strong
+                            ellipsis={{ tooltip: appTitle }}
+                            style={{ fontSize: token.fontSize }}
+                          >
+                            {appTitle}
+                          </Typography.Text>
+                          {renderEditIconBtn((e) => {
+                            e.stopPropagation()
+                            setEditingTarget({ appKey: app.key })
+                          })}
+                        </Flex>
+                        <Flex wrap="wrap" align="center" gap={6} style={{ marginTop: 3 }}>
+                          {hasAppAlias && (
+                            <Typography.Text
+                              type="secondary"
+                              style={{
+                                fontSize: token.fontSizeSM,
+                                fontFamily: token.fontFamilyCode,
+                              }}
+                            >
+                              {app.name}
+                            </Typography.Text>
+                          )}
+                          <Tag variant="filled" color="blue" style={{ margin: 0, flexShrink: 0 }}>
+                            {t.containers.projectTag.replace('{count}', String(app.totalCount))}
+                          </Tag>
+                          {renderUserTags(app.meta?.tags)}
+                        </Flex>
+                      </div>
                     </Flex>
                   </Col>
                   {showHostCol && <Col {...colSpan.host}>{renderHostCell(app.hostName)}</Col>}
@@ -716,21 +964,12 @@ export default function ContainersPage() {
                     </Typography.Text>
                   </Col>
                   <Col {...colSpan.resource}>
-                    {app.runningCount <= 0 ? (
-                      <Typography.Text strong style={{ fontSize: token.fontSizeSM }}>
-                        -
-                      </Typography.Text>
-                    ) : !statsReady ? (
-                      <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-                        {t.containers.statsLoading}
-                      </Typography.Text>
-                    ) : (
-                      <Typography.Text
-                        strong
-                        style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
-                      >
-                        {`${app.cpuPercent.toFixed(1)}% · ${formatMem(app.memUsage)}`}
-                      </Typography.Text>
+                    {renderResourceCell(
+                      app.runningCount > 0,
+                      statsReady,
+                      app.cpuPercent,
+                      app.memUsage,
+                      true,
                     )}
                   </Col>
                   <Col {...colSpan.image}>
@@ -739,7 +978,12 @@ export default function ContainersPage() {
                     ) : (
                       <Tooltip
                         title={
-                          <div style={{ fontFamily: token.fontFamilyCode, fontSize: token.fontSizeSM }}>
+                          <div
+                            style={{
+                              fontFamily: token.fontFamilyCode,
+                              fontSize: token.fontSizeSM,
+                            }}
+                          >
                             {uniqueImages.map((img) => (
                               <div key={img}>{img}</div>
                             ))}
@@ -759,24 +1003,26 @@ export default function ContainersPage() {
                     )}
                   </Col>
                   <Col {...colSpan.action} style={{ textAlign: 'right' }}>
-                    {app.source === 'vendor_managed' ? (
+                    {!appUrl && !canDeleteProject ? (
                       <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                         -
                       </Typography.Text>
                     ) : (
-                      <Tooltip title={t.containers.deleteProjectBtn}>
-                        <Button
-                          type="text"
-                          danger
-                          size="small"
-                          aria-label={t.containers.deleteProjectBtn}
-                          icon={<DeleteOutlined />}
-                          onClick={(e) => {
-                            e.stopPropagation()
-                            setDeletingApp(app)
-                          }}
-                        />
-                      </Tooltip>
+                      <Space size={2} onClick={(e) => e.stopPropagation()}>
+                        {renderOpenIconBtn(appUrl)}
+                        {canDeleteProject && (
+                          <Tooltip title={t.containers.deleteProjectBtn}>
+                            <Button
+                              type="text"
+                              danger
+                              size="small"
+                              aria-label={t.containers.deleteProjectBtn}
+                              icon={<DeleteOutlined />}
+                              onClick={() => setDeletingApp(app)}
+                            />
+                          </Tooltip>
+                        )}
+                      </Space>
                     )}
                   </Col>
                 </Row>
@@ -786,6 +1032,16 @@ export default function ContainersPage() {
                   app.containers.map((c, idx) => {
                     const isLastChild = idx === app.containers.length - 1
                     const isRunning = c.state === 'running'
+                    const cAlias = (c.meta?.alias || '').trim()
+                    const cTitle = cAlias || c.name
+                    const hasCAlias = Boolean(cAlias && cAlias !== c.name)
+                    const cUrl = resolveContainerUrl(app.hostAddress, c)
+                    const cMetaKey = c.metaKey || `${app.key}/ctr/${c.name}`
+                    const hasSubLine =
+                      hasCAlias ||
+                      Boolean(c.service && c.service !== c.name) ||
+                      Boolean(c.meta?.tags && c.meta.tags.length > 0)
+
                     return (
                       <Row
                         key={c.id || c.name}
@@ -800,22 +1056,64 @@ export default function ContainersPage() {
                         }}
                       >
                         <Col {...colSpan.name}>
-                          <Flex align="center" gap={8} style={{ paddingLeft: 28, paddingRight: 8, minWidth: 0 }}>
+                          <Flex
+                            align="center"
+                            gap={10}
+                            style={{ paddingLeft: 26, paddingRight: 8, minWidth: 0 }}
+                          >
                             <Typography.Text
                               type="secondary"
-                              style={{ fontFamily: token.fontFamilyCode, userSelect: 'none', flexShrink: 0 }}
+                              style={{
+                                fontFamily: token.fontFamilyCode,
+                                userSelect: 'none',
+                                flexShrink: 0,
+                              }}
                             >
                               {isLastChild ? '└─' : '├─'}
                             </Typography.Text>
-                            <Typography.Text
-                              style={{ fontWeight: 500, fontSize: token.fontSizeSM }}
-                              ellipsis={{ tooltip: c.name }}
-                            >
-                              {c.name}
-                            </Typography.Text>
-                            {c.service && c.service !== c.name && (
-                              <Tag style={{ margin: 0, flexShrink: 0 }}>{c.service}</Tag>
-                            )}
+                            <AppIconAvatar
+                              name={cTitle}
+                              fallbackColorSeed={c.name}
+                              iconUrl={c.iconUrl}
+                              size={32}
+                            />
+                            <div style={{ minWidth: 0, flex: 1 }}>
+                              <Flex align="center" gap={4} style={{ minWidth: 0 }}>
+                                <Typography.Text
+                                  style={{ fontWeight: 500, fontSize: token.fontSizeSM }}
+                                  ellipsis={{ tooltip: cTitle }}
+                                >
+                                  {cTitle}
+                                </Typography.Text>
+                                {renderEditIconBtn(() =>
+                                  setEditingTarget({
+                                    appKey: app.key,
+                                    containerMetaKey: cMetaKey,
+                                  }),
+                                )}
+                              </Flex>
+                              {hasSubLine && (
+                                <Flex wrap="wrap" align="center" gap={6} style={{ marginTop: 2 }}>
+                                  {hasCAlias && (
+                                    <Typography.Text
+                                      type="secondary"
+                                      style={{
+                                        fontSize: token.fontSizeSM,
+                                        fontFamily: token.fontFamilyCode,
+                                      }}
+                                    >
+                                      {c.name}
+                                    </Typography.Text>
+                                  )}
+                                  {c.service && c.service !== c.name && (
+                                    <Tag variant="filled" style={{ margin: 0, flexShrink: 0 }}>
+                                      {c.service}
+                                    </Tag>
+                                  )}
+                                  {renderUserTags(c.meta?.tags)}
+                                </Flex>
+                              )}
+                            </div>
                           </Flex>
                         </Col>
                         {showHostCol && (
@@ -828,22 +1126,12 @@ export default function ContainersPage() {
                           </Typography.Text>
                         </Col>
                         <Col {...colSpan.resource}>
-                          {!isRunning ? (
-                            <Typography.Text style={{ fontSize: token.fontSizeSM }}>-</Typography.Text>
-                          ) : !statsReady ? (
-                            <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-                              {t.containers.statsLoading}
-                            </Typography.Text>
-                          ) : (
-                            <Typography.Text
-                              style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
-                            >
-                              {`${c.cpuPercent.toFixed(1)}% · ${formatMem(c.memUsage)}`}
-                            </Typography.Text>
-                          )}
+                          {renderResourceCell(isRunning, statsReady, c.cpuPercent, c.memUsage)}
                         </Col>
                         <Col {...colSpan.image}>{renderImageCell(c.image)}</Col>
-                        <Col {...colSpan.action} />
+                        <Col {...colSpan.action} style={{ textAlign: 'right' }}>
+                          {renderOpenIconBtn(cUrl)}
+                        </Col>
                       </Row>
                     )
                   })}
@@ -852,6 +1140,14 @@ export default function ContainersPage() {
           })}
         </Card>
       )}
+
+      <ContainerMetaModal
+        open={Boolean(editingMetaContext)}
+        context={editingMetaContext}
+        allTags={allTagsPool}
+        onClose={() => setEditingTarget(null)}
+        onSaved={handleRefresh}
+      />
 
       <DeleteAppModal
         open={Boolean(deletingApp)}

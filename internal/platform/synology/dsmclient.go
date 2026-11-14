@@ -482,9 +482,14 @@ type dsmContainerDetailed struct {
 	Name   string `json:"Name"`
 	Image  string `json:"Image"`
 	Config struct {
-		Image  string            `json:"Image"`
-		Labels map[string]string `json:"Labels"`
+		Image        string            `json:"Image"`
+		Labels       map[string]string `json:"Labels"`
+		ExposedPorts map[string]any    `json:"ExposedPorts"`
 	} `json:"Config"`
+	HostConfig      map[string]any `json:"HostConfig"`
+	NetworkSettings struct {
+		Ports map[string]any `json:"Ports"`
+	} `json:"NetworkSettings"`
 	State struct {
 		Status    string `json:"Status"`
 		Running   bool   `json:"Running"`
@@ -496,16 +501,19 @@ type dsmContainerDetailed struct {
 }
 
 type dsmContainerListItem struct {
-	ID        string            `json:"id"`
-	Name      string            `json:"name"`
-	Image     string            `json:"Image"`
-	ImageAlt  string            `json:"image"`
-	ImageID   string            `json:"ImageID"`
-	Status    string            `json:"status"`
-	UpStatus  string            `json:"up_status"`
-	IsPackage bool              `json:"is_package"`
-	Labels    map[string]string `json:"Labels"`
-	State     struct {
+	ID           string            `json:"id"`
+	Name         string            `json:"name"`
+	Image        string            `json:"Image"`
+	ImageAlt     string            `json:"image"`
+	ImageID      string            `json:"ImageID"`
+	Status       string            `json:"status"`
+	UpStatus     string            `json:"up_status"`
+	IsPackage    bool              `json:"is_package"`
+	Labels       map[string]string `json:"Labels"`
+	Ports        []map[string]any  `json:"ports"`
+	PortBindings []map[string]any  `json:"port_bindings"`
+	DockerPorts  []map[string]any  `json:"Ports"`
+	State        struct {
 		Status    string `json:"Status"`
 		Running   bool   `json:"Running"`
 		StartedAt string `json:"StartedAt"`
@@ -1085,6 +1093,42 @@ func (c *dsmClient) GetContainerProfile(ctx context.Context, name string) (profi
 	}
 	normalizeProfilePortBindings(data.Profile)
 	return data.Profile, data.Details.State.Running, nil
+}
+
+// GetContainerWebPorts 读取群晖单个容器的对外 Web 映射端口（兼容桥接端口映射与 host 网络模式 ExposedPorts）。
+func (c *dsmClient) GetContainerWebPorts(ctx context.Context, name string) ([]platform.PortBinding, error) {
+	var data struct {
+		Profile map[string]any       `json:"profile"`
+		Details dsmContainerDetailed `json:"details"`
+	}
+	if err := c.call(ctx, "SYNO.Docker.Container", "1", "get", map[string]string{
+		"name": jsonParam(name),
+	}, &data); err != nil {
+		return nil, err
+	}
+	var raw []platform.PortBinding
+	if data.Profile != nil {
+		normalizeProfilePortBindings(data.Profile)
+		raw = append(raw, extractDSMPorts(data.Profile)...)
+	}
+	raw = append(raw, extractDSMDetailedWebPorts(data.Details, nil)...)
+	if len(raw) == 0 {
+		isHostNet := (data.Profile != nil && anyBool(data.Profile["use_host_network"])) ||
+			strings.EqualFold(anyString(data.Details.HostConfig["NetworkMode"]), "host")
+		if isHostNet && len(data.Details.Config.ExposedPorts) > 0 {
+			for k := range data.Details.Config.ExposedPorts {
+				cPort, proto, hasProto := strings.Cut(k, "/")
+				if !hasProto || proto == "" || strings.EqualFold(proto, "tcp") {
+					raw = append(raw, platform.PortBinding{
+						HostPort:      strings.TrimSpace(cPort),
+						ContainerPort: strings.TrimSpace(cPort),
+						Protocol:      "tcp",
+					})
+				}
+			}
+		}
+	}
+	return platform.FilterAndSortWebPorts(raw), nil
 }
 
 // StopContainer 停止指定名称的独立容器。

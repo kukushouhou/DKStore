@@ -17,6 +17,7 @@ import (
 	"github.com/kukushouhou/DKStore/internal/hostauth"
 	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/ignore"
+	"github.com/kukushouhou/DKStore/internal/meta"
 	"github.com/kukushouhou/DKStore/internal/notify"
 	"github.com/kukushouhou/DKStore/internal/platform"
 	"github.com/kukushouhou/DKStore/internal/registry"
@@ -93,6 +94,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/services/config", s.requireAuth(s.handleGetServiceConfig))
 	mux.HandleFunc("POST /api/v1/services/config-update", s.requireAuth(s.handleUpdateServiceConfig))
 	mux.HandleFunc("GET /api/v1/containers", s.requireAuth(s.handleListContainers))
+	mux.HandleFunc("PUT /api/v1/meta", s.requireAuth(s.handleSaveMeta))
 	mux.HandleFunc("POST /api/v1/check", s.requireAuth(s.handleTriggerCheck))
 	mux.HandleFunc("GET /api/v1/check/current", s.requireAuth(s.handleCurrentCheck))
 	mux.HandleFunc("GET /api/v1/events", s.requireAuth(s.handleEvents))
@@ -325,6 +327,10 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListContainers(w http.ResponseWriter, r *http.Request) {
 	hostID := strings.TrimSpace(r.URL.Query().Get("hostId"))
+	var allTags []string
+	if s.d.Store != nil {
+		_, allTags, _ = meta.ListAll(r.Context(), s.d.Store)
+	}
 	cachedParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("cached")))
 	if cachedParam == "1" || cachedParam == "true" {
 		items, err := s.d.Hosts.ListCachedRuntimeContainers(r.Context(), hostID)
@@ -332,7 +338,7 @@ func (s *Server) handleListContainers(w http.ResponseWriter, r *http.Request) {
 			writeError(w, s.langOf(r), http.StatusInternalServerError, "db_error", err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"items": items, "cached": true})
+		writeJSON(w, http.StatusOK, map[string]any{"items": items, "allTags": allTags, "cached": true})
 		return
 	}
 	statsParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("stats")))
@@ -342,7 +348,37 @@ func (s *Server) handleListContainers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, s.langOf(r), http.StatusInternalServerError, "db_error", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "allTags": allTags})
+}
+
+func (s *Server) handleSaveMeta(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Items     []meta.Entry       `json:"items"`
+		TargetKey string             `json:"targetKey"`
+		HostID    string             `json:"hostId"`
+		Meta      platform.LocalMeta `json:"meta"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	items := body.Items
+	if len(items) == 0 && strings.TrimSpace(body.TargetKey) != "" {
+		items = []meta.Entry{{
+			TargetKey: body.TargetKey,
+			HostID:    body.HostID,
+			Meta:      body.Meta,
+		}}
+	}
+	if err := meta.SaveBatch(r.Context(), s.d.Store, items); err != nil {
+		if errors.Is(err, meta.ErrInvalidTarget) {
+			writeError(w, s.langOf(r), http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		writeError(w, s.langOf(r), http.StatusInternalServerError, "db_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) handleTriggerCheck(w http.ResponseWriter, r *http.Request) {
@@ -971,6 +1007,7 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
 		return
 	}
+	_ = meta.DeleteByApp(r.Context(), s.d.Store, req.AppKey)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": res})
 }
 
