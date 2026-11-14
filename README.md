@@ -63,16 +63,14 @@
 
 Download ready-to-install packages from [**GitHub Releases**](https://github.com/kukushouhou/DKStore/releases/latest), or deploy via Docker.
 
-### Which Package Should I Download? (ARM vs. x86 Lookup Guide)
+<sub>**Package Selection Guide** (check system info if unsure; mismatched packages are safely rejected):</sub>
 
-If you are unsure about your device's CPU architecture, check the system info menu listed below (mismatched packages are safely rejected by the installer without affecting your device):
-
-| Platform | How to Check Your Architecture | Package Filename |
+| <sub>Platform</sub> | <sub>How to Check Architecture</sub> | <sub>Package Filename</sub> |
 | :--- | :--- | :--- |
-| **fnOS** | Check CPU in fnOS **Settings → Device Info**:<br>• **ARM devices** (ARM NAS, RK3588/RK3568, OEC / ARM boxes)<br>• **x86 devices** (Intel / AMD mini PCs, DIY PCs) | • ARM: `dkstore-fnos-arm-<version>.fpk`<br>• x86: `dkstore-fnos-x86-<version>.fpk` |
-| **Synology NAS**<br>(DSM 7.0+) | Check CPU in DSM **Control Panel → Info Center**:<br>• **ARM CPUs** (e.g., DS223 / DS124 / j-series)<br>• **Intel / AMD CPUs** (e.g., DS220+ / DS423+ / DS920+) | • ARM: `dkstore-aarch64-<version>-0001.spk`<br>• x86: `dkstore-x86_64-<version>-0001.spk` |
-| **iStoreOS / OpenWrt Routers** | Check architecture in **Status → Overview** (`.run` for iStoreOS; `.ipk` for `opkg`; `.apk` for OpenWrt `apk`):<br>• **64-bit ARM** (R2S / R4S / R5S / N1 / ARM routers) → `aarch64`; 32-bit ARM → `arm`<br>• **x86 routers / VMs** → `x86_64` | • iStoreOS: `dkstore-openwrt-<arch>-<version>.run`<br>• OpenWrt: `luci-app-dkstore_<version>-1_<arch>.ipk` or `.apk` |
-| **Docker / Linux / Windows** | • **Docker (auto-detects ARM / x86)**: works on UGREEN, ZSpace, QNAP, Unraid, and any Docker host<br>• **Windows 10/11 PC**: extract `.zip` and run `dkstore.exe`<br>• **Linux standalone**: match `uname -m` | • Docker: `ghcr.io/kukushouhou/dkstore:latest`<br>• Windows: `dkstore-windows-amd64-<version>.zip`<br>• Linux: `dkstore-linux-<arm64\|amd64\|armv7>-<version>.tar.gz` |
+| <sub>**fnOS**</sub> | <sub>**Settings → Device Info**: ARM NAS/boxes → `arm`; Intel/AMD → `x86`</sub> | <sub>`dkstore-fnos-arm-<version>.fpk` · `dkstore-fnos-x86-<version>.fpk`</sub> |
+| <sub>**Synology DSM 7+**</sub> | <sub>**Control Panel → Info Center**: ARM → `aarch64`; Intel/AMD → `x86_64`</sub> | <sub>`dkstore-aarch64-<version>-0001.spk` · `dkstore-x86_64-<version>-0001.spk`</sub> |
+| <sub>**iStoreOS / OpenWrt**</sub> | <sub>**Status → Overview**: 64-bit ARM → `aarch64`, x86 → `x86_64` (`.run` for iStoreOS)</sub> | <sub>`dkstore-openwrt-<arch>-<version>.run` · `luci-app-dkstore_<version>-1_<arch>.ipk` / `.apk`</sub> |
+| <sub>**Docker / PC / Linux**</sub> | <sub>Docker image auto-matches ARM/x86; Windows PC → `.zip`; Linux → `uname -m`</sub> | <sub>`ghcr.io/kukushouhou/dkstore:latest` · `dkstore-windows-amd64-<version>.zip`</sub> |
 
 ### 1. fnOS App Package (`.fpk`)
 1. Download `dkstore-fnos-arm-<version>.fpk` (ARM64) or `dkstore-fnos-x86-<version>.fpk` (x86_64).
