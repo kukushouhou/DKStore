@@ -44,7 +44,7 @@ export default function SelfUpdateSourceFields({
   value,
   onChange,
   defaultRepo = 'kukushouhou/DKStore',
-  officialMirror = 'https://gh.h5.gg',
+  officialMirror = '',
   presetMirrors = DEFAULT_PRESET_MIRRORS,
   onSave,
   saving = false,
@@ -87,13 +87,16 @@ export default function SelfUpdateSourceFields({
   }
 
   const isVertical = layout === 'vertical'
+  const hasOfficialMirror = Boolean(officialMirror.trim())
   const cleanRepo = (value.repo || defaultRepo).trim().replace(/^\/+|\/+$/g, '') || defaultRepo
   const isOfficialRepo = cleanRepo.toLowerCase() === defaultRepo.toLowerCase()
   const effectiveChannel =
-    !isOfficialRepo && value.channel === 'mirror' ? 'github' : value.channel
+    (!hasOfficialMirror || !isOfficialRepo) && value.channel === 'mirror'
+      ? 'github'
+      : value.channel
 
   const readonlyUrl =
-    effectiveChannel === 'mirror'
+    effectiveChannel === 'mirror' && hasOfficialMirror
       ? `${officialMirror.replace(/\/+$/, '')}/https://github.com/${defaultRepo}`
       : `https://github.com/${cleanRepo}`
 
@@ -178,17 +181,21 @@ export default function SelfUpdateSourceFields({
           label: isVertical ? t.selfUpdate.optKeepGitHub : t.selfUpdate.optGitHub,
           value: 'github',
         },
-        {
-          label: isOfficialRepo ? (
-            t.selfUpdate.optMirror
-          ) : (
-            <Tooltip title={t.selfUpdate.mirrorRepoLockedTip}>
-              <span>{t.selfUpdate.optMirror}</span>
-            </Tooltip>
-          ),
-          value: 'mirror',
-          disabled: !isOfficialRepo,
-        },
+        ...(hasOfficialMirror
+          ? [
+              {
+                label: isOfficialRepo ? (
+                  t.selfUpdate.optMirror
+                ) : (
+                  <Tooltip title={t.selfUpdate.mirrorRepoLockedTip}>
+                    <span>{t.selfUpdate.optMirror}</span>
+                  </Tooltip>
+                ),
+                value: 'mirror' as const,
+                disabled: !isOfficialRepo,
+              },
+            ]
+          : []),
         {
           label: t.selfUpdate.optCustom,
           value: 'custom',
@@ -256,8 +263,14 @@ export default function SelfUpdateSourceFields({
     >
       <Space orientation="vertical" size={10}>
         <Typography.Text type="secondary">{t.selfUpdate.safetyP1}</Typography.Text>
-        <Typography.Text type="secondary">{t.selfUpdate.safetyP2}</Typography.Text>
-        <Typography.Text type="secondary">{t.selfUpdate.safetyP3}</Typography.Text>
+        {hasOfficialMirror ? (
+          <>
+            <Typography.Text type="secondary">{t.selfUpdate.safetyP2}</Typography.Text>
+            <Typography.Text type="secondary">{t.selfUpdate.safetyP3}</Typography.Text>
+          </>
+        ) : (
+          <Typography.Text type="secondary">{t.selfUpdate.safetyP2NoMirror}</Typography.Text>
+        )}
       </Space>
     </Modal>
   )

@@ -35,23 +35,24 @@ func TestConfigNormalizeAndEffectiveURL(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 
-	// 非官方仓库选官方镜像应报错（requireComplete=true）或自动回落（false）
-	if _, err := NormalizeAndValidate(Config{Repo: "myfork/DKStore", Channel: ChannelMirror}, true); err == nil {
-		t.Fatal("expected error for non-official repo with official mirror")
-	}
+	// 官方镜像源暂未启用时自动回落至 GitHub 官方源
 	fallbackCfg, err := NormalizeAndValidate(Config{Repo: "myfork/DKStore", Channel: ChannelMirror}, false)
 	if err != nil || fallbackCfg.Channel != ChannelGitHub {
 		t.Fatalf("expected fallback to github, got %+v, err=%v", fallbackCfg, err)
 	}
-
-	// 官方镜像源
 	mCfg, err := NormalizeAndValidate(Config{Repo: "kukushouhou/DKStore", Channel: ChannelMirror}, true)
 	if err != nil {
 		t.Fatalf("mirror validate err: %v", err)
 	}
-	wantMirror := "https://gh.h5.gg/https://github.com/kukushouhou/DKStore"
-	if got := EffectiveBaseURL(mCfg); got != wantMirror {
-		t.Fatalf("got %q, want %q", got, wantMirror)
+	if !OfficialMirrorEnabled {
+		if mCfg.Channel != ChannelGitHub || ActiveOfficialMirrorHost() != "" {
+			t.Fatalf("expected disabled official mirror to fallback to github, got %+v", mCfg)
+		}
+	} else {
+		wantMirror := "https://gh.h5.gg/https://github.com/kukushouhou/DKStore"
+		if got := EffectiveBaseURL(mCfg); got != wantMirror {
+			t.Fatalf("got %q, want %q", got, wantMirror)
+		}
 	}
 
 	// 自定义前缀与换域名

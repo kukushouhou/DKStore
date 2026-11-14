@@ -12,6 +12,8 @@ import (
 const (
 	// OfficialMirrorHost 是 DKStore 官方专属 GitHub Releases 实时转发节点（仅白名单转发官方主仓库）。
 	OfficialMirrorHost = "https://gh.h5.gg"
+	// OfficialMirrorEnabled 控制是否在前端开放官方镜像源入口（待 gh.h5.gg Worker 正式上线后开启为 true）。
+	OfficialMirrorEnabled = false
 
 	ChannelGitHub = "github"
 	ChannelMirror = "mirror"
@@ -65,6 +67,14 @@ func DefaultConfig() Config {
 		CustomHost: "",
 		CustomMode: CustomModePrefix,
 	}
+}
+
+// ActiveOfficialMirrorHost 返回当前对外启用的官方镜像域名；未启用时返回空字符串（前端自动隐藏入口）。
+func ActiveOfficialMirrorHost() string {
+	if !OfficialMirrorEnabled {
+		return ""
+	}
+	return OfficialMirrorHost
 }
 
 // IsOfficialRepo 判断给定仓库是否为官方主仓库。
@@ -140,11 +150,15 @@ func NormalizeAndValidate(in Config, requireComplete bool) (Config, error) {
 		return Config{}, err
 	}
 
-	if ch == ChannelMirror && !IsOfficialRepo(repo) {
-		if requireComplete {
-			return Config{}, ErrMirrorRepoLocked
+	if ch == ChannelMirror {
+		if !OfficialMirrorEnabled {
+			ch = ChannelGitHub
+		} else if !IsOfficialRepo(repo) {
+			if requireComplete {
+				return Config{}, ErrMirrorRepoLocked
+			}
+			ch = ChannelGitHub
 		}
-		ch = ChannelGitHub
 	}
 	if ch == ChannelCustom && host == "" && requireComplete {
 		return Config{}, ErrCustomHostEmpty
@@ -166,7 +180,10 @@ func EffectiveBaseURL(cfg Config) string {
 	}
 	switch cfg.Channel {
 	case ChannelMirror:
-		return strings.TrimRight(OfficialMirrorHost, "/") + "/https://github.com/" + DefaultRepoSlug()
+		if OfficialMirrorEnabled && OfficialMirrorHost != "" {
+			return strings.TrimRight(OfficialMirrorHost, "/") + "/https://github.com/" + DefaultRepoSlug()
+		}
+		return "https://github.com/" + repo
 	case ChannelCustom:
 		h := strings.TrimRight(strings.TrimSpace(cfg.CustomHost), "/")
 		if h == "" {

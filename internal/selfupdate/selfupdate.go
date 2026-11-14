@@ -401,7 +401,7 @@ func (s *Service) CheckStatus(ctx context.Context, lang i18n.Lang, bypassCache b
 		Config:          cfg,
 		EffectiveURL:    baseURL,
 		DefaultRepo:     DefaultRepoSlug(),
-		OfficialMirror:  OfficialMirrorHost,
+		OfficialMirror:  ActiveOfficialMirrorHost(),
 		PresetMirrors:   append([]string(nil), PresetMirrors...),
 		RolledBackError: RolledBackNote(s.dataDir),
 		CheckError:      checkErrStr,
