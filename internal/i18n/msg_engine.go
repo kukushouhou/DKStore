@@ -28,6 +28,7 @@ const (
 	MsgUpdateTagNotFound     = "update.tag_not_found"     // 仓库中未找到标签: %s
 	MsgComposeInvalidYAML    = "compose.invalid_yaml"     // Compose YAML 格式无效: %s
 	MsgComposeNotEditable    = "compose.not_editable"     // 当前项目不支持直接编辑配置
+	MsgComposeServicesRemoved = "compose.services_removed" // 新配置移除了原有容器: %s
 	MsgDeleteAppNotFound     = "delete.app_not_found"     // 未找到目标应用: %s
 	MsgDeleteUnsupported     = "delete.unsupported"       // 当前设备连接方式不支持删除操作
 
@@ -53,6 +54,7 @@ const (
 	MsgDockerComposeWrite      = "docker.compose_write"       // 写入 Compose 文件 %s 失败: %s
 	MsgDockerComposeRestored   = "docker.compose_restored"    // %s（已写回原 Compose 文件）
 	MsgDockerComposeRestoreErr = "docker.compose_restore_err" // %s（写回原 Compose 文件失败: %s）
+	MsgDockerComposeRebuildErr = "docker.compose_rebuild_err" // %s（已写回原 Compose 文件，但按原配置恢复运行失败: %s）
 	MsgDockerHTTPStatus        = "docker.http_status"         // HTTP %s: %s
 	MsgDockerProbeFailed       = "docker.probe_failed"        // 读取 Docker /info 失败: %s
 	MsgDockerListFailed        = "docker.list_failed"         // 列出容器失败: %s
@@ -93,9 +95,10 @@ var engineMessages = map[string][2]string{
 	MsgUpdateInterrupted:     {"DKStore 重启导致任务中断，请确认容器状态后重试", "Task was interrupted by a DKStore restart; please verify the container state and retry"},
 	MsgUpdateRollbackWarning: {"注意：回退容器镜像不等于回退业务数据库或持久化卷数据结构；若新版已执行不可逆的数据迁移，请先确认数据兼容性。", "Note: Rolling back the container image does not roll back persistent database schemas or volume data."},
 	MsgUpdateTagNotFound:     {"在镜像仓库中未找到指定版本标签：%s", "Specified version tag %s was not found in the image repository"},
-	MsgComposeInvalidYAML:    {"Compose 配置格式不正确：%s", "Invalid Compose YAML configuration: %s"},
-	MsgComposeNotEditable:    {"当前应用不支持直接编辑 Compose 配置", "Direct Compose configuration editing is not supported for this app"},
-	MsgDeleteAppNotFound:     {"未找到目标容器或项目：%s", "Target container or project not found: %s"},
+	MsgComposeInvalidYAML:     {"Compose 配置格式不正确：%s", "Invalid Compose YAML configuration: %s"},
+	MsgComposeNotEditable:     {"当前应用不支持直接编辑 Compose 配置", "Direct Compose configuration editing is not supported for this app"},
+	MsgComposeServicesRemoved: {"新配置不再包含原有容器（%s），请先确认移除后再更新", "The new configuration removes existing container(s) (%s); please confirm before updating"},
+	MsgDeleteAppNotFound:      {"未找到目标容器或项目：%s", "Target container or project not found: %s"},
 	MsgDeleteUnsupported:     {"当前设备的连接方式暂不支持执行删除操作", "The current connection mode of this device does not support deletion"},
 
 	MsgDockerContainerNotFound: {"未找到目标服务容器（%s/%s）", "Target service container not found (%s/%s)"},
@@ -119,6 +122,7 @@ var engineMessages = map[string][2]string{
 	MsgDockerComposeWrite:      {"写入 Compose 文件 %s 失败：%s", "Failed to write Compose file %s: %s"},
 	MsgDockerComposeRestored:   {"%s（已写回原 Compose 文件）", "%s (original Compose file restored)"},
 	MsgDockerComposeRestoreErr: {"%s（写回原 Compose 文件失败：%s）", "%s (failed to restore the original Compose file: %s)"},
+	MsgDockerComposeRebuildErr: {"%s（已写回原 Compose 文件，但按原配置恢复运行失败：%s）", "%s (original Compose file restored, but rebuilding with it failed: %s)"},
 	MsgDockerHTTPStatus:        {"Docker 返回 HTTP %s：%s", "Docker returned HTTP %s: %s"},
 	MsgDockerProbeFailed:       {"读取 Docker /info 失败：%s", "Failed to read Docker /info: %s"},
 	MsgDockerListFailed:        {"列出容器失败：%s", "Failed to list containers: %s"},

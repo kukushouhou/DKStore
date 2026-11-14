@@ -78,12 +78,15 @@ type UpdateItemRequest struct {
 
 // ComposeUpdateRequest 是整项目/单容器 YAML 按新版配置更新的异步任务请求（附录 E.4）。
 type ComposeUpdateRequest struct {
-	AppKey        string `json:"appKey"`
-	Content       string `json:"content"`
-	ServiceKey    string `json:"serviceKey,omitempty"`
-	PolicyMode    string `json:"policyMode,omitempty"`
-	PolicyPrefix  string `json:"policyPrefix,omitempty"`
-	SkipTargetTag string `json:"skipTargetTag,omitempty"`
+	AppKey                string   `json:"appKey"`
+	Content               string   `json:"content"`
+	ServiceKey            string   `json:"serviceKey,omitempty"`
+	PolicyMode            string   `json:"policyMode,omitempty"`
+	PolicyPrefix          string   `json:"policyPrefix,omitempty"`
+	SkipTargetTag         string   `json:"skipTargetTag,omitempty"`
+	ConfirmRemoveServices bool     `json:"confirmRemoveServices,omitempty"`
+	DeleteRemovedImages   bool     `json:"deleteRemovedImages,omitempty"`
+	DeleteRemovedFileIDs  []string `json:"deleteRemovedFileIds,omitempty"`
 }
 
 // StandaloneConfigUpdateRequest 是无 YAML 独立容器按新版配置（环境变量 + 端口映射）更新的异步任务请求（附录 E.4）。
@@ -99,14 +102,16 @@ type StandaloneConfigUpdateRequest struct {
 
 // ComposeInfo 是 GET /api/v1/apps/compose 的返回体（附录 D.4）。
 type ComposeInfo struct {
-	Key         string `json:"key"`
-	HostID      string `json:"hostId,omitempty"`
-	Name        string `json:"name,omitempty"`
-	Source      string `json:"source,omitempty"`
-	ComposePath string `json:"composePath,omitempty"`
-	Editable    bool   `json:"editable"`
-	Content     string `json:"content"`
-	Reason      string `json:"reason,omitempty"`
+	Key               string   `json:"key"`
+	HostID            string   `json:"hostId,omitempty"`
+	Name              string   `json:"name,omitempty"`
+	Source            string   `json:"source,omitempty"`
+	ComposePath       string   `json:"composePath,omitempty"`
+	Editable          bool     `json:"editable"`
+	Content           string   `json:"content"`
+	Reason            string   `json:"reason,omitempty"`
+	EffectiveServices []string `json:"effectiveServices,omitempty"`
+	ExtraFileServices []string `json:"extraFileServices,omitempty"`
 }
 
 // finalizeTimeout 是更新任务收尾写库使用的独立超时（审计 M6）。
@@ -564,15 +569,90 @@ func (s *Service) GetAppCompose(ctx context.Context, appKey string, lang i18n.La
 	} else if proj.WorkingDir != "" {
 		composePath = strings.TrimRight(proj.WorkingDir, "/") + "/compose.yaml"
 	}
+
+	var effectiveServices, extraFileServices []string
+	if cuAd, ok := ad.(platform.ComposeUpdateAdapter); ok {
+		if sum, sErr := cuAd.InspectProjectComposeServices(ctx, &proj); sErr == nil && sum != nil {
+			effectiveServices = append(effectiveServices, sum.EffectiveServices...)
+			extraFileServices = append(extraFileServices, sum.ExtraFileServices...)
+		}
+	}
+	if len(effectiveServices) == 0 {
+		if parsed, pErr := docker.ParseComposeServiceNames(content); pErr == nil {
+			effectiveServices = append(effectiveServices, parsed...)
+		}
+	}
+	dbServices := s.listIndexedProjectServiceNames(ctx, strings.TrimSpace(appKey))
+	effectiveServices = mergeUniqueStrings(effectiveServices, dbServices)
+
 	return &ComposeInfo{
-		Key:         appKey,
-		HostID:      hostID,
-		Name:        appName,
-		Source:      source,
-		ComposePath: composePath,
-		Editable:    true,
-		Content:     content,
+		Key:               appKey,
+		HostID:            hostID,
+		Name:              appName,
+		Source:            source,
+		ComposePath:       composePath,
+		Editable:          true,
+		Content:           content,
+		EffectiveServices: effectiveServices,
+		ExtraFileServices: extraFileServices,
 	}, nil
+}
+
+func (s *Service) listIndexedProjectServiceNames(ctx context.Context, appKey string) []string {
+	if s.st == nil || s.st.DB == nil || appKey == "" {
+		return nil
+	}
+	rows, err := s.st.DB.QueryContext(ctx, `
+		SELECT name FROM service WHERE app_key=? AND gone_at IS NULL ORDER BY name ASC`, appKey)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var n string
+		if rows.Scan(&n) == nil && strings.TrimSpace(n) != "" {
+			out = append(out, strings.TrimSpace(n))
+		}
+	}
+	return out
+}
+
+func mergeUniqueStrings(groups ...[]string) []string {
+	var out []string
+	seen := make(map[string]bool)
+	for _, g := range groups {
+		for _, raw := range g {
+			v := strings.TrimSpace(raw)
+			if v != "" && !seen[v] {
+				seen[v] = true
+				out = append(out, v)
+			}
+		}
+	}
+	return out
+}
+
+func computeServiceSetDiff(before, after []string) (removed, added []string) {
+	beforeSet := make(map[string]bool, len(before))
+	for _, b := range before {
+		beforeSet[strings.TrimSpace(b)] = true
+	}
+	afterSet := make(map[string]bool, len(after))
+	for _, a := range after {
+		a = strings.TrimSpace(a)
+		afterSet[a] = true
+		if a != "" && !beforeSet[a] {
+			added = append(added, a)
+		}
+	}
+	for _, b := range before {
+		b = strings.TrimSpace(b)
+		if b != "" && !afterSet[b] {
+			removed = append(removed, b)
+		}
+	}
+	return removed, added
 }
 
 // StartComposeUpdate 校验新版 Compose YAML 后启动异步跟踪任务（SSE 实时推送分层进度与原始 xterm 终端流，附录 E.4）。
@@ -584,6 +664,10 @@ func (s *Service) StartComposeUpdate(ctx context.Context, req ComposeUpdateReque
 	req.SkipTargetTag = strings.TrimSpace(req.SkipTargetTag)
 
 	svcImages, err := docker.ValidateComposeYAML(req.Content)
+	if err != nil {
+		return nil, err
+	}
+	newPrimarySvcs, err := docker.ParseComposeServiceNames(req.Content)
 	if err != nil {
 		return nil, err
 	}
@@ -615,6 +699,32 @@ func (s *Service) StartComposeUpdate(ctx context.Context, req ComposeUpdateReque
 	}
 	if proj.Name == "" {
 		proj.Name = appName
+	}
+
+	// 启动异步任务前同步核对组合生效服务集合：若移除了原有服务但未显式确认，直接拒绝修改
+	if !req.ConfirmRemoveServices {
+		dbServices := s.listIndexedProjectServiceNames(ctx, appKey)
+		var liveEffective, extraServices []string
+		if s.hosts != nil {
+			if ad, _, adErr := s.hosts.OpenAdapter(ctx, hostID); adErr == nil && ad != nil {
+				if cuAd, ok := ad.(platform.ComposeUpdateAdapter); ok {
+					if sum, sErr := cuAd.InspectProjectComposeServices(ctx, &proj); sErr == nil && sum != nil {
+						liveEffective = sum.EffectiveServices
+						extraServices = sum.ExtraFileServices
+					}
+				}
+				_ = ad.Close()
+			}
+		}
+		effectiveBefore := mergeUniqueStrings(liveEffective, dbServices)
+		effectiveAfter := mergeUniqueStrings(newPrimarySvcs, extraServices)
+		removedSvcs, addedSvcs := computeServiceSetDiff(effectiveBefore, effectiveAfter)
+		if len(removedSvcs) > 0 {
+			return nil, &platform.ComposeServicesRemovedError{
+				RemovedServices: removedSvcs,
+				AddedServices:   addedSvcs,
+			}
+		}
 	}
 
 	// 查询代表服务元数据（若前端指定了 serviceKey 则取该服务，否则取该项目下第一个服务）
@@ -748,7 +858,11 @@ func (s *Service) StartComposeUpdate(ctx context.Context, req ComposeUpdateReque
 		return nil, err
 	}
 	s.broadcast(job)
-	go s.executeComposeJob(job, proj, req.Content)
+	go s.executeComposeJob(job, proj, req.Content, platform.ComposeUpdateOptions{
+		ConfirmRemoveServices: req.ConfirmRemoveServices,
+		DeleteRemovedImages:   req.DeleteRemovedImages,
+		DeleteRemovedFileIDs:  append([]string(nil), req.DeleteRemovedFileIDs...),
+	})
 	return &job, nil
 }
 
@@ -1148,7 +1262,7 @@ func (s *Service) executeJob(j Job) {
 	s.finalizeSucceededServiceJob(&j, tracker, res)
 }
 
-func (s *Service) executeComposeJob(j Job, proj platform.ProjectInfo, newYAML string) {
+func (s *Service) executeComposeJob(j Job, proj platform.ProjectInfo, newYAML string, opts platform.ComposeUpdateOptions) {
 	tracker := newJobProgressTracker(s, &j)
 	defer func() {
 		if r := recover(); r != nil {
@@ -1172,13 +1286,26 @@ func (s *Service) executeComposeJob(j Job, proj platform.ProjectInfo, newYAML st
 	}
 	defer ad.Close()
 
-	if err := ad.UpdateProjectCompose(ctx, j.AppName, &proj, newYAML, func(p platform.PullProgress) {
-		tracker.handleProgress(ctx, &j, p)
-	}); err != nil {
+	var runErr error
+	if cuAd, ok := ad.(platform.ComposeUpdateAdapter); ok {
+		runErr = cuAd.UpdateProjectComposeWithOptions(ctx, j.AppName, &proj, newYAML, opts, func(p platform.PullProgress) {
+			tracker.handleProgress(ctx, &j, p)
+		})
+	} else {
+		runErr = ad.UpdateProjectCompose(ctx, j.AppName, &proj, newYAML, func(p platform.PullProgress) {
+			tracker.handleProgress(ctx, &j, p)
+		})
+	}
+	if runErr != nil {
+		var csrErr *platform.ComposeServicesRemovedError
+		if errors.As(runErr, &csrErr) {
+			tracker.fail(j, "compose_services_removed", i18n.EngineDetail(i18n.MsgComposeServicesRemoved, strings.Join(csrErr.RemovedServices, "、")))
+			return
+		}
 		code := "recreate_failed"
-		msg := i18n.DetailOf(err)
+		msg := i18n.DetailOf(runErr)
 		var ue *platform.UpdateError
-		if errors.As(err, &ue) {
+		if errors.As(runErr, &ue) {
 			code = ue.Code
 			msg = ue.Message
 		}
@@ -1189,6 +1316,14 @@ func (s *Service) executeComposeJob(j Job, proj platform.ProjectInfo, newYAML st
 
 	if s.inv != nil {
 		_, _, _ = s.inv.SyncHost(ctx, j.HostID)
+	}
+	if opts.ConfirmRemoveServices && s.st != nil && s.st.DB != nil {
+		cCtx, cCancel := context.WithTimeout(context.Background(), finalizeTimeout)
+		_, _ = s.st.DB.ExecContext(cCtx, `
+			DELETE FROM finding WHERE service_key IN (
+				SELECT key FROM service WHERE app_key=? AND gone_at IS NOT NULL
+			)`, j.AppKey)
+		cCancel()
 	}
 
 	finished := time.Now().Unix()

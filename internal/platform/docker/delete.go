@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -620,22 +621,18 @@ func (a *Adapter) inspectDeletePlan(
 	for _, id := range fileOrder {
 		files = append(files, fileMap[id])
 	}
-	sort.SliceStable(files, func(i, j int) bool {
-		if files[i].Protected != files[j].Protected {
-			return !files[i].Protected
-		}
-		rank := func(k platform.DeleteFileKind) int {
-			switch k {
-			case platform.DeleteFileProjectDir:
-				return 0
-			case platform.DeleteFileVolume:
-				return 1
-			default:
-				return 2
-			}
-		}
-		return rank(files[i].Kind) < rank(files[j].Kind)
+
+	// 检查同主机上其余容器是否正在引用待删除路径或数据卷（含父子目录覆盖）
+	matchedIDSet := make(map[string]bool, len(containerIDs))
+	for _, cid := range containerIDs {
+		matchedIDSet[cid] = true
+	}
+	otherRefs := a.collectOtherContainerMountRefs(ctx, list, func(cs containerSummary) bool {
+		return matchedIDSet[cs.ID]
 	})
+	applyMountReferenceProtection(files, otherRefs)
+
+	sortDeleteFileItems(files)
 
 	return &inspectedDeletePlan{
 		preview: &platform.DeleteAppPreview{
@@ -654,6 +651,647 @@ func (a *Adapter) inspectDeletePlan(
 		envFiles:         envFiles,
 		resolvedCfgPaths: resolvedCfgPaths,
 	}, nil
+}
+
+type externalMountRef struct {
+	label     string
+	hostPaths []string
+	volumes   []string
+}
+
+func formatReferencerLabel(projName, svcName, containerName string) string {
+	p := strings.TrimSpace(projName)
+	s := strings.TrimSpace(svcName)
+	c := strings.TrimSpace(containerName)
+	if p != "" {
+		if s == "" || strings.EqualFold(p, s) {
+			return p
+		}
+		return p + " / " + s
+	}
+	return c
+}
+
+func extractMountsFromRawInspect(raw map[string]any) (hostPaths []string, volumes []string) {
+	seenP := make(map[string]bool)
+	seenV := make(map[string]bool)
+	addP := func(src string) {
+		norm := platform.NormalizeHostPath(src)
+		if norm == "" || norm == "/etc/localtime" || norm == "/etc/timezone" {
+			return
+		}
+		if !seenP[norm] {
+			seenP[norm] = true
+			hostPaths = append(hostPaths, norm)
+		}
+	}
+	addV := func(name string) {
+		name = strings.TrimSpace(name)
+		if name != "" && !seenV[name] {
+			seenV[name] = true
+			volumes = append(volumes, name)
+		}
+	}
+
+	mountsParsed := false
+	if mList, ok := raw["Mounts"].([]any); ok && len(mList) > 0 {
+		mountsParsed = true
+		for _, m := range mList {
+			mm, ok := m.(map[string]any)
+			if !ok {
+				continue
+			}
+			typ, _ := mm["Type"].(string)
+			typ = strings.ToLower(strings.TrimSpace(typ))
+			name, _ := mm["Name"].(string)
+			src, _ := mm["Source"].(string)
+			switch typ {
+			case "volume":
+				addV(name)
+			case "bind", "":
+				addP(src)
+			}
+		}
+	}
+	if !mountsParsed {
+		if hostCfg, ok := raw["HostConfig"].(map[string]any); ok && hostCfg != nil {
+			for _, b := range toStringSlice(hostCfg["Binds"]) {
+				parts := strings.Split(b, ":")
+				if len(parts) < 2 {
+					continue
+				}
+				src := strings.TrimSpace(parts[0])
+				if strings.HasPrefix(src, "/") || (len(src) >= 2 && src[1] == ':') {
+					addP(src)
+				} else if src != "" {
+					addV(src)
+				}
+			}
+		}
+	}
+	return hostPaths, volumes
+}
+
+func (a *Adapter) collectOtherContainerMountRefs(
+	ctx context.Context,
+	list []containerSummary,
+	skip func(cs containerSummary) bool,
+) []externalMountRef {
+	var out []externalMountRef
+	for _, cs := range list {
+		if cs.Labels["dkstore.self"] == "true" || (skip != nil && skip(cs)) {
+			continue
+		}
+		raw := make(map[string]any)
+		if err := a.getJSON(ctx, "/containers/"+url.PathEscape(cs.ID)+"/json", &raw); err != nil {
+			continue
+		}
+		cName, _ := raw["Name"].(string)
+		cName = strings.TrimPrefix(cName, "/")
+		if cName == "" && len(cs.Names) > 0 {
+			cName = strings.TrimPrefix(cs.Names[0], "/")
+		}
+		labels := cs.Labels
+		if cfgMap, _ := raw["Config"].(map[string]any); cfgMap != nil {
+			if rawLabels, ok := cfgMap["Labels"].(map[string]any); ok && len(rawLabels) > 0 {
+				labels = make(map[string]string, len(rawLabels))
+				for k, v := range rawLabels {
+					if s, ok := v.(string); ok {
+						labels[k] = s
+					}
+				}
+			}
+		}
+		label := formatReferencerLabel(
+			labels["com.docker.compose.project"],
+			labels["com.docker.compose.service"],
+			cName,
+		)
+		if label == "" {
+			label = shortID(cs.ID)
+		}
+		paths, vols := extractMountsFromRawInspect(raw)
+		if len(paths) > 0 || len(vols) > 0 {
+			out = append(out, externalMountRef{
+				label:     label,
+				hostPaths: paths,
+				volumes:   vols,
+			})
+		}
+	}
+	return out
+}
+
+func applyMountReferenceProtection(files []platform.DeleteFileItem, refs []externalMountRef) {
+	if len(files) == 0 || len(refs) == 0 {
+		return
+	}
+	for i := range files {
+		item := &files[i]
+		if item.Reason == "system_protected" {
+			continue
+		}
+		var matchedLabels []string
+		seen := make(map[string]bool)
+		addLabel := func(lbl string) {
+			if lbl != "" && !seen[lbl] {
+				seen[lbl] = true
+				matchedLabels = append(matchedLabels, lbl)
+			}
+		}
+		switch item.Kind {
+		case platform.DeleteFileVolume:
+			for _, r := range refs {
+				for _, v := range r.volumes {
+					if v == item.Path {
+						addLabel(r.label)
+						break
+					}
+				}
+			}
+		case platform.DeleteFileBindMount, platform.DeleteFileProjectDir:
+			for _, r := range refs {
+				for _, p := range r.hostPaths {
+					if platform.PathsOverlap(item.Path, p) {
+						addLabel(r.label)
+						break
+					}
+				}
+			}
+		}
+		if len(matchedLabels) > 0 {
+			item.Protected = true
+			item.DefaultSelect = false
+			item.Reason = "referenced_by_containers"
+			item.ReferencedBy = matchedLabels
+		}
+	}
+}
+
+func sortDeleteFileItems(files []platform.DeleteFileItem) {
+	sort.SliceStable(files, func(i, j int) bool {
+		if files[i].Protected != files[j].Protected {
+			return !files[i].Protected
+		}
+		rank := func(k platform.DeleteFileKind) int {
+			switch k {
+			case platform.DeleteFileProjectDir:
+				return 0
+			case platform.DeleteFileVolume:
+				return 1
+			default:
+				return 2
+			}
+		}
+		return rank(files[i].Kind) < rank(files[j].Kind)
+	})
+}
+
+// PreviewComposeServiceRemoval 预览新版 Compose 配置移除旧服务时涉及的容器、镜像与关联目录/卷（自动禁用被新配置或其他容器引用的路径）。
+func (a *Adapter) PreviewComposeServiceRemoval(
+	ctx context.Context,
+	req platform.ComposeRemovalPreviewRequest,
+) (*platform.DeleteAppPreview, error) {
+	if req.Source == platform.SourceVendorManaged {
+		return nil, &platform.UpdateError{
+			Code:    "vendor_managed_readonly",
+			Message: i18n.EngineDetail(i18n.MsgDockerVendorReadonly),
+		}
+	}
+	plan, err := a.inspectComposeServiceRemovalPlan(ctx, req.AppName, req.Project, req.NewYAML, req.RemovedServices)
+	if err != nil {
+		return nil, err
+	}
+	plan.preview.Source = req.Source
+	return plan.preview, nil
+}
+
+func (a *Adapter) inspectComposeServiceRemovalPlan(
+	ctx context.Context,
+	appName string,
+	project *platform.ProjectInfo,
+	newYAML string,
+	removedServices []string,
+) (*inspectedDeletePlan, error) {
+	projName := strings.TrimSpace(appName)
+	var workDir string
+	var cfgFiles, envFiles []string
+	if project != nil {
+		if strings.TrimSpace(project.Name) != "" {
+			projName = strings.TrimSpace(project.Name)
+		}
+		workDir = strings.TrimSpace(project.WorkingDir)
+		cfgFiles = append([]string(nil), project.ConfigFiles...)
+		envFiles = append([]string(nil), project.EnvFiles...)
+	}
+
+	removedSet := make(map[string]bool, len(removedServices))
+	for _, s := range removedServices {
+		if s = strings.TrimSpace(s); s != "" {
+			removedSet[s] = true
+		}
+	}
+
+	var list []containerSummary
+	if a.tr != nil {
+		_ = a.getJSON(ctx, "/containers/json?all=1", &list)
+	}
+
+	var matchedSummaries []containerSummary
+	for _, cs := range list {
+		if cs.Labels["dkstore.self"] == "true" {
+			continue
+		}
+		if cs.Labels["com.docker.compose.project"] == projName && removedSet[strings.TrimSpace(cs.Labels["com.docker.compose.service"])] {
+			matchedSummaries = append(matchedSummaries, cs)
+			if workDir == "" {
+				workDir = strings.TrimSpace(cs.Labels["com.docker.compose.project.working_dir"])
+			}
+			if len(cfgFiles) == 0 {
+				cfgFiles = splitFiles(cs.Labels["com.docker.compose.project.config_files"])
+			}
+			if len(envFiles) == 0 {
+				envFiles = splitFiles(cs.Labels["com.docker.compose.project.environment_file"])
+			}
+		}
+	}
+
+	cleanWorkDir := platform.NormalizeHostPath(workDir)
+	envVars := make(map[string]string)
+	envPaths := envFiles
+	if len(envPaths) == 0 && cleanWorkDir != "" {
+		envPaths = []string{filepath.ToSlash(filepath.Join(cleanWorkDir, ".env"))}
+	}
+	for _, ep := range envPaths {
+		if b, err := a.tr.ReadFile(ctx, resolvePath(cleanWorkDir, ep)); err == nil {
+			for k, v := range parseDotEnv(b) {
+				envVars[k] = v
+			}
+		}
+	}
+
+	var (
+		containerIDs   []string
+		containerNames []string
+		imageRefs      []string
+		seenImages     = make(map[string]bool)
+		fileMap        = make(map[string]platform.DeleteFileItem)
+		fileOrder      []string
+	)
+	addImage := func(ref string) {
+		ref = strings.TrimSpace(ref)
+		if ref != "" && !seenImages[ref] {
+			seenImages[ref] = true
+			imageRefs = append(imageRefs, ref)
+		}
+	}
+	putFile := func(item platform.DeleteFileItem) {
+		if existing, ok := fileMap[item.ID]; ok {
+			if item.DefaultSelect && !existing.Protected {
+				existing.DefaultSelect = true
+				existing.Reason = ""
+			}
+			fileMap[item.ID] = existing
+			return
+		}
+		fileMap[item.ID] = item
+		fileOrder = append(fileOrder, item.ID)
+	}
+
+	for _, cs := range matchedSummaries {
+		containerIDs = append(containerIDs, cs.ID)
+		raw := make(map[string]any)
+		if err := a.getJSON(ctx, "/containers/"+url.PathEscape(cs.ID)+"/json", &raw); err != nil {
+			cName := cs.ID[:minLen(len(cs.ID), 12)]
+			if len(cs.Names) > 0 {
+				cName = strings.TrimPrefix(cs.Names[0], "/")
+			}
+			containerNames = append(containerNames, cName)
+			addImage(cs.Image)
+			continue
+		}
+		cName, _ := raw["Name"].(string)
+		cName = strings.TrimPrefix(cName, "/")
+		if cName == "" && len(cs.Names) > 0 {
+			cName = strings.TrimPrefix(cs.Names[0], "/")
+		}
+		if cName != "" {
+			containerNames = append(containerNames, cName)
+		}
+		if cfgMap, _ := raw["Config"].(map[string]any); cfgMap != nil {
+			if cfgImg, _ := cfgMap["Image"].(string); cfgImg != "" {
+				addImage(cfgImg)
+			}
+		}
+		addImage(cs.Image)
+
+		if mList, ok := raw["Mounts"].([]any); ok && len(mList) > 0 {
+			for _, m := range mList {
+				mm, ok := m.(map[string]any)
+				if !ok {
+					continue
+				}
+				typ, _ := mm["Type"].(string)
+				typ = strings.ToLower(strings.TrimSpace(typ))
+				name, _ := mm["Name"].(string)
+				src, _ := mm["Source"].(string)
+				dst, _ := mm["Destination"].(string)
+				rw := true
+				if rwVal, ok := mm["RW"].(bool); ok {
+					rw = rwVal
+				}
+				switch typ {
+				case "volume":
+					name = strings.TrimSpace(name)
+					if name != "" {
+						putFile(platform.DeleteFileItem{
+							ID:            "volume:" + name,
+							Kind:          platform.DeleteFileVolume,
+							Path:          name,
+							Target:        strings.TrimSpace(dst),
+							DefaultSelect: true,
+							Protected:     false,
+						})
+					}
+				case "bind", "":
+					normSrc := platform.NormalizeHostPath(src)
+					if normSrc == "" || normSrc == "/etc/localtime" || normSrc == "/etc/timezone" {
+						continue
+					}
+					if platform.IsProtectedHostPath(normSrc) {
+						putFile(platform.DeleteFileItem{
+							ID:            "bind:" + normSrc,
+							Kind:          platform.DeleteFileBindMount,
+							Path:          normSrc,
+							Target:        strings.TrimSpace(dst),
+							DefaultSelect: false,
+							Protected:     true,
+							Reason:        "system_protected",
+						})
+						continue
+					}
+					// 若挂载路径恰好等于或包含项目根目录（存放 compose.yaml 所在目录），绝不可在项目更新期间删除
+					if cleanWorkDir != "" && platform.IsSubPathOrSame(normSrc, cleanWorkDir) {
+						putFile(platform.DeleteFileItem{
+							ID:            "bind:" + normSrc,
+							Kind:          platform.DeleteFileBindMount,
+							Path:          normSrc,
+							Target:        strings.TrimSpace(dst),
+							DefaultSelect: false,
+							Protected:     true,
+							Reason:        "system_protected",
+						})
+						continue
+					}
+					defaultSel := true
+					reason := ""
+					if !rw {
+						defaultSel = false
+						reason = "readonly_bind"
+					} else if cleanWorkDir != "" && !platform.IsSubPathOrSame(cleanWorkDir, normSrc) {
+						defaultSel = false
+						reason = "external_bind"
+					}
+					putFile(platform.DeleteFileItem{
+						ID:            "bind:" + normSrc,
+						Kind:          platform.DeleteFileBindMount,
+						Path:          normSrc,
+						Target:        strings.TrimSpace(dst),
+						DefaultSelect: defaultSel,
+						Protected:     false,
+						Reason:        reason,
+					})
+				}
+			}
+		}
+	}
+
+	// 若某个被移除服务当前尚无运行/停止容器，从原配置文件补充其声明的镜像与挂载目录
+	if project != nil {
+		if _, origBytes, err := a.readPrimaryComposeBytes(ctx, project); err == nil {
+			for svc, img := range parseComposeImages(origBytes, envVars) {
+				if removedSet[svc] {
+					addImage(img)
+				}
+			}
+			origMounts := ParseComposeServiceMounts(origBytes, cleanWorkDir, projName, envVars)
+			for _, svc := range removedServices {
+				ms, ok := origMounts[svc]
+				if !ok {
+					continue
+				}
+				for _, v := range ms.Volumes {
+					// 优先保留简洁卷名或项目前缀卷名，避免在无容器时同时塞入两条同义卷记录
+					if projName != "" && !strings.HasPrefix(v, projName+"_") {
+						continue
+					}
+					putFile(platform.DeleteFileItem{
+						ID:            "volume:" + v,
+						Kind:          platform.DeleteFileVolume,
+						Path:          v,
+						DefaultSelect: true,
+						Protected:     false,
+					})
+				}
+				for _, p := range ms.HostPaths {
+					if platform.IsProtectedHostPath(p) || (cleanWorkDir != "" && platform.IsSubPathOrSame(p, cleanWorkDir)) {
+						putFile(platform.DeleteFileItem{
+							ID:            "bind:" + p,
+							Kind:          platform.DeleteFileBindMount,
+							Path:          p,
+							DefaultSelect: false,
+							Protected:     true,
+							Reason:        "system_protected",
+						})
+						continue
+					}
+					putFile(platform.DeleteFileItem{
+						ID:            "bind:" + p,
+						Kind:          platform.DeleteFileBindMount,
+						Path:          p,
+						DefaultSelect: cleanWorkDir == "" || platform.IsSubPathOrSame(cleanWorkDir, p),
+						Protected:     false,
+					})
+				}
+			}
+		}
+	}
+
+	if len(containerNames) == 0 {
+		for _, svc := range removedServices {
+			if s := strings.TrimSpace(svc); s != "" {
+				containerNames = append(containerNames, s)
+			}
+		}
+	}
+	sort.Strings(containerNames)
+
+	// 汇总引用方：1) 新配置（newYAML + 附加覆盖文件）中的全部保留/新增服务；2) 同主机其他容器與本项目保留容器
+	var refs []externalMountRef
+	newCfgMounts := make(map[string]ComposeServiceMountSet)
+	if strings.TrimSpace(newYAML) != "" {
+		for svc, ms := range ParseComposeServiceMounts([]byte(newYAML), cleanWorkDir, projName, envVars) {
+			if !removedSet[svc] {
+				newCfgMounts[svc] = ms
+			}
+		}
+	}
+	if len(cfgFiles) > 1 {
+		for _, cf := range cfgFiles[1:] {
+			if b, err := a.tr.ReadFile(ctx, resolvePath(cleanWorkDir, cf)); err == nil {
+				for svc, ms := range ParseComposeServiceMounts(b, cleanWorkDir, projName, envVars) {
+					if removedSet[svc] {
+						continue
+					}
+					prev := newCfgMounts[svc]
+					prev.HostPaths = unionOrderedStrings(prev.HostPaths, ms.HostPaths)
+					prev.Volumes = unionOrderedStrings(prev.Volumes, ms.Volumes)
+					newCfgMounts[svc] = prev
+				}
+			}
+		}
+	}
+	var newSvcNames []string
+	for svc := range newCfgMounts {
+		newSvcNames = append(newSvcNames, svc)
+	}
+	sort.Strings(newSvcNames)
+	for _, svc := range newSvcNames {
+		ms := newCfgMounts[svc]
+		if len(ms.HostPaths) > 0 || len(ms.Volumes) > 0 {
+			refs = append(refs, externalMountRef{
+				label:     formatReferencerLabel(projName, svc, svc),
+				hostPaths: ms.HostPaths,
+				volumes:   ms.Volumes,
+			})
+		}
+	}
+
+	removedIDSet := make(map[string]bool, len(containerIDs))
+	for _, cid := range containerIDs {
+		removedIDSet[cid] = true
+	}
+	otherLiveRefs := a.collectOtherContainerMountRefs(ctx, list, func(cs containerSummary) bool {
+		if removedIDSet[cs.ID] {
+			return true
+		}
+		if cs.Labels["com.docker.compose.project"] == projName && removedSet[strings.TrimSpace(cs.Labels["com.docker.compose.service"])] {
+			return true
+		}
+		return false
+	})
+	refs = append(refs, otherLiveRefs...)
+
+	files := make([]platform.DeleteFileItem, 0, len(fileOrder))
+	for _, id := range fileOrder {
+		files = append(files, fileMap[id])
+	}
+	applyMountReferenceProtection(files, refs)
+	sortDeleteFileItems(files)
+
+	return &inspectedDeletePlan{
+		preview: &platform.DeleteAppPreview{
+			AppName:    appName,
+			Source:     platform.SourceCompose,
+			IsProject:  false,
+			Containers: containerNames,
+			Images:     imageRefs,
+			Files:      files,
+		},
+		containerIDs: containerIDs,
+		imageRefs:    imageRefs,
+		projectName:  projName,
+		workDir:      cleanWorkDir,
+		configFiles:  cfgFiles,
+		envFiles:     envFiles,
+	}, nil
+}
+
+func (a *Adapter) ensureRemovedComposeServicesDeleted(
+	ctx context.Context,
+	execTr transport.ExecutableTransport,
+	projectName string,
+	removedServices []string,
+) {
+	if projectName == "" || len(removedServices) == 0 {
+		return
+	}
+	removedSet := make(map[string]bool, len(removedServices))
+	for _, s := range removedServices {
+		removedSet[strings.TrimSpace(s)] = true
+	}
+	var list []containerSummary
+	if err := a.getJSON(ctx, "/containers/json?all=1", &list); err != nil {
+		return
+	}
+	for _, cs := range list {
+		if cs.Labels["com.docker.compose.project"] == projectName &&
+			removedSet[strings.TrimSpace(cs.Labels["com.docker.compose.service"])] {
+			if resp, err := execTr.RequestDocker(ctx, http.MethodDelete, "/containers/"+url.PathEscape(cs.ID)+"?force=1&v=0", nil, nil); err == nil {
+				_ = resp.Body.Close()
+			}
+		}
+	}
+}
+
+func (a *Adapter) executeComposeRemovalCleanup(
+	ctx context.Context,
+	execTr transport.ExecutableTransport,
+	plan *inspectedDeletePlan,
+	deleteImages bool,
+	selectedFileIDs []string,
+) {
+	if plan == nil || plan.preview == nil {
+		return
+	}
+
+	// 在新配置容器启动完成后，再次扫描当前存活/存在的全部容器引用，双重确保绝不删除任何仍在被引用的路径或卷
+	var liveList []containerSummary
+	if a.getJSON(ctx, "/containers/json?all=1", &liveList) == nil && len(liveList) > 0 {
+		liveRefs := a.collectOtherContainerMountRefs(ctx, liveList, nil)
+		applyMountReferenceProtection(plan.preview.Files, liveRefs)
+	}
+
+	selectedSet := make(map[string]bool, len(selectedFileIDs))
+	for _, id := range selectedFileIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			selectedSet[id] = true
+		}
+	}
+
+	if len(selectedSet) > 0 {
+		var hostPaths []string
+		for _, item := range plan.preview.Files {
+			if item.Protected || !selectedSet[item.ID] {
+				continue
+			}
+			switch item.Kind {
+			case platform.DeleteFileVolume:
+				if resp, err := execTr.RequestDocker(ctx, http.MethodDelete, "/volumes/"+url.PathEscape(item.Path)+"?force=1", nil, nil); err == nil {
+					_ = resp.Body.Close()
+				}
+			case platform.DeleteFileBindMount:
+				if plan.workDir != "" && platform.IsSubPathOrSame(item.Path, plan.workDir) {
+					continue
+				}
+				hostPaths = append(hostPaths, item.Path)
+			}
+		}
+		dedupPaths := dedupHostPathsForRemoval(hostPaths)
+		if len(dedupPaths) > 0 {
+			if cleanTr, ok := a.tr.(transport.CleanupTransport); ok {
+				_ = cleanTr.RemoveHostPaths(ctx, dedupPaths)
+			}
+		}
+	}
+
+	if deleteImages {
+		for _, imgRef := range plan.imageRefs {
+			if resp, err := execTr.RequestDocker(ctx, http.MethodDelete, "/images/"+url.PathEscape(imgRef)+"?force=0", nil, nil); err == nil {
+				_ = resp.Body.Close()
+			}
+		}
+	}
 }
 
 // dedupHostPathsForRemoval 去重并剔除已被所选父目录完整包含的子路径。

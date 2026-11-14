@@ -92,6 +92,9 @@ type fakeExecTransport struct {
 func (f *fakeExecTransport) Mode() transport.Mode { return transport.ModeLocal }
 func (f *fakeExecTransport) Close() error         { return nil }
 func (f *fakeExecTransport) DoDocker(_ context.Context, path string) (*http.Response, error) {
+	if f.doHandler == nil {
+		return nil, io.EOF
+	}
 	return f.doHandler(path)
 }
 func (f *fakeExecTransport) ReadFile(_ context.Context, path string) ([]byte, error) {
@@ -397,5 +400,124 @@ func TestStandaloneConfig_ReadDiffsImageEnvAndUpdateOverridesPorts(t *testing.T)
 	pbs, _ := hc["PortBindings"].(map[string]any)
 	if pbs == nil || pbs["8096/tcp"] == nil {
 		t.Fatalf("expected overridden PortBindings in create payload, got %+v", createdBody)
+	}
+}
+
+type fakeOptionsExecTransport struct {
+	fakeExecTransport
+	recordedPull          []bool
+	recordedRemoveOrphans []bool
+}
+
+func (f *fakeOptionsExecTransport) ExecComposeProjectWithOptions(
+	_ context.Context,
+	workDir string,
+	_, _ []string,
+	_ string,
+	pullImages, removeOrphans bool,
+	_ func(string),
+) (string, error) {
+	f.recordedPull = append(f.recordedPull, pullImages)
+	f.recordedRemoveOrphans = append(f.recordedRemoveOrphans, removeOrphans)
+	if f.composeProjHandler != nil {
+		return f.composeProjHandler(workDir, removeOrphans)
+	}
+	return "ok", nil
+}
+
+func TestUpdateProjectCompose_ServiceRemovalGuardAndMultiFileAndRepoSwap(t *testing.T) {
+	origPrimary := "services:\n  web:\n    image: repo-a.example.com/app/web:1.0\n  db:\n    image: postgres:16-alpine\n"
+	tr := &fakeOptionsExecTransport{
+		fakeExecTransport: fakeExecTransport{
+			files: map[string][]byte{
+				"/opt/stack/compose.yaml": []byte(origPrimary),
+			},
+		},
+	}
+	ad := New("h1", tr)
+	proj := &platform.ProjectInfo{
+		Name:        "stack",
+		WorkingDir:  "/opt/stack",
+		ConfigFiles: []string{"compose.yaml"},
+	}
+
+	// 1. 未确认时遗漏 db：必须直接拒绝，不改写文件，不调用 compose 执行
+	omittedDB := "services:\n  web:\n    image: repo-a.example.com/app/web:1.1\n"
+	err := ad.UpdateProjectCompose(context.Background(), "stack", proj, omittedDB, nil)
+	var csrErr *platform.ComposeServicesRemovedError
+	if !errors.As(err, &csrErr) {
+		t.Fatalf("expected ComposeServicesRemovedError when db is omitted without confirmation, got %v", err)
+	}
+	if len(csrErr.RemovedServices) != 1 || csrErr.RemovedServices[0] != "db" {
+		t.Fatalf("expected removed=[db], got %+v", csrErr)
+	}
+	if string(tr.files["/opt/stack/compose.yaml"]) != origPrimary {
+		t.Fatal("compose.yaml must NOT be overwritten when service removal is unconfirmed")
+	}
+	if len(tr.recordedPull) != 0 {
+		t.Fatalf("compose execution must NOT run when service removal is unconfirmed, got %v", tr.recordedPull)
+	}
+
+	// 2. 同一服务仅更换镜像仓库地址（repo-a -> ghcr.io）：不属于服务减少，应正常更新且不传 --remove-orphans
+	repoSwapped := "services:\n  web:\n    image: ghcr.io/app/web:1.1\n  db:\n    image: postgres:16-alpine\n"
+	if err := ad.UpdateProjectCompose(context.Background(), "stack", proj, repoSwapped, nil); err != nil {
+		t.Fatalf("image repo swap must not be blocked: %v", err)
+	}
+	if len(tr.recordedPull) != 1 || !tr.recordedPull[0] || tr.recordedRemoveOrphans[0] {
+		t.Fatalf("normal update must run pull=true removeOrphans=false, got pull=%v orphans=%v", tr.recordedPull, tr.recordedRemoveOrphans)
+	}
+
+	// 3. 多 Compose 文件场景：db 定义在 compose.override.yaml 中，主文件不含 db 不应误判缺失
+	tr.files["/opt/stack/compose.yaml"] = []byte("services:\n  web:\n    image: ghcr.io/app/web:1.0\n")
+	tr.files["/opt/stack/compose.override.yaml"] = []byte("services:\n  db:\n    image: postgres:16-alpine\n")
+	multiProj := &platform.ProjectInfo{
+		Name:        "stack",
+		WorkingDir:  "/opt/stack",
+		ConfigFiles: []string{"compose.yaml", "compose.override.yaml"},
+	}
+	if err := ad.UpdateProjectCompose(context.Background(), "stack", multiProj, omittedDB, nil); err != nil {
+		t.Fatalf("multi-file compose with db in override must not report db removed: %v", err)
+	}
+
+	// 4. 用户显式确认移除旧服务（ConfirmRemoveServices=true）：放行更新并传递 removeOrphans=true
+	tr.files["/opt/stack/compose.yaml"] = []byte(origPrimary)
+	tr.recordedPull = nil
+	tr.recordedRemoveOrphans = nil
+	if err := ad.UpdateProjectComposeWithOptions(context.Background(), "stack", proj, omittedDB, platform.ComposeUpdateOptions{
+		ConfirmRemoveServices: true,
+	}, nil); err != nil {
+		t.Fatalf("confirmed service removal failed: %v", err)
+	}
+	if len(tr.recordedPull) != 1 || !tr.recordedPull[0] || !tr.recordedRemoveOrphans[0] {
+		t.Fatalf("confirmed service removal must run pull=true removeOrphans=true, got pull=%v orphans=%v", tr.recordedPull, tr.recordedRemoveOrphans)
+	}
+}
+
+func TestUpdateProjectCompose_ReportsRollbackRebuildError(t *testing.T) {
+	origYAML := "services:\n  web:\n    image: nginx:1.26.0\n"
+	newYAML := "services:\n  web:\n    image: nginx:1.27.3\n"
+	tr := &fakeExecTransport{
+		files: map[string][]byte{
+			"/opt/app/compose.yaml": []byte(origYAML),
+		},
+		composeProjHandler: func(_ string, pullAndRemoveOrphans bool) (string, error) {
+			if pullAndRemoveOrphans {
+				return "", errors.New("new compose up failed")
+			}
+			return "", errors.New("rollback up also failed")
+		},
+	}
+	ad := New("h1", tr)
+	proj := &platform.ProjectInfo{
+		Name:        "app",
+		WorkingDir:  "/opt/app",
+		ConfigFiles: []string{"compose.yaml"},
+	}
+	err := ad.UpdateProjectCompose(context.Background(), "app", proj, newYAML, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "compose_rebuild_err") && !strings.Contains(err.Error(), "rollback up also failed") {
+		t.Fatalf("expected rollback rebuild failure to be surfaced, got %v", err)
 	}
 }

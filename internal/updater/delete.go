@@ -19,6 +19,13 @@ type AppDeleteSubmitRequest struct {
 	FileIDs      []string `json:"fileIds"`
 }
 
+// ComposeRemovalPreviewSubmitRequest 是预览新版 Compose 配置移除旧服务关联资源的请求结构。
+type ComposeRemovalPreviewSubmitRequest struct {
+	AppKey     string   `json:"appKey"`
+	Services   []string `json:"services"`
+	NewContent string   `json:"newContent"`
+}
+
 func (s *Service) resolveAppTarget(
 	ctx context.Context,
 	appKey string,
@@ -121,6 +128,54 @@ func (s *Service) PreviewDeleteApp(ctx context.Context, appKey string, lang i18n
 		return nil, err
 	}
 	prev.AppKey = strings.TrimSpace(appKey)
+	if prev.Files == nil {
+		prev.Files = []platform.DeleteFileItem{}
+	}
+	if prev.Images == nil {
+		prev.Images = []string{}
+	}
+	if prev.Containers == nil {
+		prev.Containers = []string{}
+	}
+	return prev, nil
+}
+
+// PreviewComposeRemoval 预览按新版配置更新 Compose 项目时将被移除服务的容器、镜像与关联路径（自动禁用被新配置或其他容器引用的目录）。
+func (s *Service) PreviewComposeRemoval(
+	ctx context.Context,
+	req ComposeRemovalPreviewSubmitRequest,
+	lang i18n.Lang,
+) (*platform.DeleteAppPreview, error) {
+	hostID, appName, source, proj, err := s.resolveAppTarget(ctx, req.AppKey, lang)
+	if err != nil {
+		return nil, err
+	}
+	ad, _, err := s.hosts.OpenAdapter(ctx, hostID)
+	if err != nil {
+		return nil, err
+	}
+	defer ad.Close()
+
+	cuAd, ok := ad.(platform.ComposeUpdateAdapter)
+	if !ok {
+		return nil, i18n.NewEngineError(i18n.MsgDeleteUnsupported)
+	}
+	proj = enrichDSMProjectIfNeeded(ctx, ad, strings.TrimSpace(req.AppKey), source, proj)
+	prev, err := cuAd.PreviewComposeServiceRemoval(ctx, platform.ComposeRemovalPreviewRequest{
+		AppName:         appName,
+		Source:          source,
+		Project:         proj,
+		NewYAML:         req.NewContent,
+		RemovedServices: req.Services,
+	})
+	if err != nil {
+		var ue *platform.UpdateError
+		if errors.As(err, &ue) {
+			return nil, errors.New(i18n.FormatUpdateError(lang, ue.Code, i18n.LocalizeDetail(lang, ue.Message)))
+		}
+		return nil, err
+	}
+	prev.AppKey = strings.TrimSpace(req.AppKey)
 	if prev.Files == nil {
 		prev.Files = []platform.DeleteFileItem{}
 	}

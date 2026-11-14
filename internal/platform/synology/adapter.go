@@ -1045,8 +1045,48 @@ func (a *Adapter) GetProjectCompose(ctx context.Context, project *platform.Proje
 	return detail.Content, nil
 }
 
+// InspectProjectComposeServices 返回群晖项目当前的组合生效服务名集合与附加覆盖文件保留服务名集合。
+func (a *Adapter) InspectProjectComposeServices(ctx context.Context, project *platform.ProjectInfo) (*platform.ComposeServiceSetSummary, error) {
+	if a.dock != nil {
+		if sum, err := a.dock.InspectProjectComposeServices(ctx, project); err == nil {
+			return sum, nil
+		} else if a.dsmCli == nil || project == nil || project.DSMProjectID == "" {
+			return nil, err
+		}
+	}
+	if a.dsmCli == nil {
+		return nil, i18n.NewHostError("dsm.not_configured", nil)
+	}
+	if project == nil || strings.TrimSpace(project.DSMProjectID) == "" {
+		return nil, i18n.NewEngineError(i18n.MsgComposeNotEditable)
+	}
+	detail, err := a.dsmCli.GetProject(ctx, project.DSMProjectID)
+	if err != nil {
+		return nil, err
+	}
+	yamlSvcs, _ := docker.ParseComposeServiceNames(detail.Content)
+	seen := make(map[string]bool, len(yamlSvcs)+len(detail.Containers))
+	var effective []string
+	for _, s := range yamlSvcs {
+		if s != "" && !seen[s] {
+			seen[s] = true
+			effective = append(effective, s)
+		}
+	}
+	for _, c := range detail.Containers {
+		svc := strings.TrimSpace(c.Config.Labels["com.docker.compose.service"])
+		if svc != "" && !seen[svc] {
+			seen[svc] = true
+			effective = append(effective, svc)
+		}
+	}
+	return &platform.ComposeServiceSetSummary{
+		EffectiveServices: effective,
+	}, nil
+}
+
 // UpdateProjectCompose 按新版完整 YAML 更新群晖项目：校验 services、备份原配置、写入新版 YAML 并流式执行 build_stream 拉取与重建；
-// 失败自动写回原 YAML 并恢复（附录 D.4 / 附录 E.1）。
+// 若移除了原有服务但未确认则直接拒绝，失败自动写回原 YAML 并恢复（附录 D.4 / 附录 E.1）。
 func (a *Adapter) UpdateProjectCompose(
 	ctx context.Context,
 	appName string,
@@ -1054,8 +1094,24 @@ func (a *Adapter) UpdateProjectCompose(
 	newYAML string,
 	onProgress func(platform.PullProgress),
 ) error {
+	return a.UpdateProjectComposeWithOptions(ctx, appName, project, newYAML, platform.ComposeUpdateOptions{}, onProgress)
+}
+
+// UpdateProjectComposeWithOptions 支持确认移除旧服务并在构建成功后确保旧容器停止移除及按需清理旧镜像。
+func (a *Adapter) UpdateProjectComposeWithOptions(
+	ctx context.Context,
+	appName string,
+	project *platform.ProjectInfo,
+	newYAML string,
+	opts platform.ComposeUpdateOptions,
+	onProgress func(platform.PullProgress),
+) error {
 	if a.dock != nil {
-		return a.dock.UpdateProjectCompose(ctx, appName, project, newYAML, onProgress)
+		err := a.dock.UpdateProjectComposeWithOptions(ctx, appName, project, newYAML, opts, onProgress)
+		if err == nil {
+			a.invalidateProjectCache()
+		}
+		return err
 	}
 	if a.dsmCli == nil {
 		return &platform.UpdateError{Code: "recreate_failed", Message: biErr(i18n.NewHostError("dsm.not_configured", nil))}
@@ -1066,12 +1122,79 @@ func (a *Adapter) UpdateProjectCompose(
 	if _, err := docker.ValidateComposeYAML(newYAML); err != nil {
 		return err
 	}
+	newSvcs, err := docker.ParseComposeServiceNames(newYAML)
+	if err != nil {
+		return err
+	}
 
 	detail, err := a.dsmCli.GetProject(ctx, project.DSMProjectID)
 	if err != nil {
 		return &platform.UpdateError{Code: "recreate_failed", Message: biErr(err)}
 	}
 	beforeYAML := detail.Content
+
+	beforeSet := make(map[string]bool)
+	var effectiveBefore []string
+	if origSvcs, pErr := docker.ParseComposeServiceNames(beforeYAML); pErr == nil {
+		for _, s := range origSvcs {
+			if s != "" && !beforeSet[s] {
+				beforeSet[s] = true
+				effectiveBefore = append(effectiveBefore, s)
+			}
+		}
+	}
+	for _, c := range detail.Containers {
+		svc := strings.TrimSpace(c.Config.Labels["com.docker.compose.service"])
+		if svc != "" && !beforeSet[svc] {
+			beforeSet[svc] = true
+			effectiveBefore = append(effectiveBefore, svc)
+		}
+	}
+
+	newSet := make(map[string]bool, len(newSvcs))
+	var addedSvcs []string
+	for _, s := range newSvcs {
+		newSet[s] = true
+		if !beforeSet[s] {
+			addedSvcs = append(addedSvcs, s)
+		}
+	}
+	var removedSvcs []string
+	removedSet := make(map[string]bool)
+	for _, s := range effectiveBefore {
+		if !newSet[s] {
+			removedSet[s] = true
+			removedSvcs = append(removedSvcs, s)
+		}
+	}
+	if len(removedSvcs) > 0 && !opts.ConfirmRemoveServices {
+		return &platform.ComposeServicesRemovedError{
+			RemovedServices: removedSvcs,
+			AddedServices:   addedSvcs,
+		}
+	}
+
+	var removedImages []string
+	seenRemovedImg := make(map[string]bool)
+	addRemovedImg := func(ref string) {
+		ref = strings.TrimSpace(ref)
+		if ref != "" && !seenRemovedImg[ref] {
+			seenRemovedImg[ref] = true
+			removedImages = append(removedImages, ref)
+		}
+	}
+	if len(removedSvcs) > 0 {
+		for _, c := range detail.Containers {
+			if removedSet[strings.TrimSpace(c.Config.Labels["com.docker.compose.service"])] {
+				addRemovedImg(c.Config.Image)
+			}
+		}
+		for svc, img := range parseServicesFromComposeYAML(beforeYAML) {
+			if removedSet[svc] {
+				addRemovedImg(img)
+			}
+		}
+	}
 
 	emit := func(p platform.PullProgress) {
 		if onProgress != nil {
@@ -1106,6 +1229,24 @@ func (a *Adapter) UpdateProjectCompose(
 		}
 	}
 	parser.Flush()
+
+	if len(removedSvcs) > 0 && opts.ConfirmRemoveServices {
+		projName := strings.TrimSpace(project.Name)
+		if projName == "" {
+			projName = strings.TrimSpace(detail.Name)
+		}
+		if projName == "" {
+			projName = strings.TrimSpace(appName)
+		}
+		a.cleanupRemovedDSMProjectContainers(ctx, project.DSMProjectID, projName, removedSet)
+		if opts.DeleteRemovedImages {
+			for _, imgRef := range removedImages {
+				_ = a.dsmCli.DeleteImage(ctx, imgRef)
+			}
+		}
+	}
+	a.invalidateProjectCache()
+
 	emit(platform.PullProgress{
 		Phase:      "done",
 		StatusText: "Compose project updated",
@@ -1113,6 +1254,41 @@ func (a *Adapter) UpdateProjectCompose(
 		LogChunk:   "Compose project build_stream completed.\r\n",
 	})
 	return nil
+}
+
+func (a *Adapter) cleanupRemovedDSMProjectContainers(ctx context.Context, projectID, projName string, removedSet map[string]bool) {
+	if a.dsmCli == nil || len(removedSet) == 0 {
+		return
+	}
+	targetNames := make(map[string]bool)
+	if afterDetail, err := a.dsmCli.GetProject(ctx, projectID); err == nil && afterDetail != nil {
+		for _, c := range afterDetail.Containers {
+			if removedSet[strings.TrimSpace(c.Config.Labels["com.docker.compose.service"])] {
+				if n := strings.TrimPrefix(c.Name, "/"); n != "" {
+					targetNames[n] = c.State.Running || strings.EqualFold(c.State.Status, "running")
+				}
+			}
+		}
+	}
+	if list, err := a.dsmCli.ListContainers(ctx); err == nil {
+		for _, c := range list {
+			if projName != "" && strings.EqualFold(strings.TrimSpace(c.Labels["com.docker.compose.project"]), projName) &&
+				removedSet[strings.TrimSpace(c.Labels["com.docker.compose.service"])] {
+				if n := strings.TrimPrefix(c.Name, "/"); n != "" {
+					running := c.State.Running || strings.EqualFold(c.State.Status, "running") || strings.EqualFold(c.Status, "running")
+					if prev, exists := targetNames[n]; !exists || running {
+						targetNames[n] = prev || running
+					}
+				}
+			}
+		}
+	}
+	for cName, running := range targetNames {
+		if running {
+			_ = a.dsmCli.StopContainer(ctx, cName)
+		}
+		_ = a.dsmCli.DeleteContainer(ctx, cName)
+	}
 }
 
 // findImageID 在 DSM 镜像列表中查找 repo:tag 对应的镜像 ID（兼容带域名前缀与剥离域名前缀两种仓库记录格式）。

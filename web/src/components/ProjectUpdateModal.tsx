@@ -18,10 +18,11 @@ import {
   theme,
 } from 'antd'
 import { ArrowRightOutlined, DownOutlined } from '@ant-design/icons'
-import { api, showApiError, type AppCardItem, type ServiceItem } from '../api/client'
+import { ApiError, api, showApiError, type AppCardItem, type ServiceItem } from '../api/client'
 import { useI18n } from '../i18n'
 import { useUIStore } from '../store/ui'
 import { detectComposeOverwriteRisks } from './composeGuard'
+import DeleteAppModal from './DeleteAppModal'
 import VersionPickerModal, { type VersionPickSelection } from './VersionPickerModal'
 
 interface ProjectUpdateModalProps {
@@ -106,7 +107,13 @@ function ProjectUpdateModalBody({
   const [yamlReason, setYamlReason] = useState('')
   const [origYaml, setOrigYaml] = useState('')
   const [yamlText, setYamlText] = useState('')
+  const [effectiveOrigServices, setEffectiveOrigServices] = useState<string[]>([])
+  const [extraFileServices, setExtraFileServices] = useState<string[]>([])
   const [submittingYaml, setSubmittingYaml] = useState(false)
+  const [pendingRemovalConfirm, setPendingRemovalConfirm] = useState<{
+    removedServices: string[]
+    addedServices: string[]
+  } | null>(null)
 
   const loadingYaml = tab === 'yaml' && !yamlLoaded
 
@@ -121,6 +128,8 @@ function ProjectUpdateModalBody({
         setYamlReason(res.reason || '')
         setOrigYaml(res.content || '')
         setYamlText(res.content || '')
+        setEffectiveOrigServices(res.effectiveServices ?? [])
+        setExtraFileServices(res.extraFileServices ?? [])
         setYamlLoaded(true)
       } catch (e) {
         if (!cancelled) {
@@ -185,36 +194,68 @@ function ProjectUpdateModalBody({
     }
   }
 
+  const overwriteRisks = useMemo(
+    () =>
+      detectComposeOverwriteRisks(origYaml, yamlText, {
+        effectiveOrigServices,
+        extraFileServices,
+      }),
+    [effectiveOrigServices, extraFileServices, origYaml, yamlText],
+  )
+
+  const submitComposeWithOptions = async (opts?: {
+    confirmRemoveServices?: boolean
+    deleteRemovedImages?: boolean
+    deleteRemovedFileIds?: string[]
+  }) => {
+    const res = await api.updateAppCompose({
+      appKey: app.key,
+      content: yamlText,
+      confirmRemoveServices: opts?.confirmRemoveServices,
+      deleteRemovedImages: opts?.deleteRemovedImages,
+      deleteRemovedFileIds: opts?.deleteRemovedFileIds,
+    })
+    if (res.job) {
+      upsertUpdateJob(res.job)
+    }
+    if (res.items) {
+      for (const job of res.items) {
+        upsertUpdateJob(job)
+      }
+    }
+    message.success(t.projectUpdate.yamlUpdateStarted)
+    onUpdated()
+    onClose()
+  }
+
   const handleYamlSubmit = async () => {
     if (!yamlText.trim()) {
       message.warning(t.projectUpdate.yamlEmptyError)
       return
     }
+    if (overwriteRisks.missingServices.length > 0) {
+      setPendingRemovalConfirm({
+        removedServices: overwriteRisks.missingServices,
+        addedServices: overwriteRisks.addedServices,
+      })
+      return
+    }
     setSubmittingYaml(true)
     try {
-      const res = await api.updateAppCompose({ appKey: app.key, content: yamlText })
-      if (res.job) {
-        upsertUpdateJob(res.job)
-      }
-      if (res.items) {
-        for (const job of res.items) {
-          upsertUpdateJob(job)
-        }
-      }
-      message.success(t.projectUpdate.yamlUpdateStarted)
-      onUpdated()
-      onClose()
+      await submitComposeWithOptions()
     } catch (e) {
+      if (e instanceof ApiError && e.code === 'compose_services_removed' && e.removedServices?.length) {
+        setPendingRemovalConfirm({
+          removedServices: e.removedServices,
+          addedServices: e.addedServices ?? [],
+        })
+        return
+      }
       showApiError(e)
     } finally {
       setSubmittingYaml(false)
     }
   }
-
-  const overwriteRisks = useMemo(
-    () => detectComposeOverwriteRisks(origYaml, yamlText),
-    [origYaml, yamlText],
-  )
 
   const roleBadgeForService = (svc: ServiceItem) => {
     let label = ''
@@ -565,24 +606,66 @@ function ProjectUpdateModalBody({
                   }}
                 />
 
-                {overwriteRisks.missingPaths.length > 0 && (
+                {overwriteRisks.missingServices.length > 0 && (
                   <Alert
                     type="warning"
                     showIcon
                     title={
                       <Typography.Text style={{ fontSize: token.fontSizeSM }}>
-                        <strong>{t.projectUpdate.warnTitle}</strong>
-                        {t.projectUpdate.warnMissingPathsBefore}
-                        <Typography.Text code>
-                          {overwriteRisks.missingPaths.join(', ')}
-                        </Typography.Text>
-                        {t.projectUpdate.warnMissingPathsAfter}
+                        <strong>{t.projectUpdate.warnRemovedPrefix}</strong>
+                        {t.projectUpdate.warnRemovedBefore}
+                        <Space size={4} wrap style={{ display: 'inline-flex' }}>
+                          {overwriteRisks.missingServices.map((name) => (
+                            <Typography.Text key={name} code strong>
+                              {name}
+                            </Typography.Text>
+                          ))}
+                        </Space>
+                        {overwriteRisks.missingServices.length === 1
+                          ? t.projectUpdate.warnRemovedSingleAfter
+                          : t.projectUpdate.warnRemovedMultiAfter.replace(
+                              '{count}',
+                              String(overwriteRisks.missingServices.length),
+                            )}
+                        {overwriteRisks.addedServices.length > 0 && (
+                          <>
+                            {t.projectUpdate.warnRemovedAddedBefore}
+                            <Space size={4} wrap style={{ display: 'inline-flex' }}>
+                              {overwriteRisks.addedServices.map((name) => (
+                                <Typography.Text key={name} code>
+                                  {name}
+                                </Typography.Text>
+                              ))}
+                            </Space>
+                            {t.projectUpdate.warnRemovedAddedAfter}
+                          </>
+                        )}
+                        {t.projectUpdate.warnRemovedEnd}
                       </Typography.Text>
                     }
                   />
                 )}
 
-                {overwriteRisks.missingPaths.length === 0 &&
+                {overwriteRisks.missingServices.length === 0 &&
+                  overwriteRisks.missingPaths.length > 0 && (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      title={
+                        <Typography.Text style={{ fontSize: token.fontSizeSM }}>
+                          <strong>{t.projectUpdate.warnTitle}</strong>
+                          {t.projectUpdate.warnMissingPathsBefore}
+                          <Typography.Text code>
+                            {overwriteRisks.missingPaths.join(', ')}
+                          </Typography.Text>
+                          {t.projectUpdate.warnMissingPathsAfter}
+                        </Typography.Text>
+                      }
+                    />
+                  )}
+
+                {overwriteRisks.missingServices.length === 0 &&
+                  overwriteRisks.missingPaths.length === 0 &&
                   overwriteRisks.overwrittenSecrets.length > 0 && (
                     <Alert
                       type="warning"
@@ -650,6 +733,32 @@ function ProjectUpdateModalBody({
           setCheckedKeys((prev) => new Set(prev).add(pickerSvc.key))
         }}
         onClose={() => setPickerSvc(null)}
+      />
+
+      {/* 新配置移除原有容器时，复用 DeleteAppModal 确认旧容器、镜像与关联数据的清理范围 */}
+      <DeleteAppModal
+        open={Boolean(pendingRemovalConfirm)}
+        appKey={app.key}
+        appName={projectTitle}
+        hostName={app.hostName}
+        source={app.source}
+        composeRemoval={
+          pendingRemovalConfirm
+            ? {
+                removedServices: pendingRemovalConfirm.removedServices,
+                addedServices: pendingRemovalConfirm.addedServices,
+                newContent: yamlText,
+                onConfirm: async ({ deleteImages, fileIds }) => {
+                  await submitComposeWithOptions({
+                    confirmRemoveServices: true,
+                    deleteRemovedImages: deleteImages,
+                    deleteRemovedFileIds: fileIds,
+                  })
+                },
+              }
+            : undefined
+        }
+        onClose={() => setPendingRemovalConfirm(null)}
       />
     </>
   )

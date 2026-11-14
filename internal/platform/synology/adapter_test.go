@@ -2,6 +2,7 @@ package synology
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -392,5 +393,92 @@ func TestListRuntimeAppsViaDSMAPI_FastModeSkipsStatsAndProjectGet(t *testing.T) 
 	full2, err := ad.ListRuntimeAppsWithOptions(t.Context(), true)
 	if err != nil || statsHits.Load() != hitsAfterCold+1 || full2[0].CPUPercent <= 0 {
 		t.Fatalf("expected warm call to do only 1 stats RPC, before=%d after=%d cpu=%v err=%v", hitsAfterCold, statsHits.Load(), full2[0].CPUPercent, err)
+	}
+}
+
+func TestDSMProjectCompose_RejectsUnconfirmedServiceRemovalAndCleansWhenConfirmed(t *testing.T) {
+	origYAML := "services:\n  web:\n    image: nginx:1.26.0\n  db:\n    image: postgres:16-alpine\n"
+	curContent := origYAML
+	var updateCalled, buildCalled bool
+	var stoppedContainers, deletedContainers []string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		apiName := r.FormValue("api")
+		method := r.FormValue("method")
+		write := func(v any) { _ = json.NewEncoder(w).Encode(v) }
+		switch apiName + "." + method {
+		case "SYNO.API.Auth.login":
+			write(map[string]any{"success": true, "data": map[string]any{"sid": "sid-1"}})
+		case "SYNO.Docker.Project.get":
+			write(map[string]any{
+				"success": true,
+				"data": map[string]any{
+					"id":      "p1",
+					"name":    "webstack",
+					"path":    "/volume1/docker/webstack",
+					"content": curContent,
+					"containers": []any{
+						map[string]any{
+							"Id":     "c-db",
+							"Name":   "/webstack-db-1",
+							"Config": map[string]any{"Image": "postgres:16-alpine", "Labels": map[string]string{"com.docker.compose.service": "db"}},
+							"State":  map[string]any{"Running": true, "Status": "running"},
+						},
+					},
+				},
+			})
+		case "SYNO.Docker.Container.list":
+			write(map[string]any{"success": true, "data": map[string]any{"containers": []any{}}})
+		case "SYNO.Docker.Project.update":
+			updateCalled = true
+			_ = json.Unmarshal([]byte(r.FormValue("content")), &curContent)
+			write(map[string]any{"success": true, "data": map[string]any{}})
+		case "SYNO.Docker.Project.build_stream", "SYNO.Docker.Project.build":
+			buildCalled = true
+			write(map[string]any{"success": true, "data": map[string]any{}})
+		case "SYNO.Docker.Container.stop":
+			var n string
+			_ = json.Unmarshal([]byte(r.FormValue("name")), &n)
+			stoppedContainers = append(stoppedContainers, n)
+			write(map[string]any{"success": true, "data": map[string]any{}})
+		case "SYNO.Docker.Container.delete":
+			var n string
+			_ = json.Unmarshal([]byte(r.FormValue("name")), &n)
+			deletedContainers = append(deletedContainers, n)
+			write(map[string]any{"success": true, "data": map[string]any{}})
+		default:
+			write(map[string]any{"success": true, "data": map[string]any{}})
+		}
+	}))
+	defer srv.Close()
+
+	ad := New("h-nas", nil, DSMConfig{URL: srv.URL, Username: "admin", Secret: "pass"})
+	defer ad.Close()
+
+	proj := &platform.ProjectInfo{Name: "webstack", DSMProjectID: "p1"}
+	omittedDB := "services:\n  web:\n    image: nginx:1.27.3\n"
+
+	// 1. 未确认移除时必须拦截，不得发起 SYNO.Docker.Project update / build_stream
+	err := ad.UpdateProjectCompose(t.Context(), "webstack", proj, omittedDB, nil)
+	var csrErr *platform.ComposeServicesRemovedError
+	if !errors.As(err, &csrErr) || len(csrErr.RemovedServices) != 1 || csrErr.RemovedServices[0] != "db" {
+		t.Fatalf("expected ComposeServicesRemovedError for db, got %v", err)
+	}
+	if updateCalled || buildCalled {
+		t.Fatalf("DSM WebAPI update/build_stream must NOT be called before confirmation (update=%v build=%v)", updateCalled, buildCalled)
+	}
+
+	// 2. 确认后允许更新，并对残留旧服务容器执行确定性停止与删除
+	if err := ad.UpdateProjectComposeWithOptions(t.Context(), "webstack", proj, omittedDB, platform.ComposeUpdateOptions{
+		ConfirmRemoveServices: true,
+	}, nil); err != nil {
+		t.Fatalf("confirmed DSM compose update failed: %v", err)
+	}
+	if !updateCalled || !buildCalled {
+		t.Fatalf("expected update & build_stream after confirmation")
+	}
+	if len(stoppedContainers) != 1 || stoppedContainers[0] != "webstack-db-1" || len(deletedContainers) != 1 || deletedContainers[0] != "webstack-db-1" {
+		t.Fatalf("expected leftover db container to be stopped & deleted, got stopped=%v deleted=%v", stoppedContainers, deletedContainers)
 	}
 }

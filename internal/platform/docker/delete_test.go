@@ -266,3 +266,158 @@ func TestDeleteComposeProject_PreservesUncheckedSubdirAndExternalBind(t *testing
 		t.Fatalf("expected compose.yaml and .env to be removed, got %v", tr.removedPaths)
 	}
 }
+
+func TestPreviewComposeServiceRemoval_DisablesDirectoriesReferencedByNewConfigOrOtherApps(t *testing.T) {
+	origYAML := `services:
+  web:
+    image: ghcr.io/immich-app/immich-server:v1.118.0
+    volumes:
+      - /volume1/docker/immich/upload:/usr/src/app/upload
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - /volume1/docker/immich/redis:/data
+  db:
+    image: postgres:16-alpine
+    volumes:
+      - /volume1/docker/immich/pgdata:/var/lib/postgresql/data
+      - /volume1/docker/immich/upload/thumbs:/thumbs
+      - /volume1/shared/media:/media
+`
+	// 新配置移除了 redis 与 db，但新增了 postgres 引用 pgdata，且 web 仍引用父目录 upload；同主机独立容器 jellyfin 引用 /volume1/shared/media
+	newYAML := `services:
+  web:
+    image: ghcr.io/immich-app/immich-server:v1.119.0
+    volumes:
+      - /volume1/docker/immich/upload:/usr/src/app/upload
+  postgres:
+    image: postgres:16-alpine
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+`
+	tr := &fakeCleanupTransport{
+		fakeExecTransport: fakeExecTransport{
+			files: map[string][]byte{
+				"/volume1/docker/immich/compose.yaml": []byte(origYAML),
+			},
+			doHandler: func(path string) (*http.Response, error) {
+				switch path {
+				case "/containers/json?all=1":
+					return jsonResp(http.StatusOK, []map[string]any{
+						{
+							"Id":    "c_web",
+							"Names": []string{"/immich-web-1"},
+							"Image": "ghcr.io/immich-app/immich-server:v1.118.0",
+							"Labels": map[string]string{
+								"com.docker.compose.project": "immich",
+								"com.docker.compose.service": "web",
+							},
+						},
+						{
+							"Id":    "c_redis",
+							"Names": []string{"/immich-redis-1"},
+							"Image": "redis:7-alpine",
+							"Labels": map[string]string{
+								"com.docker.compose.project": "immich",
+								"com.docker.compose.service": "redis",
+							},
+						},
+						{
+							"Id":    "c_db",
+							"Names": []string{"/immich-db-1"},
+							"Image": "postgres:16-alpine",
+							"Labels": map[string]string{
+								"com.docker.compose.project": "immich",
+								"com.docker.compose.service": "db",
+							},
+						},
+						{
+							"Id":     "c_jellyfin",
+							"Names":  []string{"/jellyfin"},
+							"Image":  "jellyfin/jellyfin:latest",
+							"Labels": map[string]string{},
+						},
+					}), nil
+				case "/containers/c_web/json":
+					return jsonResp(http.StatusOK, map[string]any{
+						"Id":   "c_web",
+						"Name": "/immich-web-1",
+						"Mounts": []any{
+							map[string]any{"Type": "bind", "Source": "/volume1/docker/immich/upload", "Destination": "/usr/src/app/upload", "RW": true},
+						},
+					}), nil
+				case "/containers/c_redis/json":
+					return jsonResp(http.StatusOK, map[string]any{
+						"Id":   "c_redis",
+						"Name": "/immich-redis-1",
+						"Mounts": []any{
+							map[string]any{"Type": "bind", "Source": "/volume1/docker/immich/redis", "Destination": "/data", "RW": true},
+						},
+					}), nil
+				case "/containers/c_db/json":
+					return jsonResp(http.StatusOK, map[string]any{
+						"Id":   "c_db",
+						"Name": "/immich-db-1",
+						"Mounts": []any{
+							map[string]any{"Type": "bind", "Source": "/volume1/docker/immich/pgdata", "Destination": "/var/lib/postgresql/data", "RW": true},
+							map[string]any{"Type": "bind", "Source": "/volume1/docker/immich/upload/thumbs", "Destination": "/thumbs", "RW": true},
+							map[string]any{"Type": "bind", "Source": "/volume1/shared/media", "Destination": "/media", "RW": true},
+						},
+					}), nil
+				case "/containers/c_jellyfin/json":
+					return jsonResp(http.StatusOK, map[string]any{
+						"Id":   "c_jellyfin",
+						"Name": "/jellyfin",
+						"Mounts": []any{
+							map[string]any{"Type": "bind", "Source": "/volume1/shared/media", "Destination": "/media", "RW": true},
+						},
+					}), nil
+				default:
+					return jsonResp(http.StatusNotFound, map[string]string{}), nil
+				}
+			},
+		},
+	}
+
+	ad := New("h1", tr)
+	proj := &platform.ProjectInfo{
+		Name:        "immich",
+		WorkingDir:  "/volume1/docker/immich",
+		ConfigFiles: []string{"compose.yaml"},
+	}
+
+	prev, err := ad.PreviewComposeServiceRemoval(context.Background(), platform.ComposeRemovalPreviewRequest{
+		AppName:         "immich",
+		Source:          platform.SourceCompose,
+		Project:         proj,
+		NewYAML:         newYAML,
+		RemovedServices: []string{"redis", "db"},
+	})
+	if err != nil {
+		t.Fatalf("PreviewComposeServiceRemoval failed: %v", err)
+	}
+	if len(prev.Containers) != 2 {
+		t.Fatalf("expected 2 removed containers, got %v", prev.Containers)
+	}
+
+	byPath := make(map[string]platform.DeleteFileItem)
+	for _, f := range prev.Files {
+		byPath[f.Path] = f
+	}
+	// 1. /volume1/docker/immich/redis 未被任何容器引用 -> 可清理
+	if item, ok := byPath["/volume1/docker/immich/redis"]; !ok || item.Protected {
+		t.Fatalf("expected /volume1/docker/immich/redis to be cleanable, got %+v", item)
+	}
+	// 2. /volume1/docker/immich/pgdata 已被新配置中的 postgres 引用 -> 禁用并标注 immich / postgres
+	if item, ok := byPath["/volume1/docker/immich/pgdata"]; !ok || !item.Protected || item.Reason != "referenced_by_containers" || strings.Join(item.ReferencedBy, ",") != "immich / postgres" {
+		t.Fatalf("expected pgdata protected with ReferencedBy=[immich / postgres], got %+v", item)
+	}
+	// 3. 子目录 /volume1/docker/immich/upload/thumbs 的父目录已被 web 引用 -> 禁用并标注 immich / web
+	if item, ok := byPath["/volume1/docker/immich/upload/thumbs"]; !ok || !item.Protected || item.Reason != "referenced_by_containers" || strings.Join(item.ReferencedBy, ",") != "immich / web" {
+		t.Fatalf("expected upload/thumbs protected with ReferencedBy=[immich / web], got %+v", item)
+	}
+	// 4. /volume1/shared/media 已被同主机独立容器 jellyfin 引用 -> 禁用并标注 jellyfin
+	if item, ok := byPath["/volume1/shared/media"]; !ok || !item.Protected || item.Reason != "referenced_by_containers" || strings.Join(item.ReferencedBy, ",") != "jellyfin" {
+		t.Fatalf("expected /volume1/shared/media protected with ReferencedBy=[jellyfin], got %+v", item)
+	}
+}

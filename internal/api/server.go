@@ -18,6 +18,7 @@ import (
 	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/ignore"
 	"github.com/kukushouhou/DKStore/internal/notify"
+	"github.com/kukushouhou/DKStore/internal/platform"
 	"github.com/kukushouhou/DKStore/internal/registry"
 	"github.com/kukushouhou/DKStore/internal/selfupdate"
 	"github.com/kukushouhou/DKStore/internal/store"
@@ -85,6 +86,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/apps/compose-update", s.requireAuth(s.handleUpdateAppCompose))
 	mux.HandleFunc("PUT /api/v1/apps/compose", s.requireAuth(s.handleUpdateAppCompose))
 	mux.HandleFunc("GET /api/v1/apps/delete-preview", s.requireAuth(s.handlePreviewDeleteApp))
+	mux.HandleFunc("POST /api/v1/apps/delete-preview", s.requireAuth(s.handlePreviewDeleteApp))
 	mux.HandleFunc("POST /api/v1/apps/delete", s.requireAuth(s.handleDeleteApp))
 	mux.HandleFunc("GET /api/v1/services/tags", s.requireAuth(s.handleSearchServiceTags))
 	mux.HandleFunc("GET /api/v1/services/{key}/tags", s.requireAuth(s.handleSearchServiceTags))
@@ -776,14 +778,17 @@ func (s *Server) handleUpdateAppCompose(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var body struct {
-		Key           string `json:"key"`
-		AppKey        string `json:"appKey"`
-		Content       string `json:"content"`
-		YAML          string `json:"yaml"`
-		ServiceKey    string `json:"serviceKey"`
-		PolicyMode    string `json:"policyMode"`
-		PolicyPrefix  string `json:"policyPrefix"`
-		SkipTargetTag string `json:"skipTargetTag"`
+		Key                   string   `json:"key"`
+		AppKey                string   `json:"appKey"`
+		Content               string   `json:"content"`
+		YAML                  string   `json:"yaml"`
+		ServiceKey            string   `json:"serviceKey"`
+		PolicyMode            string   `json:"policyMode"`
+		PolicyPrefix          string   `json:"policyPrefix"`
+		SkipTargetTag         string   `json:"skipTargetTag"`
+		ConfirmRemoveServices bool     `json:"confirmRemoveServices"`
+		DeleteRemovedImages   bool     `json:"deleteRemovedImages"`
+		DeleteRemovedFileIDs  []string `json:"deleteRemovedFileIds"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
@@ -805,14 +810,30 @@ func (s *Server) handleUpdateAppCompose(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	job, err := s.d.Updater.StartComposeUpdate(r.Context(), updater.ComposeUpdateRequest{
-		AppKey:        key,
-		Content:       yamlContent,
-		ServiceKey:    body.ServiceKey,
-		PolicyMode:    body.PolicyMode,
-		PolicyPrefix:  body.PolicyPrefix,
-		SkipTargetTag: body.SkipTargetTag,
+		AppKey:                key,
+		Content:               yamlContent,
+		ServiceKey:            body.ServiceKey,
+		PolicyMode:            body.PolicyMode,
+		PolicyPrefix:          body.PolicyPrefix,
+		SkipTargetTag:         body.SkipTargetTag,
+		ConfirmRemoveServices: body.ConfirmRemoveServices,
+		DeleteRemovedImages:   body.DeleteRemovedImages,
+		DeleteRemovedFileIDs:  body.DeleteRemovedFileIDs,
 	}, lang)
 	if err != nil {
+		var csrErr *platform.ComposeServicesRemovedError
+		if errors.As(err, &csrErr) {
+			msg := i18n.EngineMessage(lang, i18n.MsgComposeServicesRemoved, strings.Join(csrErr.RemovedServices, ", "))
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error": map[string]string{
+					"code":    "compose_services_removed",
+					"message": msg,
+				},
+				"removedServices": csrErr.RemovedServices,
+				"addedServices":   csrErr.AddedServices,
+			})
+			return
+		}
 		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
 		return
 	}
@@ -873,6 +894,35 @@ func (s *Server) handlePreviewDeleteApp(w http.ResponseWriter, r *http.Request) 
 	lang := s.langOf(r)
 	if s.d.Updater == nil {
 		writeError(w, lang, http.StatusInternalServerError, "updater_unavailable", "")
+		return
+	}
+	if r.Method == http.MethodPost {
+		var req updater.ComposeRemovalPreviewSubmitRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
+			return
+		}
+		if strings.TrimSpace(req.AppKey) == "" {
+			writeError(w, lang, http.StatusBadRequest, "bad_request", "missing appKey")
+			return
+		}
+		var prev *platform.DeleteAppPreview
+		var err error
+		if len(req.Services) > 0 {
+			prev, err = s.d.Updater.PreviewComposeRemoval(r.Context(), req, lang)
+		} else {
+			prev, err = s.d.Updater.PreviewDeleteApp(r.Context(), req.AppKey, lang)
+		}
+		if err != nil {
+			var ee *i18n.EngineError
+			if errors.As(err, &ee) && ee.Key == i18n.MsgDeleteAppNotFound {
+				writeError(w, lang, http.StatusNotFound, "not_found", i18n.LocalizeError(lang, err))
+				return
+			}
+			writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
+			return
+		}
+		writeJSON(w, http.StatusOK, prev)
 		return
 	}
 	key := strings.TrimSpace(r.URL.Query().Get("key"))

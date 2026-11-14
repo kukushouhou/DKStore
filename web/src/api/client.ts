@@ -5,11 +5,22 @@ export class ApiError extends Error {
   status: number
   code: string
   testResult?: HostTestResult
-  constructor(status: number, code: string, message: string, testResult?: HostTestResult) {
+  removedServices?: string[]
+  addedServices?: string[]
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    testResult?: HostTestResult,
+    removedServices?: string[],
+    addedServices?: string[],
+  ) {
     super(message)
     this.status = status
     this.code = code
     this.testResult = testResult
+    this.removedServices = removedServices
+    this.addedServices = addedServices
   }
 }
 
@@ -90,6 +101,8 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
       err?.code ?? 'http_error',
       err?.message ?? `HTTP ${res.status}`,
       body?.testResult,
+      Array.isArray(body?.removedServices) ? body.removedServices : undefined,
+      Array.isArray(body?.addedServices) ? body.addedServices : undefined,
     )
     if (
       isAuthExpiredError(apiErr) &&
@@ -381,6 +394,8 @@ export interface AppComposeResponse {
   editable: boolean
   content: string
   reason?: string
+  effectiveServices?: string[]
+  extraFileServices?: string[]
 }
 
 export interface UpdateAppComposePayload {
@@ -390,6 +405,9 @@ export interface UpdateAppComposePayload {
   policyMode?: string
   policyPrefix?: string
   skipTargetTag?: string
+  confirmRemoveServices?: boolean
+  deleteRemovedImages?: boolean
+  deleteRemovedFileIds?: string[]
 }
 
 export interface DeleteFileItem {
@@ -400,6 +418,13 @@ export interface DeleteFileItem {
   defaultSelect: boolean
   protected: boolean
   reason?: string
+  referencedBy?: string[]
+}
+
+export interface PreviewComposeRemovalPayload {
+  appKey: string
+  services: string[]
+  newContent: string
 }
 
 export interface DeleteAppPreviewResponse {
@@ -628,6 +653,11 @@ export const api = {
     }),
   previewDeleteApp: (appKey: string) =>
     request<DeleteAppPreviewResponse>(`/apps/delete-preview?key=${encodeURIComponent(appKey)}`),
+  previewComposeRemoval: (payload: PreviewComposeRemovalPayload) =>
+    request<DeleteAppPreviewResponse>('/apps/delete-preview', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
   deleteApp: (payload: DeleteAppPayload) =>
     request<{ ok: boolean; result: DeleteAppResult }>('/apps/delete', {
       method: 'POST',

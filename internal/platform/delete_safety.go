@@ -137,3 +137,8 @@ func IsSubPathOrSame(parent, child string) bool {
 	}
 	return strings.HasPrefix(c, strings.TrimRight(p, "/")+"/")
 }
+
+// PathsOverlap 判断两个宿主机路径是否相同或互为父子目录（任一方被其他容器引用时均不可删除）。
+func PathsOverlap(pathA, pathB string) bool {
+	return IsSubPathOrSame(pathA, pathB) || IsSubPathOrSame(pathB, pathA)
+}

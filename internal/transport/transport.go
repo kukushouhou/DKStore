@@ -69,6 +69,12 @@ type StreamingComposeTransport interface {
 	ExecComposeProjectStream(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, pullAndRemoveOrphans bool, onChunk func(string)) (string, error)
 }
 
+// ComposeProjectOptionsTransport 扩展 ExecutableTransport，支持分别控制是否拉取镜像（pullImages）与是否清理孤儿容器（removeOrphans）。
+type ComposeProjectOptionsTransport interface {
+	ExecutableTransport
+	ExecComposeProjectWithOptions(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, pullImages, removeOrphans bool, onChunk func(string)) (string, error)
+}
+
 // CleanupTransport 扩展 ExecutableTransport，提供 Compose 整项目下线与受保护的宿主机路径清理能力。
 type CleanupTransport interface {
 	ExecutableTransport
@@ -245,6 +251,10 @@ func (l *LocalTransport) ExecComposeProject(ctx context.Context, workDir string,
 }
 
 func (l *LocalTransport) ExecComposeProjectStream(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, pullAndRemoveOrphans bool, onChunk func(string)) (string, error) {
+	return l.ExecComposeProjectWithOptions(ctx, workDir, configFiles, envFiles, projectName, pullAndRemoveOrphans, pullAndRemoveOrphans, onChunk)
+}
+
+func (l *LocalTransport) ExecComposeProjectWithOptions(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, pullImages, removeOrphans bool, onChunk func(string)) (string, error) {
 	baseFlags := buildComposeBaseFlags(workDir, configFiles, envFiles, projectName)
 	env := append(os.Environ(), "PATH="+os.Getenv("PATH")+":/usr/local/bin:/var/packages/ContainerManager/target/usr/bin:/var/packages/Docker/target/usr/bin")
 	newCmd := func(name string, a ...string) *exec.Cmd {
@@ -276,22 +286,25 @@ func (l *LocalTransport) ExecComposeProjectStream(ctx context.Context, workDir s
 		return outStr, nil
 	}
 	var outputs []string
-	if pullAndRemoveOrphans {
+	if pullImages {
 		if out, err := runSub("pull"); err != nil {
 			return out, err
 		} else if out != "" {
 			outputs = append(outputs, out)
 		}
-		out, err := runSub("up", "-d", "--remove-orphans")
-		if err != nil {
-			return out, err
-		}
-		if out != "" {
-			outputs = append(outputs, out)
-		}
-		return strings.Join(outputs, "\n"), nil
 	}
-	return runSub("up", "-d")
+	upArgs := []string{"up", "-d"}
+	if removeOrphans {
+		upArgs = append(upArgs, "--remove-orphans")
+	}
+	out, err := runSub(upArgs...)
+	if err != nil {
+		return out, err
+	}
+	if out != "" {
+		outputs = append(outputs, out)
+	}
+	return strings.Join(outputs, "\n"), nil
 }
 
 func (l *LocalTransport) ExecComposeDown(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, removeVolumes bool) (string, error) {
@@ -808,6 +821,10 @@ func (t *SSHTransport) ExecComposeProject(ctx context.Context, workDir string, c
 }
 
 func (t *SSHTransport) ExecComposeProjectStream(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, pullAndRemoveOrphans bool, onChunk func(string)) (string, error) {
+	return t.ExecComposeProjectWithOptions(ctx, workDir, configFiles, envFiles, projectName, pullAndRemoveOrphans, pullAndRemoveOrphans, onChunk)
+}
+
+func (t *SSHTransport) ExecComposeProjectWithOptions(ctx context.Context, workDir string, configFiles, envFiles []string, projectName string, pullImages, removeOrphans bool, onChunk func(string)) (string, error) {
 	if err := t.ensureClient(ctx); err != nil {
 		return "", err
 	}
@@ -821,22 +838,25 @@ func (t *SSHTransport) ExecComposeProjectStream(ctx context.Context, workDir str
 		}
 		return strings.TrimSpace(string(out)), nil
 	}
-	if pullAndRemoveOrphans {
+	if pullImages {
 		if out, err := runSub("pull"); err != nil {
 			return out, err
 		} else if out != "" {
 			outputs = append(outputs, out)
 		}
-		out, err := runSub("up", "-d", "--remove-orphans")
-		if err != nil {
-			return out, err
-		}
-		if out != "" {
-			outputs = append(outputs, out)
-		}
-		return strings.Join(outputs, "\n"), nil
 	}
-	return runSub("up", "-d")
+	upArgs := []string{"up", "-d"}
+	if removeOrphans {
+		upArgs = append(upArgs, "--remove-orphans")
+	}
+	out, err := runSub(upArgs...)
+	if err != nil {
+		return out, err
+	}
+	if out != "" {
+		outputs = append(outputs, out)
+	}
+	return strings.Join(outputs, "\n"), nil
 }
 
 // ExecSynoWebAPIProjectList 在群晖主机上通过只读 synowebapi 查询 Container Manager 原生项目列表。

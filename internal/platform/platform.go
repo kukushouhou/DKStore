@@ -239,7 +239,48 @@ type DeleteFileItem struct {
 	Target        string         `json:"target,omitempty"`
 	DefaultSelect bool           `json:"defaultSelect"`
 	Protected     bool           `json:"protected"`
-	Reason        string         `json:"reason,omitempty"` // system_protected | external_bind | readonly_bind | dsm_api_host_path_unsupported
+	Reason        string         `json:"reason,omitempty"` // system_protected | external_bind | readonly_bind | dsm_api_host_path_unsupported | referenced_by_containers
+	ReferencedBy  []string       `json:"referencedBy,omitempty"`
+}
+
+// ComposeServicesRemovedError 表示新版 Compose 配置移除了原有服务但尚未获得用户确认。
+type ComposeServicesRemovedError struct {
+	RemovedServices []string `json:"removedServices"`
+	AddedServices   []string `json:"addedServices,omitempty"`
+}
+
+func (e *ComposeServicesRemovedError) Error() string {
+	return "compose configuration removes existing services: " + strings.Join(e.RemovedServices, ", ")
+}
+
+// ComposeUpdateOptions 控制整项目 Compose 配置更新时的服务移除确认与旧资源清理行为。
+type ComposeUpdateOptions struct {
+	ConfirmRemoveServices bool
+	DeleteRemovedImages   bool
+	DeleteRemovedFileIDs  []string
+}
+
+// ComposeServiceSetSummary 汇总 Compose 项目当前的生效服务名集合与附加覆盖文件保留服务名集合。
+type ComposeServiceSetSummary struct {
+	EffectiveServices []string `json:"effectiveServices"`
+	ExtraFileServices []string `json:"extraFileServices,omitempty"`
+}
+
+// ComposeRemovalPreviewRequest 是预览新版 Compose 配置移除旧服务关联资源的参数。
+type ComposeRemovalPreviewRequest struct {
+	AppName         string
+	Source          SourceKind
+	Project         *ProjectInfo
+	NewYAML         string
+	RemovedServices []string
+}
+
+// ComposeUpdateAdapter 扩展 Adapter，提供多文件生效服务核对、移除服务资源预览与受控清理的 Compose 更新能力。
+type ComposeUpdateAdapter interface {
+	Adapter
+	InspectProjectComposeServices(ctx context.Context, project *ProjectInfo) (*ComposeServiceSetSummary, error)
+	PreviewComposeServiceRemoval(ctx context.Context, req ComposeRemovalPreviewRequest) (*DeleteAppPreview, error)
+	UpdateProjectComposeWithOptions(ctx context.Context, appName string, project *ProjectInfo, newYAML string, opts ComposeUpdateOptions, onProgress func(PullProgress)) error
 }
 
 // DeleteAppPreview 是删除容器或整项目前展示的关联资源预览。

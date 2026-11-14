@@ -153,13 +153,22 @@ func TestAPIEndpoints_IconsTagsIgnoreAndCustomUpdateValidation(t *testing.T) {
 		t.Fatalf("full settings save lost progressStyle: %d %s", recSet3.Code, recSet3.Body.String())
 	}
 
-	// 6. POST /api/v1/apps/compose-update launches tracked Job and applies policyMode
+	// 6. POST /api/v1/apps/compose-update launches tracked Job, rejects unconfirmed service removal with 409, and allows confirmed removal
 	_, _ = st.DB.ExecContext(ctx, `INSERT INTO app(key, host_id, name, source, project_json, updated_at) VALUES ('h1/compose/stack', 'h1', 'stack', 'compose', '{"name":"stack","workingDir":"/tmp/nonexistent"}', ?)`, now)
 	_, _ = st.DB.ExecContext(ctx, `INSERT INTO service(key, app_key, name, state, image_ref, image_id, repo_digest, platform, updated_at) VALUES ('h1/compose/stack/api', 'h1/compose/stack', 'api', 'running', 'nginx:1.26.2', 'sha256:bbb', 'sha256:bbb', 'linux/amd64', ?)`, now)
+	_, _ = st.DB.ExecContext(ctx, `INSERT INTO service(key, app_key, name, state, image_ref, image_id, repo_digest, platform, updated_at) VALUES ('h1/compose/stack/db', 'h1/compose/stack', 'db', 'running', 'postgres:16-alpine', 'sha256:ccc', 'sha256:ccc', 'linux/amd64', ?)`, now)
 
-	recComp := doReq(http.MethodPost, "/api/v1/apps/compose-update", `{"appKey":"h1/compose/stack","serviceKey":"h1/compose/stack/api","policyMode":"prefix","policyPrefix":"1.27","content":"services:\n  api:\n    image: nginx:1.27.3\n"}`)
+	recCompBlocked := doReq(http.MethodPost, "/api/v1/apps/compose-update", `{"appKey":"h1/compose/stack","content":"services:\n  api:\n    image: nginx:1.27.3\n  postgres:\n    image: postgres:16-alpine\n"}`)
+	if recCompBlocked.Code != http.StatusConflict ||
+		!strings.Contains(recCompBlocked.Body.String(), `"compose_services_removed"`) ||
+		!strings.Contains(recCompBlocked.Body.String(), `"removedServices":["db"]`) ||
+		!strings.Contains(recCompBlocked.Body.String(), `"addedServices":["postgres"]`) {
+		t.Fatalf("expected HTTP 409 compose_services_removed with removed=[db] added=[postgres], got %d %s", recCompBlocked.Code, recCompBlocked.Body.String())
+	}
+
+	recComp := doReq(http.MethodPost, "/api/v1/apps/compose-update", `{"appKey":"h1/compose/stack","serviceKey":"h1/compose/stack/api","policyMode":"prefix","policyPrefix":"1.27","confirmRemoveServices":true,"content":"services:\n  api:\n    image: nginx:1.27.3\n"}`)
 	if recComp.Code != http.StatusOK || !strings.Contains(recComp.Body.String(), `"job":{`) {
-		t.Fatalf("expected compose-update to return tracked job, got %d %s", recComp.Code, recComp.Body.String())
+		t.Fatalf("expected confirmed compose-update to return tracked job, got %d %s", recComp.Code, recComp.Body.String())
 	}
 
 	// 7. GET /api/v1/services/config & POST /api/v1/services/config-update

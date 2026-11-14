@@ -74,13 +74,120 @@ export function replaceComposeImageTag(
   return nextLines.join('\n')
 }
 
-/** 提取原配置中的宿主机绝对挂载路径与敏感环境变量，检测粘贴后是否被示例模板覆盖 */
+function countYamlIndent(line: string): number {
+  let n = 0
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (ch === ' ') n += 1
+    else if (ch === '\t') n += 2
+    else break
+  }
+  return n
+}
+
+/** 按声明顺序提取 Compose YAML 中 services 块下的全部容器服务名称 */
+export function parseComposeServiceNames(yamlContent: string): string[] {
+  if (!yamlContent || !yamlContent.trim()) return []
+  const lines = yamlContent.split(/\r?\n/)
+  let inServices = false
+  let servicesIndent = -1
+  let childKeyIndent = -1
+  const names: string[] = []
+  const seen = new Set<string>()
+  const keyRegex = /^["']?([A-Za-z0-9._-]+)["']?\s*:(?:\s*(?:#.*|\{.*\}))?$/
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim()
+    if (!trimmed || trimmed.startsWith('#')) continue
+    const indent = countYamlIndent(rawLine)
+
+    if (!inServices) {
+      if (/^services\s*:(?:\s*#.*)?$/.test(trimmed)) {
+        inServices = true
+        servicesIndent = indent
+        childKeyIndent = -1
+      }
+      continue
+    }
+
+    if (indent <= servicesIndent) {
+      inServices = false
+      childKeyIndent = -1
+      if (/^services\s*:(?:\s*#.*)?$/.test(trimmed)) {
+        inServices = true
+        servicesIndent = indent
+      }
+      continue
+    }
+
+    const m = keyRegex.exec(trimmed)
+    if (!m) continue
+    if (childKeyIndent < 0) {
+      childKeyIndent = indent
+    }
+    if (indent === childKeyIndent) {
+      const svcName = m[1]
+      if (svcName && !seen.has(svcName)) {
+        seen.add(svcName)
+        names.push(svcName)
+      }
+    }
+  }
+
+  return names
+}
+
+export interface ComposeServiceDiffOptions {
+  effectiveOrigServices?: string[]
+  extraFileServices?: string[]
+}
+
+export interface ComposeOverwriteRisks {
+  missingPaths: string[]
+  overwrittenSecrets: string[]
+  missingServices: string[]
+  addedServices: string[]
+}
+
+/** 提取原配置中的宿主机绝对挂载路径、敏感环境变量与容器集合，检测修改后的路径覆盖、密钥丢失与容器减少 */
 export function detectComposeOverwriteRisks(
   origYaml: string,
   nextYaml: string,
-): { missingPaths: string[]; overwrittenSecrets: string[] } {
-  if (!origYaml.trim() || !nextYaml.trim()) {
-    return { missingPaths: [], overwrittenSecrets: [] }
+  opts?: ComposeServiceDiffOptions,
+): ComposeOverwriteRisks {
+  if ((!origYaml.trim() && !(opts?.effectiveOrigServices?.length)) || !nextYaml.trim()) {
+    return {
+      missingPaths: [],
+      overwrittenSecrets: [],
+      missingServices: [],
+      addedServices: [],
+    }
+  }
+
+  const origServiceList =
+    opts?.effectiveOrigServices && opts.effectiveOrigServices.length > 0
+      ? Array.from(new Set(opts.effectiveOrigServices.map((s) => s.trim()).filter(Boolean)))
+      : parseComposeServiceNames(origYaml)
+  const nextPrimaryServices = parseComposeServiceNames(nextYaml)
+  const extraServices = (opts?.extraFileServices ?? []).map((s) => s.trim()).filter(Boolean)
+
+  let missingServices: string[] = []
+  let addedServices: string[] = []
+  if (origServiceList.length > 0 && (nextPrimaryServices.length > 0 || extraServices.length > 0)) {
+    const effectiveNextList = Array.from(new Set([...nextPrimaryServices, ...extraServices]))
+    const nextSet = new Set(effectiveNextList)
+    const origSet = new Set(origServiceList)
+    missingServices = origServiceList.filter((name) => !nextSet.has(name))
+    addedServices = effectiveNextList.filter((name) => !origSet.has(name))
+  }
+
+  if (!origYaml.trim()) {
+    return {
+      missingPaths: [],
+      overwrittenSecrets: [],
+      missingServices,
+      addedServices,
+    }
   }
 
   const hostPaths = new Set<string>()
@@ -124,5 +231,5 @@ export function detectComposeOverwriteRisks(
     }
   }
 
-  return { missingPaths, overwrittenSecrets }
+  return { missingPaths, overwrittenSecrets, missingServices, addedServices }
 }

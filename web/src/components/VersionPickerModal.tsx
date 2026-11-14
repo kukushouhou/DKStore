@@ -28,6 +28,7 @@ import {
   PlusOutlined,
 } from '@ant-design/icons'
 import {
+  ApiError,
   api,
   showApiError,
   type AppCardItem,
@@ -41,6 +42,7 @@ import {
 import { useI18n } from '../i18n'
 import { useUIStore } from '../store/ui'
 import { detectComposeOverwriteRisks, replaceComposeImageTag } from './composeGuard'
+import DeleteAppModal from './DeleteAppModal'
 import LockableVersionBar from './LockableVersionBar'
 import { compareNumericSegs, parseNumericSegs } from './versionUtils'
 
@@ -225,6 +227,12 @@ function VersionPickerModalBody({
   const [yamlReason, setYamlReason] = useState('')
   const [origYaml, setOrigYaml] = useState('')
   const [yamlText, setYamlText] = useState('')
+  const [effectiveOrigServices, setEffectiveOrigServices] = useState<string[]>([])
+  const [extraFileServices, setExtraFileServices] = useState<string[]>([])
+  const [pendingRemovalConfirm, setPendingRemovalConfirm] = useState<{
+    removedServices: string[]
+    addedServices: string[]
+  } | null>(null)
   const lastSyncedYamlTagRef = useRef<string>('')
 
   // 按新版配置更新 —— 分支 B：无 YAML 纯独立容器（环境变量 + 端口映射）编辑状态
@@ -341,6 +349,8 @@ function VersionPickerModalBody({
         setYamlReason(res.reason || '')
         const raw = res.content || ''
         setOrigYaml(raw)
+        setEffectiveOrigServices(res.effectiveServices ?? [])
+        setExtraFileServices(res.extraFileServices ?? [])
         const synced = replaceComposeImageTag(raw, service.imageRef, selectedTag)
         setYamlText(synced)
         lastSyncedYamlTagRef.current = selectedTag
@@ -483,8 +493,12 @@ function VersionPickerModalBody({
   )
 
   const overwriteRisks = useMemo(
-    () => detectComposeOverwriteRisks(origYaml, yamlText),
-    [origYaml, yamlText],
+    () =>
+      detectComposeOverwriteRisks(origYaml, yamlText, {
+        effectiveOrigServices,
+        extraFileServices,
+      }),
+    [effectiveOrigServices, extraFileServices, origYaml, yamlText],
   )
 
   const handleSubmitVersion = async () => {
@@ -530,6 +544,38 @@ function VersionPickerModalBody({
     }
   }
 
+  const submitYamlConfigWithOptions = async (opts?: {
+    confirmRemoveServices?: boolean
+    deleteRemovedImages?: boolean
+    deleteRemovedFileIds?: string[]
+  }) => {
+    if (!app) return
+    const policyPrefixVal = policy === 'prefix' ? lockedPrefix : undefined
+    const skipTargetVal = policy === 'skip_latest' ? highestTag : undefined
+    const res = await api.updateAppCompose({
+      appKey: app.key,
+      content: yamlText,
+      serviceKey: service.key,
+      policyMode: policy,
+      policyPrefix: policyPrefixVal,
+      skipTargetTag: skipTargetVal,
+      confirmRemoveServices: opts?.confirmRemoveServices,
+      deleteRemovedImages: opts?.deleteRemovedImages,
+      deleteRemovedFileIds: opts?.deleteRemovedFileIds,
+    })
+    if (res.job) {
+      upsertUpdateJob(res.job)
+    }
+    if (res.items) {
+      for (const job of res.items) {
+        upsertUpdateJob(job)
+      }
+    }
+    message.success(t.versionPicker.configUpdateStarted)
+    onUpdated?.()
+    onClose()
+  }
+
   const handleSubmitConfig = async () => {
     if (!app) return
     const policyPrefixVal = policy === 'prefix' ? lockedPrefix : undefined
@@ -540,28 +586,24 @@ function VersionPickerModalBody({
         message.warning(t.projectUpdate.yamlEmptyError)
         return
       }
+      if (overwriteRisks.missingServices.length > 0) {
+        setPendingRemovalConfirm({
+          removedServices: overwriteRisks.missingServices,
+          addedServices: overwriteRisks.addedServices,
+        })
+        return
+      }
       setSubmittingConfig(true)
       try {
-        const res = await api.updateAppCompose({
-          appKey: app.key,
-          content: yamlText,
-          serviceKey: service.key,
-          policyMode: policy,
-          policyPrefix: policyPrefixVal,
-          skipTargetTag: skipTargetVal,
-        })
-        if (res.job) {
-          upsertUpdateJob(res.job)
-        }
-        if (res.items) {
-          for (const job of res.items) {
-            upsertUpdateJob(job)
-          }
-        }
-        message.success(t.versionPicker.configUpdateStarted)
-        onUpdated?.()
-        onClose()
+        await submitYamlConfigWithOptions()
       } catch (e) {
+        if (e instanceof ApiError && e.code === 'compose_services_removed' && e.removedServices?.length) {
+          setPendingRemovalConfirm({
+            removedServices: e.removedServices,
+            addedServices: e.addedServices ?? [],
+          })
+          return
+        }
         showApiError(e)
       } finally {
         setSubmittingConfig(false)
@@ -1111,24 +1153,66 @@ function VersionPickerModalBody({
                 }}
               />
 
-              {overwriteRisks.missingPaths.length > 0 && (
+              {overwriteRisks.missingServices.length > 0 && (
                 <Alert
                   type="warning"
                   showIcon
                   title={
                     <Typography.Text style={{ fontSize: token.fontSizeSM }}>
-                      <strong>{t.projectUpdate.warnTitle}</strong>
-                      {t.projectUpdate.warnMissingPathsBefore}
-                      <Typography.Text code>
-                        {overwriteRisks.missingPaths.join(', ')}
-                      </Typography.Text>
-                      {t.projectUpdate.warnMissingPathsAfter}
+                      <strong>{t.projectUpdate.warnRemovedPrefix}</strong>
+                      {t.projectUpdate.warnRemovedBefore}
+                      <Space size={4} wrap style={{ display: 'inline-flex' }}>
+                        {overwriteRisks.missingServices.map((name) => (
+                          <Typography.Text key={name} code strong>
+                            {name}
+                          </Typography.Text>
+                        ))}
+                      </Space>
+                      {overwriteRisks.missingServices.length === 1
+                        ? t.projectUpdate.warnRemovedSingleAfter
+                        : t.projectUpdate.warnRemovedMultiAfter.replace(
+                            '{count}',
+                            String(overwriteRisks.missingServices.length),
+                          )}
+                      {overwriteRisks.addedServices.length > 0 && (
+                        <>
+                          {t.projectUpdate.warnRemovedAddedBefore}
+                          <Space size={4} wrap style={{ display: 'inline-flex' }}>
+                            {overwriteRisks.addedServices.map((name) => (
+                              <Typography.Text key={name} code>
+                                {name}
+                              </Typography.Text>
+                            ))}
+                          </Space>
+                          {t.projectUpdate.warnRemovedAddedAfter}
+                        </>
+                      )}
+                      {t.projectUpdate.warnRemovedEnd}
                     </Typography.Text>
                   }
                 />
               )}
 
-              {overwriteRisks.missingPaths.length === 0 &&
+              {overwriteRisks.missingServices.length === 0 &&
+                overwriteRisks.missingPaths.length > 0 && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    title={
+                      <Typography.Text style={{ fontSize: token.fontSizeSM }}>
+                        <strong>{t.projectUpdate.warnTitle}</strong>
+                        {t.projectUpdate.warnMissingPathsBefore}
+                        <Typography.Text code>
+                          {overwriteRisks.missingPaths.join(', ')}
+                        </Typography.Text>
+                        {t.projectUpdate.warnMissingPathsAfter}
+                      </Typography.Text>
+                    }
+                  />
+                )}
+
+              {overwriteRisks.missingServices.length === 0 &&
+                overwriteRisks.missingPaths.length === 0 &&
                 overwriteRisks.overwrittenSecrets.length > 0 && (
                   <Alert
                     type="warning"
@@ -1361,6 +1445,33 @@ function VersionPickerModalBody({
             </Space>
           </Flex>
         </Flex>
+      )}
+
+      {app && (
+        <DeleteAppModal
+          open={Boolean(pendingRemovalConfirm)}
+          appKey={app.key}
+          appName={app.projectName || app.appName || app.name}
+          hostName={app.hostName}
+          source={app.source}
+          composeRemoval={
+            pendingRemovalConfirm
+              ? {
+                  removedServices: pendingRemovalConfirm.removedServices,
+                  addedServices: pendingRemovalConfirm.addedServices,
+                  newContent: yamlText,
+                  onConfirm: async ({ deleteImages, fileIds }) => {
+                    await submitYamlConfigWithOptions({
+                      confirmRemoveServices: true,
+                      deleteRemovedImages: deleteImages,
+                      deleteRemovedFileIds: fileIds,
+                    })
+                  },
+                }
+              : undefined
+          }
+          onClose={() => setPendingRemovalConfirm(null)}
+        />
       )}
     </Flex>
   )

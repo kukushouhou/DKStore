@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -628,10 +629,48 @@ func readBodyString(r io.Reader) string {
 	return strings.TrimSpace(b.String())
 }
 
-// ValidateComposeYAML 校验 Compose YAML 语法并提取其中的 services.<name>.image 声明映射。
-func ValidateComposeYAML(rawYAML string) (map[string]string, error) {
+// ParseComposeServiceNames 按声明顺序解析 Compose YAML 中 services 块下的全部服务名称（兼容仅使用 build 而无 image 的服务）。
+func ParseComposeServiceNames(rawYAML string) ([]string, error) {
 	if strings.TrimSpace(rawYAML) == "" {
 		return nil, i18n.NewEngineError(i18n.MsgComposeInvalidYAML, "empty content")
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(rawYAML), &root); err != nil {
+		return nil, i18n.NewEngineError(i18n.MsgComposeInvalidYAML, err.Error())
+	}
+	if len(root.Content) == 0 || root.Content[0].Kind != yaml.MappingNode {
+		return nil, i18n.NewEngineError(i18n.MsgComposeInvalidYAML, "missing services map")
+	}
+	top := root.Content[0]
+	var svcNode *yaml.Node
+	for i := 0; i+1 < len(top.Content); i += 2 {
+		if top.Content[i].Value == "services" {
+			svcNode = top.Content[i+1]
+			break
+		}
+	}
+	if svcNode == nil || svcNode.Kind != yaml.MappingNode || len(svcNode.Content) == 0 {
+		return nil, i18n.NewEngineError(i18n.MsgComposeInvalidYAML, "missing services map")
+	}
+	names := make([]string, 0, len(svcNode.Content)/2)
+	seen := make(map[string]bool, len(svcNode.Content)/2)
+	for i := 0; i+1 < len(svcNode.Content); i += 2 {
+		name := strings.TrimSpace(svcNode.Content[i].Value)
+		if name != "" && !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return nil, i18n.NewEngineError(i18n.MsgComposeInvalidYAML, "missing services map")
+	}
+	return names, nil
+}
+
+// ValidateComposeYAML 校验 Compose YAML 语法并提取其中的 services.<name>.image 声明映射。
+func ValidateComposeYAML(rawYAML string) (map[string]string, error) {
+	if _, err := ParseComposeServiceNames(rawYAML); err != nil {
+		return nil, err
 	}
 	var doc struct {
 		Services map[string]map[string]any `yaml:"services"`
@@ -654,6 +693,174 @@ func ValidateComposeYAML(rawYAML string) (map[string]string, error) {
 	return images, nil
 }
 
+// ComposeServiceMountSet 记录单个 Compose 服务引用的宿主机目录与命名卷集合。
+type ComposeServiceMountSet struct {
+	HostPaths []string
+	Volumes   []string
+}
+
+func isHostMountSourceSyntax(src string) bool {
+	if src == "." || src == ".." {
+		return true
+	}
+	if strings.HasPrefix(src, "/") || strings.HasPrefix(src, "./") || strings.HasPrefix(src, "../") || strings.HasPrefix(src, "~/") {
+		return true
+	}
+	return len(src) >= 2 && src[1] == ':'
+}
+
+func resolveComposeMountHostPath(workDir, src string) string {
+	s := strings.TrimSpace(src)
+	if s == "" {
+		return ""
+	}
+	if !strings.HasPrefix(s, "/") && !(len(s) >= 2 && s[1] == ':') {
+		if strings.TrimSpace(workDir) == "" {
+			return ""
+		}
+		s = filepath.ToSlash(filepath.Join(workDir, s))
+	}
+	norm := platform.NormalizeHostPath(s)
+	if norm == "/etc/localtime" || norm == "/etc/timezone" {
+		return ""
+	}
+	return norm
+}
+
+// ParseComposeServiceMounts 提取 Compose YAML 中每个服务声明引用的宿主机挂载目录与命名数据卷。
+func ParseComposeServiceMounts(yamlBytes []byte, workDir, projectName string, env map[string]string) map[string]ComposeServiceMountSet {
+	var doc struct {
+		Services map[string]struct {
+			Volumes []any `yaml:"volumes"`
+		} `yaml:"services"`
+		Volumes map[string]any `yaml:"volumes"`
+	}
+	if err := yaml.Unmarshal(yamlBytes, &doc); err != nil || len(doc.Services) == 0 {
+		return nil
+	}
+
+	topVolNames := make(map[string]string)
+	for volKey, rawVal := range doc.Volumes {
+		if m, ok := rawVal.(map[string]any); ok {
+			if custom, ok := m["name"].(string); ok {
+				expanded := strings.TrimSpace(expandEnv(custom, env))
+				if expanded != "" {
+					topVolNames[volKey] = expanded
+				}
+			}
+		}
+	}
+
+	out := make(map[string]ComposeServiceMountSet, len(doc.Services))
+	projPrefix := strings.TrimSpace(projectName)
+	for svcName, svcBody := range doc.Services {
+		var paths []string
+		var vols []string
+		seenP := make(map[string]bool)
+		seenV := make(map[string]bool)
+		addPath := func(p string) {
+			if p != "" && !seenP[p] {
+				seenP[p] = true
+				paths = append(paths, p)
+			}
+		}
+		addVol := func(v string) {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				return
+			}
+			for _, cand := range []string{v, topVolNames[v], func() string {
+				if projPrefix != "" {
+					return projPrefix + "_" + v
+				}
+				return ""
+			}()} {
+				if cand != "" && !seenV[cand] {
+					seenV[cand] = true
+					vols = append(vols, cand)
+				}
+			}
+		}
+
+		for _, entry := range svcBody.Volumes {
+			switch v := entry.(type) {
+			case string:
+				expanded := strings.TrimSpace(expandEnv(v, env))
+				if expanded == "" {
+					continue
+				}
+				searchFrom := 0
+				if len(expanded) >= 3 && expanded[1] == ':' && (expanded[2] == '/' || expanded[2] == '\\') {
+					searchFrom = 2
+				}
+				relColon := strings.Index(expanded[searchFrom:], ":")
+				if relColon < 0 {
+					continue
+				}
+				src := strings.TrimSpace(expanded[:searchFrom+relColon])
+				if src == "" {
+					continue
+				}
+				if isHostMountSourceSyntax(src) {
+					addPath(resolveComposeMountHostPath(workDir, src))
+				} else {
+					addVol(src)
+				}
+			case map[string]any:
+				typ, _ := v["type"].(string)
+				typ = strings.ToLower(strings.TrimSpace(typ))
+				srcRaw, _ := v["source"].(string)
+				src := strings.TrimSpace(expandEnv(srcRaw, env))
+				if src == "" {
+					continue
+				}
+				if typ == "bind" || (typ == "" && isHostMountSourceSyntax(src)) {
+					addPath(resolveComposeMountHostPath(workDir, src))
+				} else if typ == "volume" || typ == "" {
+					addVol(src)
+				}
+			}
+		}
+		out[svcName] = ComposeServiceMountSet{
+			HostPaths: paths,
+			Volumes:   vols,
+		}
+	}
+	return out
+}
+
+func unionOrderedStrings(groups ...[]string) []string {
+	var out []string
+	seen := make(map[string]bool)
+	for _, g := range groups {
+		for _, item := range g {
+			s := strings.TrimSpace(item)
+			if s != "" && !seen[s] {
+				seen[s] = true
+				out = append(out, s)
+			}
+		}
+	}
+	return out
+}
+
+func diffOrderedStrings(before, after []string) []string {
+	afterSet := make(map[string]bool, len(after))
+	for _, s := range after {
+		afterSet[strings.TrimSpace(s)] = true
+	}
+	var removed []string
+	seen := make(map[string]bool)
+	for _, s := range before {
+		s = strings.TrimSpace(s)
+		if s != "" && !afterSet[s] && !seen[s] {
+			seen[s] = true
+			removed = append(removed, s)
+		}
+	}
+	return removed
+}
+
 func resolvePrimaryComposeFile(project *platform.ProjectInfo) string {
 	if project == nil {
 		return ""
@@ -667,28 +874,97 @@ func resolvePrimaryComposeFile(project *platform.ProjectInfo) string {
 	return ""
 }
 
-// GetProjectCompose 读取 Compose 项目的当前主 YAML 文件内容。
-func (a *Adapter) GetProjectCompose(ctx context.Context, project *platform.ProjectInfo) (string, error) {
+func (a *Adapter) readPrimaryComposeBytes(ctx context.Context, project *platform.ProjectInfo) (string, []byte, error) {
 	p := resolvePrimaryComposeFile(project)
 	if p == "" {
-		return "", i18n.NewEngineError(i18n.MsgComposeNotEditable)
+		return "", nil, i18n.NewEngineError(i18n.MsgComposeNotEditable)
 	}
 	b, err := a.tr.ReadFile(ctx, p)
 	if err != nil && len(project.ConfigFiles) == 0 && project.WorkingDir != "" {
-		// 若未记录 ConfigFiles，依次尝试常见默认文件名
 		for _, alt := range []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml"} {
-			if b2, err2 := a.tr.ReadFile(ctx, resolvePath(project.WorkingDir, alt)); err2 == nil {
-				return string(b2), nil
+			altPath := resolvePath(project.WorkingDir, alt)
+			if b2, err2 := a.tr.ReadFile(ctx, altPath); err2 == nil {
+				return altPath, b2, nil
 			}
 		}
 	}
+	if err != nil {
+		return "", nil, err
+	}
+	return p, b, nil
+}
+
+func (a *Adapter) readExtraComposeServiceNames(ctx context.Context, project *platform.ProjectInfo) []string {
+	if project == nil || len(project.ConfigFiles) <= 1 {
+		return nil
+	}
+	var extra []string
+	for _, cf := range project.ConfigFiles[1:] {
+		cf = strings.TrimSpace(cf)
+		if cf == "" {
+			continue
+		}
+		if b, err := a.tr.ReadFile(ctx, resolvePath(project.WorkingDir, cf)); err == nil {
+			if svcs, pErr := ParseComposeServiceNames(string(b)); pErr == nil {
+				extra = append(extra, svcs...)
+			}
+		}
+	}
+	return unionOrderedStrings(extra)
+}
+
+func (a *Adapter) listLiveComposeServiceNames(ctx context.Context, projName string) []string {
+	projName = strings.TrimSpace(projName)
+	if projName == "" || a == nil || a.tr == nil {
+		return nil
+	}
+	var list []containerSummary
+	if err := a.getJSON(ctx, "/containers/json?all=1", &list); err != nil {
+		return nil
+	}
+	var names []string
+	for _, cs := range list {
+		if cs.Labels["dkstore.self"] == "true" {
+			continue
+		}
+		if cs.Labels["com.docker.compose.project"] == projName {
+			if svc := strings.TrimSpace(cs.Labels["com.docker.compose.service"]); svc != "" {
+				names = append(names, svc)
+			}
+		}
+	}
+	return unionOrderedStrings(names)
+}
+
+// InspectProjectComposeServices 返回当前 Compose 项目的组合生效服务集合与附加文件保留服务集合。
+func (a *Adapter) InspectProjectComposeServices(ctx context.Context, project *platform.ProjectInfo) (*platform.ComposeServiceSetSummary, error) {
+	_, origBytes, err := a.readPrimaryComposeBytes(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	primarySvcs, _ := ParseComposeServiceNames(string(origBytes))
+	extraSvcs := a.readExtraComposeServiceNames(ctx, project)
+	var projName string
+	if project != nil {
+		projName = project.Name
+	}
+	liveSvcs := a.listLiveComposeServiceNames(ctx, projName)
+	return &platform.ComposeServiceSetSummary{
+		EffectiveServices: unionOrderedStrings(primarySvcs, extraSvcs, liveSvcs),
+		ExtraFileServices: extraSvcs,
+	}, nil
+}
+
+// GetProjectCompose 读取 Compose 项目的当前主 YAML 文件内容。
+func (a *Adapter) GetProjectCompose(ctx context.Context, project *platform.ProjectInfo) (string, error) {
+	_, b, err := a.readPrimaryComposeBytes(ctx, project)
 	if err != nil {
 		return "", err
 	}
 	return string(b), nil
 }
 
-// UpdateProjectCompose 备份原 Compose 文件、写入新版 YAML 并执行拉取与重建；失败时自动写回原文件并恢复原容器（附录 D.4）。
+// UpdateProjectCompose 备份原 Compose 文件、写入新版 YAML 并执行拉取与重建；若未确认移除旧服务则拒绝改写，失败时自动写回原文件并恢复原容器（附录 D.4）。
 func (a *Adapter) UpdateProjectCompose(
 	ctx context.Context,
 	appName string,
@@ -696,7 +972,23 @@ func (a *Adapter) UpdateProjectCompose(
 	newYAML string,
 	onProgress func(platform.PullProgress),
 ) error {
+	return a.UpdateProjectComposeWithOptions(ctx, appName, project, newYAML, platform.ComposeUpdateOptions{}, onProgress)
+}
+
+// UpdateProjectComposeWithOptions 支持在核验多文件有效服务集合后执行受控更新，并在成功后按用户确认清理被移除服务的关联镜像与文件/卷。
+func (a *Adapter) UpdateProjectComposeWithOptions(
+	ctx context.Context,
+	appName string,
+	project *platform.ProjectInfo,
+	newYAML string,
+	opts platform.ComposeUpdateOptions,
+	onProgress func(platform.PullProgress),
+) error {
 	if _, err := ValidateComposeYAML(newYAML); err != nil {
+		return err
+	}
+	newPrimarySvcs, err := ParseComposeServiceNames(newYAML)
+	if err != nil {
 		return err
 	}
 	execTr, ok := a.tr.(transport.ExecutableTransport)
@@ -706,15 +998,38 @@ func (a *Adapter) UpdateProjectCompose(
 			Message: i18n.EngineDetail(i18n.MsgDockerNoExec),
 		}
 	}
-	composePath := resolvePrimaryComposeFile(project)
-	if composePath == "" {
+	if project == nil {
 		return i18n.NewEngineError(i18n.MsgComposeNotEditable)
 	}
-
-	origBytes, err := a.tr.ReadFile(ctx, composePath)
+	composePath, origBytes, err := a.readPrimaryComposeBytes(ctx, project)
 	if err != nil {
 		return err
 	}
+
+	projName := project.Name
+	if projName == "" {
+		projName = appName
+	}
+
+	origPrimarySvcs, _ := ParseComposeServiceNames(string(origBytes))
+	extraSvcs := a.readExtraComposeServiceNames(ctx, project)
+	liveSvcs := a.listLiveComposeServiceNames(ctx, projName)
+	effectiveBefore := unionOrderedStrings(origPrimarySvcs, extraSvcs, liveSvcs)
+	effectiveAfter := unionOrderedStrings(newPrimarySvcs, extraSvcs)
+	removedSvcs := diffOrderedStrings(effectiveBefore, effectiveAfter)
+	addedSvcs := diffOrderedStrings(effectiveAfter, effectiveBefore)
+	if len(removedSvcs) > 0 && !opts.ConfirmRemoveServices {
+		return &platform.ComposeServicesRemovedError{
+			RemovedServices: removedSvcs,
+			AddedServices:   addedSvcs,
+		}
+	}
+
+	var removalPlan *inspectedDeletePlan
+	if len(removedSvcs) > 0 && (opts.DeleteRemovedImages || len(opts.DeleteRemovedFileIDs) > 0) {
+		removalPlan, _ = a.inspectComposeServiceRemovalPlan(ctx, appName, project, newYAML, removedSvcs)
+	}
+
 	origSum := sha256.Sum256(origBytes)
 	origSHA := hex.EncodeToString(origSum[:])
 
@@ -746,13 +1061,15 @@ func (a *Adapter) UpdateProjectCompose(
 	writtenSum := sha256.Sum256(newBytes)
 	writtenSHA := hex.EncodeToString(writtenSum[:])
 
-	projName := project.Name
-	if projName == "" {
-		projName = appName
-	}
 	cfgFiles := project.ConfigFiles
 	if len(cfgFiles) == 0 {
 		cfgFiles = []string{composePath}
+	}
+
+	removeOrphans := len(removedSvcs) > 0 && opts.ConfirmRemoveServices
+	cmdDesc := "Running docker compose pull & up -d ...\r\n"
+	if removeOrphans {
+		cmdDesc = "Running docker compose pull & up -d --remove-orphans ...\r\n"
 	}
 
 	parser := platform.NewComposeStreamParser()
@@ -760,12 +1077,17 @@ func (a *Adapter) UpdateProjectCompose(
 		Phase:      "pulling",
 		StatusText: "Pulling images and recreating Compose project",
 		Percent:    10,
-		LogChunk:   "Running docker compose pull & up -d --remove-orphans ...\r\n",
+		LogChunk:   cmdDesc,
 	})
 
 	var runErr error
-	if streamTr, ok := execTr.(transport.StreamingComposeTransport); ok {
-		_, runErr = streamTr.ExecComposeProjectStream(ctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, true, func(chunk string) {
+	if optsTr, ok := execTr.(transport.ComposeProjectOptionsTransport); ok {
+		_, runErr = optsTr.ExecComposeProjectWithOptions(ctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, true, removeOrphans, func(chunk string) {
+			emit(parser.Feed(chunk))
+		})
+		parser.Flush()
+	} else if streamTr, ok := execTr.(transport.StreamingComposeTransport); ok {
+		_, runErr = streamTr.ExecComposeProjectStream(ctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, removeOrphans, func(chunk string) {
 			emit(parser.Feed(chunk))
 		})
 		parser.Flush()
@@ -786,10 +1108,22 @@ func (a *Adapter) UpdateProjectCompose(
 				Message: i18n.EngineDetail(i18n.MsgDockerComposeRestoreErr, runErr.Error(), rErr.Error()),
 			}
 		}
-		_, _ = execTr.ExecComposeProject(rctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, false)
+		if _, rbErr := execTr.ExecComposeProject(rctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, false); rbErr != nil {
+			return &platform.UpdateError{
+				Code:    "recreate_failed",
+				Message: i18n.EngineDetail(i18n.MsgDockerComposeRebuildErr, runErr.Error(), rbErr.Error()),
+			}
+		}
 		return &platform.UpdateError{
 			Code:    "recreate_failed",
 			Message: i18n.EngineDetail(i18n.MsgDockerComposeRestored, runErr.Error()),
+		}
+	}
+
+	if removeOrphans {
+		a.ensureRemovedComposeServicesDeleted(ctx, execTr, projName, removedSvcs)
+		if removalPlan != nil {
+			a.executeComposeRemovalCleanup(ctx, execTr, removalPlan, opts.DeleteRemovedImages, opts.DeleteRemovedFileIDs)
 		}
 	}
 

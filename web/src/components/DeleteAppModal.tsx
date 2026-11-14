@@ -22,6 +22,13 @@ import {
 } from '../api/client'
 import { useI18n } from '../i18n'
 
+export interface ComposeRemovalContext {
+  removedServices: string[]
+  addedServices?: string[]
+  newContent: string
+  onConfirm: (opts: { deleteImages: boolean; fileIds: string[] }) => Promise<void>
+}
+
 export interface DeleteAppModalProps {
   open: boolean
   appKey: string
@@ -29,23 +36,27 @@ export interface DeleteAppModalProps {
   hostName: string
   source: 'standalone' | 'compose' | 'dsm_project' | 'vendor_managed'
   isProjectHint?: boolean
+  composeRemoval?: ComposeRemovalContext
   onClose: () => void
-  onDeleted: () => void
+  onDeleted?: () => void
 }
 
 export default function DeleteAppModal(props: DeleteAppModalProps) {
+  const modeKey = props.composeRemoval
+    ? `compose::${props.composeRemoval.removedServices.join(',')}`
+    : 'full'
   return (
     <Modal
       open={props.open}
       onCancel={props.onClose}
       footer={null}
-      width={520}
+      width={540}
       destroyOnHidden
       closable={false}
       title={null}
       styles={{ body: { paddingTop: 4 } }}
     >
-      {props.open && <DeleteAppModalBody key={props.appKey} {...props} />}
+      {props.open && <DeleteAppModalBody key={`${props.appKey}::${modeKey}`} {...props} />}
     </Modal>
   )
 }
@@ -56,12 +67,15 @@ function DeleteAppModalBody({
   hostName,
   source,
   isProjectHint,
+  composeRemoval,
   onClose,
   onDeleted,
 }: DeleteAppModalProps) {
   const { token } = theme.useToken()
-  const { t } = useI18n()
+  const { t, locale } = useI18n()
   const queryClient = useQueryClient()
+  const isComposeRemoval = Boolean(composeRemoval)
+  const listJoiner = locale === 'zh-CN' ? '、' : ', '
 
   const [loading, setLoading] = useState(true)
   const [loadErr, setLoadErr] = useState('')
@@ -76,8 +90,15 @@ function DeleteAppModalBody({
 
   useEffect(() => {
     let cancelled = false
-    api
-      .previewDeleteApp(appKey)
+    const reqPromise = composeRemoval
+      ? api.previewComposeRemoval({
+          appKey,
+          services: composeRemoval.removedServices,
+          newContent: composeRemoval.newContent,
+        })
+      : api.previewDeleteApp(appKey)
+
+    reqPromise
       .then((res) => {
         if (cancelled) return
         setPreview(res)
@@ -94,15 +115,26 @@ function DeleteAppModalBody({
     return () => {
       cancelled = true
     }
-  }, [appKey])
+  }, [appKey, composeRemoval])
 
-  const isProject =
-    preview?.isProject ??
-    Boolean(isProjectHint || source === 'compose' || source === 'dsm_project')
+  const isProject = isComposeRemoval
+    ? false
+    : (preview?.isProject ??
+      Boolean(isProjectHint || source === 'compose' || source === 'dsm_project'))
   const targetName = preview?.appName || appName
 
   const files = useMemo(() => preview?.files ?? [], [preview?.files])
   const cleanableFiles = useMemo(() => files.filter((f) => !f.protected), [files])
+  const hasReferencedFiles = useMemo(
+    () => files.some((f) => f.reason === 'referenced_by_containers' && (f.referencedBy?.length ?? 0) > 0),
+    [files],
+  )
+  const allFilesReferenced = useMemo(
+    () =>
+      files.length > 0 &&
+      files.every((f) => f.reason === 'referenced_by_containers' && (f.referencedBy?.length ?? 0) > 0),
+    [files],
+  )
   const images = useMemo(() => preview?.images ?? [], [preview?.images])
   const containers = useMemo(() => preview?.containers ?? [], [preview?.containers])
 
@@ -125,6 +157,13 @@ function DeleteAppModalBody({
   }
 
   const handleToggleSubFile = (fileId: string, checked: boolean) => {
+    if (!deleteFiles) {
+      if (checked) {
+        setSelectedFileIds([fileId])
+        setDeleteFiles(true)
+      }
+      return
+    }
     setSelectedFileIds((prev) => {
       const next = checked
         ? Array.from(new Set([...prev, fileId]))
@@ -141,6 +180,16 @@ function DeleteAppModalBody({
   const executeDelete = async () => {
     setSubmitting(true)
     try {
+      if (composeRemoval) {
+        await composeRemoval.onConfirm({
+          deleteImages,
+          fileIds: effectiveFileItems.map((f) => f.id),
+        })
+        setSecondConfirmOpen(false)
+        onClose()
+        return
+      }
+
       await api.deleteApp({
         appKey,
         deleteImages,
@@ -157,7 +206,7 @@ function DeleteAppModalBody({
       void queryClient.invalidateQueries({ queryKey: ['containers'] })
       void queryClient.invalidateQueries({ queryKey: ['containers-fast'] })
       void queryClient.invalidateQueries({ queryKey: ['containers-cached'] })
-      onDeleted()
+      onDeleted?.()
       onClose()
     } catch (e) {
       showApiError(e)
@@ -175,7 +224,7 @@ function DeleteAppModalBody({
   }
 
   const renderFileTag = (item: DeleteFileItem) => {
-    if (item.protected) {
+    if (item.protected && item.reason !== 'referenced_by_containers') {
       return (
         <Tag variant="filled" style={{ margin: 0, flexShrink: 0 }}>
           {t.deleteModal.kindProtected}
@@ -212,6 +261,8 @@ function DeleteAppModalBody({
 
   const renderFileReason = (item: DeleteFileItem): string => {
     switch (item.reason) {
+      case 'referenced_by_containers':
+        return ''
       case 'system_protected':
         return t.deleteModal.reasonProtected
       case 'external_bind':
@@ -226,10 +277,15 @@ function DeleteAppModalBody({
   }
 
   const summaryText = useMemo(() => {
-    const baseNoun = isProject ? t.deleteModal.nounProject : t.deleteModal.nounContainer
+    const baseNoun = isComposeRemoval
+      ? t.deleteModal.nounOldContainers
+      : isProject
+        ? t.deleteModal.nounProject
+        : t.deleteModal.nounContainer
     const hasImg = deleteImages && images.length > 0
     const fileCnt = effectiveFileItems.length
     if (!hasImg && fileCnt === 0) {
+      if (isComposeRemoval) return t.deleteModal.summaryOnlyRemovedContainers
       return isProject ? t.deleteModal.summaryOnlyProject : t.deleteModal.summaryOnlyContainer
     }
     const parts = [baseNoun]
@@ -238,15 +294,45 @@ function DeleteAppModalBody({
       parts.push(t.deleteModal.nounFilesCount.replace('{count}', String(fileCnt)))
     }
     return `${t.deleteModal.summaryPrefix}${parts.join(' + ')}`
-  }, [deleteImages, effectiveFileItems.length, images.length, isProject, t.deleteModal])
+  }, [deleteImages, effectiveFileItems.length, images.length, isComposeRemoval, isProject, t.deleteModal])
 
-  const subtitleText = isProject
-    ? containers.length > 0
-      ? t.deleteModal.subProject
+  const removedSvcList = composeRemoval?.removedServices ?? []
+  const addedSvcList = composeRemoval?.addedServices ?? []
+  const removedCount = removedSvcList.length
+
+  const headerTitleText = isComposeRemoval
+    ? removedCount === 1
+      ? t.deleteModal.titleContainer.replace('{name}', containers[0] || removedSvcList[0])
+      : t.deleteModal.titleComposeRemoveMulti
+          .replace('{name}', targetName)
+          .replace('{count}', String(removedCount))
+    : (isProject ? t.deleteModal.titleProject : t.deleteModal.titleContainer).replace(
+        '{name}',
+        targetName,
+      )
+
+  const subtitleText = isComposeRemoval
+    ? removedCount === 1
+      ? t.deleteModal.subComposeRemoveSingle
           .replace('{host}', hostName)
-          .replace('{count}', String(containers.length))
-      : t.deleteModal.subProjectGeneric.replace('{host}', hostName)
-    : t.deleteModal.subContainer.replace('{host}', hostName)
+          .replace('{service}', removedSvcList[0])
+      : t.deleteModal.subComposeRemoveMulti
+          .replace('{host}', hostName)
+          .replace('{services}', removedSvcList.join(listJoiner))
+          .replace('{count}', String(removedCount))
+    : isProject
+      ? containers.length > 0
+        ? t.deleteModal.subProject
+            .replace('{host}', hostName)
+            .replace('{count}', String(containers.length))
+        : t.deleteModal.subProjectGeneric.replace('{host}', hostName)
+      : t.deleteModal.subContainer.replace('{host}', hostName)
+
+  const showFileSubList =
+    files.length > 0 &&
+    (deleteFiles ||
+      cleanableFiles.length === 0 ||
+      (isComposeRemoval && hasReferencedFiles))
 
   return (
     <>
@@ -263,10 +349,7 @@ function DeleteAppModalBody({
         >
           <div style={{ minWidth: 0, flex: 1 }}>
             <Typography.Title level={5} style={{ margin: 0 }}>
-              {(isProject ? t.deleteModal.titleProject : t.deleteModal.titleContainer).replace(
-                '{name}',
-                targetName,
-              )}
+              {headerTitleText}
             </Typography.Title>
             <Typography.Text
               type="secondary"
@@ -275,10 +358,16 @@ function DeleteAppModalBody({
               {subtitleText}
             </Typography.Text>
           </div>
-          {isProject && (
+          {isComposeRemoval ? (
             <Tag variant="filled" color="warning" style={{ margin: 0, flexShrink: 0 }}>
-              {t.deleteModal.projectChip}
+              {t.deleteModal.composeRemoveChip.replace('{count}', String(removedCount))}
             </Tag>
+          ) : (
+            isProject && (
+              <Tag variant="filled" color="warning" style={{ margin: 0, flexShrink: 0 }}>
+                {t.deleteModal.projectChip}
+              </Tag>
+            )
           )}
         </Flex>
 
@@ -293,9 +382,9 @@ function DeleteAppModalBody({
           <Alert type="error" showIcon title={loadErr} />
         ) : (
           <Flex vertical gap={10}>
-            {/* 整项目包含的容器胶囊清单 */}
-            {isProject && containers.length > 0 && (
-              <Space size={[6, 6]} wrap>
+            {/* 容器胶囊清单（整项目删除或随新版配置移除旧容器时展示） */}
+            {(isProject || isComposeRemoval) && containers.length > 0 && (
+              <Space size={[6, 6]} wrap align="center">
                 {containers.map((c) => (
                   <Tag
                     key={c}
@@ -308,6 +397,11 @@ function DeleteAppModalBody({
                     {c}
                   </Tag>
                 ))}
+                {isComposeRemoval && addedSvcList.length > 0 && (
+                  <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                    {t.deleteModal.composeAddedNote.replace('{names}', addedSvcList.join(listJoiner))}
+                  </Typography.Text>
+                )}
               </Space>
             )}
 
@@ -415,10 +509,16 @@ function DeleteAppModalBody({
                     >
                       {t.deleteModal.optDeleteFiles}
                     </Typography.Text>
-                    {cleanableFiles.length > 0 && (
+                    {cleanableFiles.length > 0 ? (
                       <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                         {t.deleteModal.filesCount.replace('{count}', String(cleanableFiles.length))}
                       </Typography.Text>
+                    ) : (
+                      allFilesReferenced && (
+                        <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                          {t.deleteModal.filesAllReferencedBadge}
+                        </Typography.Text>
+                      )
                     )}
                   </Flex>
                   <Typography.Text
@@ -426,84 +526,104 @@ function DeleteAppModalBody({
                     style={{ fontSize: token.fontSizeSM, display: 'block', marginTop: 2 }}
                   >
                     {cleanableFiles.length > 0
-                      ? t.deleteModal.optDeleteFilesDesc
-                      : t.deleteModal.optDeleteFilesEmpty}
+                      ? isComposeRemoval
+                        ? t.deleteModal.optDeleteRemovedFilesDesc
+                        : t.deleteModal.optDeleteFilesDesc
+                      : allFilesReferenced
+                        ? t.deleteModal.optDeleteRemovedFilesAllRef
+                        : t.deleteModal.optDeleteFilesEmpty}
                   </Typography.Text>
                 </div>
               </Flex>
 
-              {/* 勾选后展开路径与数据卷子项（或仅含受保护路径时展示说明） */}
-              {(deleteFiles || (cleanableFiles.length === 0 && files.length > 0)) &&
-                files.length > 0 && (
-                  <Flex
-                    vertical
-                    gap={6}
-                    style={{
-                      marginTop: 10,
-                      paddingTop: 10,
-                      paddingLeft: 26,
-                      borderTop: `1px solid ${token.colorSplit}`,
-                      maxHeight: 190,
-                      overflowY: 'auto',
-                    }}
-                  >
-                    {files.map((item) => {
-                      const subChecked = !item.protected && selectedFileIds.includes(item.id)
-                      const note = renderFileReason(item)
-                      return (
-                        <Flex
-                          key={item.id}
-                          align="flex-start"
-                          gap={8}
-                          onClick={() => {
-                            if (!item.protected) handleToggleSubFile(item.id, !subChecked)
-                          }}
-                          style={{
-                            padding: '6px 8px',
-                            borderRadius: token.borderRadiusSM,
-                            background: token.colorFillAlter,
-                            cursor: item.protected ? 'not-allowed' : 'pointer',
-                            opacity: item.protected ? 0.65 : 1,
-                          }}
-                        >
-                          <Checkbox
-                            checked={subChecked}
-                            disabled={item.protected}
-                            onClick={(e) => e.stopPropagation()}
-                            onChange={(e) => handleToggleSubFile(item.id, e.target.checked)}
-                            style={{ marginTop: 2 }}
-                          />
-                          <div style={{ flex: 1, minWidth: 0 }}>
-                            <Flex align="center" gap={6} wrap="wrap">
+              {/* 展开路径与数据卷子项（含被其他容器引用的禁用项及路径后括号具体引用标注） */}
+              {showFileSubList && (
+                <Flex
+                  vertical
+                  gap={6}
+                  style={{
+                    marginTop: 10,
+                    paddingTop: 10,
+                    paddingLeft: 26,
+                    borderTop: `1px solid ${token.colorSplit}`,
+                    maxHeight: 190,
+                    overflowY: 'auto',
+                  }}
+                >
+                  {files.map((item) => {
+                    const subChecked =
+                      deleteFiles && !item.protected && selectedFileIds.includes(item.id)
+                    const note = renderFileReason(item)
+                    const refText =
+                      item.reason === 'referenced_by_containers' &&
+                      item.referencedBy &&
+                      item.referencedBy.length > 0
+                        ? t.deleteModal.referencedInlineSuffix.replace(
+                            '{names}',
+                            item.referencedBy.join(listJoiner),
+                          )
+                        : ''
+                    return (
+                      <Flex
+                        key={item.id}
+                        align="flex-start"
+                        gap={8}
+                        onClick={() => {
+                          if (!item.protected) handleToggleSubFile(item.id, !subChecked)
+                        }}
+                        style={{
+                          padding: '6px 8px',
+                          borderRadius: token.borderRadiusSM,
+                          background: token.colorFillAlter,
+                          cursor: item.protected ? 'not-allowed' : 'pointer',
+                          opacity: item.protected ? 0.65 : 1,
+                        }}
+                      >
+                        <Checkbox
+                          checked={subChecked}
+                          disabled={item.protected}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={(e) => handleToggleSubFile(item.id, e.target.checked)}
+                          style={{ marginTop: 2 }}
+                        />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <Flex align="flex-start" gap={6}>
+                            <div style={{ flexShrink: 0, paddingTop: 1 }}>
                               {renderFileTag(item)}
-                              <Typography.Text
-                                style={{
-                                  fontFamily: token.fontFamilyCode,
-                                  fontSize: token.fontSizeSM,
-                                  wordBreak: 'break-all',
-                                }}
-                              >
-                                {item.path}
-                              </Typography.Text>
-                            </Flex>
-                            {note && (
-                              <Typography.Text
-                                type="secondary"
-                                style={{
-                                  fontSize: token.fontSizeSM,
-                                  display: 'block',
-                                  marginTop: 2,
-                                }}
-                              >
-                                {note}
-                              </Typography.Text>
-                            )}
-                          </div>
-                        </Flex>
-                      )
-                    })}
-                  </Flex>
-                )}
+                            </div>
+                            <Typography.Text
+                              style={{
+                                flex: 1,
+                                minWidth: 0,
+                                fontSize: token.fontSizeSM,
+                                wordBreak: 'break-all',
+                                lineHeight: 1.5,
+                              }}
+                            >
+                              <span style={{ fontFamily: token.fontFamilyCode }}>{item.path}</span>
+                              {refText && (
+                                <span style={{ color: token.colorWarning }}>{refText}</span>
+                              )}
+                            </Typography.Text>
+                          </Flex>
+                          {note && (
+                            <Typography.Text
+                              type="secondary"
+                              style={{
+                                fontSize: token.fontSizeSM,
+                                display: 'block',
+                                marginTop: 2,
+                              }}
+                            >
+                              {note}
+                            </Typography.Text>
+                          )}
+                        </div>
+                      </Flex>
+                    )
+                  })}
+                </Flex>
+              )}
             </div>
           </Flex>
         )}
@@ -524,7 +644,7 @@ function DeleteAppModalBody({
           </Typography.Text>
           <Space size={8}>
             <Button onClick={onClose} disabled={submitting}>
-              {t.deleteModal.cancelBtn}
+              {isComposeRemoval ? t.deleteModal.backToEditBtn : t.deleteModal.cancelBtn}
             </Button>
             <Button
               type="primary"
@@ -533,7 +653,11 @@ function DeleteAppModalBody({
               disabled={loading || Boolean(loadErr)}
               onClick={handlePrimaryClick}
             >
-              {isProject ? t.deleteModal.confirmProjectBtn : t.deleteModal.confirmContainerBtn}
+              {isComposeRemoval
+                ? t.deleteModal.confirmRemoveAndUpdateBtn
+                : isProject
+                  ? t.deleteModal.confirmProjectBtn
+                  : t.deleteModal.confirmContainerBtn}
             </Button>
           </Space>
         </Flex>
@@ -562,7 +686,9 @@ function DeleteAppModalBody({
                 type="secondary"
                 style={{ fontSize: token.fontSizeSM, display: 'block', marginTop: 6 }}
               >
-                {t.deleteModal.secondConfirmDesc}
+                {isComposeRemoval
+                  ? t.deleteModal.secondConfirmComposeDesc
+                  : t.deleteModal.secondConfirmDesc}
               </Typography.Text>
             </div>
           </Flex>
@@ -600,7 +726,7 @@ function DeleteAppModalBody({
               {t.deleteModal.secondConfirmBack}
             </Button>
             <Button type="primary" danger loading={submitting} onClick={() => void executeDelete()}>
-              {t.deleteModal.secondConfirmOk}
+              {isComposeRemoval ? t.deleteModal.secondConfirmComposeOk : t.deleteModal.secondConfirmOk}
             </Button>
           </Flex>
         </Flex>
