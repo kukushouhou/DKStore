@@ -185,6 +185,13 @@ func TestAPIEndpoints_IconsTagsIgnoreAndCustomUpdateValidation(t *testing.T) {
 		t.Fatalf("expected HTTP 200 ticket on trusted gateway context, got %d %s", recTrustedTicket.Code, recTrustedTicket.Body.String())
 	}
 
+	// 9. GET /api/v1/hosts/metrics?cached=1 returns persisted SQLite host metrics snapshot
+	_, _ = st.DB.ExecContext(ctx, `INSERT INTO host_metrics_snapshot(host_id, metrics_json, updated_at) VALUES ('h1', '{"hostId":"h1","online":true,"cpuPercent":21.5,"cpuCores":4,"memUsedBytes":4294967296,"memTotalBytes":17179869184,"disks":[{"mount":"/volume1","totalBytes":1099511627776,"freeBytes":549755813888,"usedBytes":549755813888}]}', ?)`, time.Now().Unix())
+	recMetricsCached := doReq(http.MethodGet, "/api/v1/hosts/metrics?cached=1", "")
+	if recMetricsCached.Code != http.StatusOK || !strings.Contains(recMetricsCached.Body.String(), `"cpuPercent":21.5`) || !strings.Contains(recMetricsCached.Body.String(), `"/volume1"`) {
+		t.Fatalf("expected cached host metrics snapshot, got %d %s", recMetricsCached.Code, recMetricsCached.Body.String())
+	}
+
 	// Wait briefly for background goroutines launched against mock local socket to settle before TempDir cleanup
 	time.Sleep(150 * time.Millisecond)
 }

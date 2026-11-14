@@ -116,6 +116,27 @@ func (a *Adapter) Close() error {
 	return nil
 }
 
+// CollectHostMetrics 采集群晖宿主机真实 CPU、内存与存储空间容量（兼容 SSH/Local 与免 SSH 的 DSM WebAPI 模式）。
+func (a *Adapter) CollectHostMetrics(ctx context.Context) (*platform.HostRuntimeStat, error) {
+	if a.dock != nil {
+		st, err := a.dock.CollectHostMetrics(ctx)
+		if err != nil {
+			return nil, err
+		}
+		st.HostID = a.hostID
+		return st, nil
+	}
+	if a.dsmCli == nil {
+		return nil, i18n.NewHostError("dsm.not_configured", nil)
+	}
+	st, err := a.dsmCli.GetHostMetrics(ctx)
+	if err != nil {
+		return nil, err
+	}
+	st.HostID = a.hostID
+	return st, nil
+}
+
 // HasLocalImage 检查群晖本地 Docker 是否仍保留指定镜像。
 func (a *Adapter) HasLocalImage(ctx context.Context, imageIDOrRef string) bool {
 	if a.dock != nil {

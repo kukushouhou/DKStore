@@ -163,6 +163,26 @@ export interface HostInfo {
   platformVersion?: string
 }
 
+export interface DiskStat {
+  mount: string
+  label?: string
+  filesystem?: string
+  totalBytes: number
+  freeBytes: number
+  usedBytes: number
+}
+
+export interface HostRuntimeStat {
+  hostId: string
+  online: boolean
+  cpuPercent: number
+  cpuCores?: number
+  memUsedBytes: number
+  memTotalBytes: number
+  disks?: DiskStat[]
+  sampledAt?: number
+}
+
 export interface HostItem {
   id: string
   name: string
@@ -623,6 +643,15 @@ export const api = {
     }),
 
   listHosts: () => request<HostsListResponse>('/hosts'),
+  listHostMetrics: (opts?: { hostId?: string; cached?: boolean }) => {
+    const params = new URLSearchParams()
+    if (opts?.hostId) params.set('hostId', opts.hostId)
+    if (opts?.cached) params.set('cached', '1')
+    const qs = params.toString()
+    return request<{ items: HostRuntimeStat[]; cached?: boolean }>(
+      qs ? `/hosts/metrics?${qs}` : '/hosts/metrics',
+    )
+  },
   createHost: (input: HostInput) =>
     request<HostItem>('/hosts', { method: 'POST', body: JSON.stringify(input) }),
   updateHost: (id: string, input: HostInput) =>

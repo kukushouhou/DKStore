@@ -76,6 +76,20 @@ type CleanupTransport interface {
 	RemoveHostPaths(ctx context.Context, paths []string) error
 }
 
+// HostMetricsRaw 保存单次传输层读取的宿主机原始 Linux 系统资源输出（减少远程 SSH 往返）。
+type HostMetricsRaw struct {
+	ProcStat1   []byte
+	ProcStat2   []byte
+	ProcMeminfo []byte
+	DiskDF      []byte
+}
+
+// HostMetricsTransport 扩展 Transport，提供宿主机 CPU、内存与挂载磁盘原始数据的只读采集。
+type HostMetricsTransport interface {
+	Transport
+	ReadHostMetricsRaw(ctx context.Context, needCPUDelta bool) (*HostMetricsRaw, error)
+}
+
 const maxFileSize = 2 << 20 // 2 MiB
 
 // newReadOnlyHTTPClient 使用自定义 dialer 构建默认 30s 超时的 Docker HTTP 客户端。
@@ -335,6 +349,46 @@ func (l *LocalTransport) Close() error {
 		l.streamClient.CloseIdleConnections()
 	}
 	return nil
+}
+
+// ReadHostMetricsRaw 在本机只读采集 /proc/stat、/proc/meminfo 与 df -kP 输出。
+func (l *LocalTransport) ReadHostMetricsRaw(ctx context.Context, needCPUDelta bool) (*HostMetricsRaw, error) {
+	stat1, _ := l.ReadFile(ctx, "/proc/stat")
+	var stat2 []byte
+	if needCPUDelta && len(stat1) > 0 {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(180 * time.Millisecond):
+		}
+		stat2, _ = l.ReadFile(ctx, "/proc/stat")
+	}
+	meminfo, _ := l.ReadFile(ctx, "/proc/meminfo")
+
+	var dfOut []byte
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	env := append(os.Environ(), "LC_ALL=C", "LANG=C")
+	cmd := exec.CommandContext(cctx, "df", "-kP")
+	cmd.Env = env
+	if out, err := cmd.Output(); err == nil && len(out) > 0 {
+		dfOut = out
+	} else {
+		cmd2 := exec.CommandContext(cctx, "df", "-k")
+		cmd2.Env = env
+		if out2, err2 := cmd2.Output(); err2 == nil {
+			dfOut = out2
+		}
+	}
+	if len(stat1) == 0 && len(meminfo) == 0 && len(dfOut) == 0 {
+		return nil, errors.New("local host metrics unavailable")
+	}
+	return &HostMetricsRaw{
+		ProcStat1:   stat1,
+		ProcStat2:   stat2,
+		ProcMeminfo: meminfo,
+		DiskDF:      dfOut,
+	}, nil
 }
 
 // SSHConfig 是建立 SSH 连接所需的配置。
@@ -792,6 +846,53 @@ func (t *SSHTransport) ExecSynoWebAPIProjectList(ctx context.Context) ([]byte, e
 	}
 	const cmd = "/usr/syno/bin/synowebapi --exec api=SYNO.Docker.Project version=1 method=list"
 	return t.runReadOnlyCmd(ctx, cmd, 0)
+}
+
+const (
+	hostMetricsSepStat2 = "__DKSTORE_STAT2__"
+	hostMetricsSepMem   = "__DKSTORE_MEM__"
+	hostMetricsSepDF    = "__DKSTORE_DF__"
+)
+
+// ReadHostMetricsRaw 通过单次 SSH 只读会话合并读取远端 /proc/stat、/proc/meminfo 与 df -kP。
+func (t *SSHTransport) ReadHostMetricsRaw(ctx context.Context, needCPUDelta bool) (*HostMetricsRaw, error) {
+	if err := t.ensureClient(ctx); err != nil {
+		return nil, err
+	}
+	var cmd string
+	if needCPUDelta {
+		cmd = "sh -c 'cat /proc/stat 2>/dev/null || true; (sleep 0.2 2>/dev/null || sleep 1); printf \"\\n" + hostMetricsSepStat2 + "\\n\"; cat /proc/stat 2>/dev/null || true; printf \"\\n" + hostMetricsSepMem + "\\n\"; cat /proc/meminfo 2>/dev/null || true; printf \"\\n" + hostMetricsSepDF + "\\n\"; (LC_ALL=C df -kP 2>/dev/null || LC_ALL=C df -k 2>/dev/null || true)'"
+	} else {
+		cmd = "sh -c 'cat /proc/stat 2>/dev/null || true; printf \"\\n" + hostMetricsSepMem + "\\n\"; cat /proc/meminfo 2>/dev/null || true; printf \"\\n" + hostMetricsSepDF + "\\n\"; (LC_ALL=C df -kP 2>/dev/null || LC_ALL=C df -k 2>/dev/null || true)'"
+	}
+	raw, err := t.runReadOnlyCmd(ctx, cmd, 512<<10)
+	if err != nil {
+		return nil, err
+	}
+	return parseCombinedHostMetricsRaw(raw), nil
+}
+
+func parseCombinedHostMetricsRaw(raw []byte) *HostMetricsRaw {
+	s := string(raw)
+	out := &HostMetricsRaw{}
+	beforeMem, afterMem, okMem := strings.Cut(s, hostMetricsSepMem)
+	if !okMem {
+		out.ProcStat1 = []byte(strings.TrimSpace(s))
+		return out
+	}
+	if stat1, stat2, okStat2 := strings.Cut(beforeMem, hostMetricsSepStat2); okStat2 {
+		out.ProcStat1 = []byte(strings.TrimSpace(stat1))
+		out.ProcStat2 = []byte(strings.TrimSpace(stat2))
+	} else {
+		out.ProcStat1 = []byte(strings.TrimSpace(beforeMem))
+	}
+	if memPart, dfPart, okDF := strings.Cut(afterMem, hostMetricsSepDF); okDF {
+		out.ProcMeminfo = []byte(strings.TrimSpace(memPart))
+		out.DiskDF = []byte(strings.TrimSpace(dfPart))
+	} else {
+		out.ProcMeminfo = []byte(strings.TrimSpace(afterMem))
+	}
+	return out
 }
 
 // ExecSynoWebAPIProjectDelete 在群晖 SSH 模式下同步清理并删除 Container Manager 原生项目注册记录。

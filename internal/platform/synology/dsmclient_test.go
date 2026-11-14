@@ -792,3 +792,74 @@ func TestDSMProjectUpdate_GHCRDirectBuildStreamWithLayerStreaming(t *testing.T) 
 		t.Fatalf("expected live layer progress (%v) and raw ANSI LogChunk (%v)", sawLayer, sawANSIChunk)
 	}
 }
+
+func TestDSMGetHostMetrics_UtilizationAndVolumes(t *testing.T) {
+	f := &fakeDSM{}
+	f.handler = func(api, method string, form map[string]string, sid string) (any, int) {
+		switch {
+		case api == "SYNO.Core.System.Utilization" && method == "get":
+			return map[string]any{
+				"cpu": map[string]any{
+					"user_load":   12,
+					"system_load": 5,
+					"other_load":  1,
+				},
+				"memory": map[string]any{
+					"memory_size": 16777216,
+					"total_real":  16384000,
+					"avail_real":  4000000,
+					"buffer":      384000,
+					"cached":      6000000,
+					"real_usage":  37,
+				},
+			}, 0
+		case api == "SYNO.Core.System" && method == "info" && form["type"] == "storage":
+			return map[string]any{
+				"vol_info": []map[string]any{
+					{
+						"name":       "volume_2",
+						"desc":       "Media",
+						"total_size": "8000000000000",
+						"used_size":  "2000000000000",
+					},
+					{
+						"name":       "volume_1",
+						"desc":       "SSD",
+						"total_size": "1000000000000",
+						"used_size":  "400000000000",
+					},
+				},
+			}, 0
+		case api == "SYNO.Core.System" && method == "info":
+			return map[string]any{
+				"cpu_cores": "4 Cores",
+			}, 0
+		}
+		return map[string]any{}, 0
+	}
+
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	ad := New("h-syno", nil, DSMConfig{URL: srv.URL, Username: "admin", Secret: "x"})
+	defer ad.Close()
+
+	st, err := ad.CollectHostMetrics(context.Background())
+	if err != nil {
+		t.Fatalf("CollectHostMetrics failed: %v", err)
+	}
+	if !st.Online || st.HostID != "h-syno" {
+		t.Fatalf("unexpected online/hostId: %+v", st)
+	}
+	if st.CPUPercent != 18 || st.CPUCores != 4 {
+		t.Fatalf("cpu = (%v, %d), want (18, 4)", st.CPUPercent, st.CPUCores)
+	}
+	if st.MemTotalBytes != 16384000*1024 || st.MemUsedBytes != 6000000*1024 {
+		t.Fatalf("mem = (%d, %d), want (%d, %d)", st.MemUsedBytes, st.MemTotalBytes, 6000000*1024, 16384000*1024)
+	}
+	if len(st.Disks) != 2 || st.Disks[0].Mount != "/volume1" || st.Disks[1].Mount != "/volume2" {
+		t.Fatalf("disks = %+v, want [/volume1, /volume2]", st.Disks)
+	}
+	if st.Disks[0].FreeBytes != 600000000000 || st.Disks[1].FreeBytes != 6000000000000 {
+		t.Fatalf("unexpected free bytes: %+v", st.Disks)
+	}
+}

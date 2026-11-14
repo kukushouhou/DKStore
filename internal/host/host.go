@@ -197,6 +197,7 @@ func (r *Registry) RefreshRuntimeAsync(hostID string) {
 		cCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
 		_, _ = r.ListRuntimeContainers(cCtx, key, true)
+		_, _ = r.ListHostMetrics(cCtx, key)
 	}()
 }
 
@@ -745,6 +746,177 @@ func (r *Registry) ListRuntimeContainers(ctx context.Context, hostIDFilter strin
 	for _, apps := range perHost {
 		out = append(out, apps...)
 	}
+	return out, nil
+}
+
+func (r *Registry) querySingleHostMetrics(ctx context.Context, h Host) (*platform.HostRuntimeStat, error) {
+	runOnce := func(ad platform.Adapter) (*platform.HostRuntimeStat, error) {
+		hmAd, ok := ad.(platform.HostMetricsAdapter)
+		if !ok {
+			return nil, errors.New("host metrics unsupported")
+		}
+		return hmAd.CollectHostMetrics(ctx)
+	}
+
+	ad, wasWarm, release, err := r.acquireRuntimeAdapter(ctx, h.ID)
+	if err != nil {
+		return nil, err
+	}
+	st, err := runOnce(ad)
+	if err != nil {
+		release(true)
+		if wasWarm && ctx.Err() == nil {
+			ad2, _, release2, err2 := r.acquireRuntimeAdapter(ctx, h.ID)
+			if err2 != nil {
+				return nil, err2
+			}
+			st, err = runOnce(ad2)
+			release2(err != nil)
+		}
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		release(false)
+	}
+	if st == nil {
+		return nil, errors.New("empty host metrics")
+	}
+	st.HostID = h.ID
+	st.Online = true
+	if st.SampledAt <= 0 {
+		st.SampledAt = time.Now().Unix()
+	}
+
+	now := time.Now().Unix()
+	if h.Status != "online" || now-h.LastSeenAt >= 30 {
+		wCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		_, _ = r.st.DB.ExecContext(wCtx, `UPDATE host SET status='online', last_seen_at=? WHERE id=?`, now, h.ID)
+		cancel()
+	}
+	r.saveHostMetricsSnapshot(ctx, h.ID, st)
+	return st, nil
+}
+
+func (r *Registry) saveHostMetricsSnapshot(ctx context.Context, hostID string, st *platform.HostRuntimeStat) {
+	if r.st == nil || r.st.DB == nil || st == nil {
+		return
+	}
+	b, err := json.Marshal(st)
+	if err != nil {
+		return
+	}
+	now := time.Now().Unix()
+	wCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	defer cancel()
+	_, _ = r.st.DB.ExecContext(wCtx, `
+		INSERT INTO host_metrics_snapshot(host_id, metrics_json, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(host_id) DO UPDATE SET
+			metrics_json=excluded.metrics_json,
+			updated_at=excluded.updated_at`,
+		hostID, string(b), now,
+	)
+}
+
+// ListCachedHostMetrics 纯本地读取 SQLite 已收录的设备资源快照（零网络等待，毫秒级返回）。
+func (r *Registry) ListCachedHostMetrics(ctx context.Context, hostIDFilter string) ([]platform.HostRuntimeStat, error) {
+	hosts, err := r.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filter := strings.TrimSpace(hostIDFilter)
+	var targets []Host
+	for _, h := range hosts {
+		if filter != "" && h.ID != filter {
+			continue
+		}
+		targets = append(targets, h)
+	}
+	if len(targets) == 0 {
+		return []platform.HostRuntimeStat{}, nil
+	}
+
+	type snapRow struct {
+		raw       string
+		updatedAt int64
+	}
+	snaps := make(map[string]snapRow, len(targets))
+	sRows, err := r.st.DB.QueryContext(ctx, `SELECT host_id, metrics_json, updated_at FROM host_metrics_snapshot`)
+	if err == nil {
+		for sRows.Next() {
+			var hid, raw string
+			var uat int64
+			if sRows.Scan(&hid, &raw, &uat) == nil {
+				snaps[hid] = snapRow{raw: raw, updatedAt: uat}
+			}
+		}
+		sRows.Close()
+	}
+
+	now := time.Now().Unix()
+	out := make([]platform.HostRuntimeStat, 0, len(targets))
+	for _, h := range targets {
+		if h.Status == "offline" {
+			out = append(out, platform.HostRuntimeStat{HostID: h.ID, Online: false})
+			continue
+		}
+		if snap, ok := snaps[h.ID]; ok && now-snap.updatedAt <= 60 {
+			var st platform.HostRuntimeStat
+			if json.Unmarshal([]byte(snap.raw), &st) == nil && st.Online {
+				st.HostID = h.ID
+				out = append(out, st)
+				continue
+			}
+		}
+		out = append(out, platform.HostRuntimeStat{HostID: h.ID, Online: false})
+	}
+	return out, nil
+}
+
+// ListHostMetrics 并发采集全部（或指定）设备的实时 CPU、内存与存储空间剩余情况。
+func (r *Registry) ListHostMetrics(ctx context.Context, hostIDFilter string) ([]platform.HostRuntimeStat, error) {
+	hosts, err := r.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filter := strings.TrimSpace(hostIDFilter)
+	var targets []Host
+	for _, h := range hosts {
+		if filter != "" && h.ID != filter {
+			continue
+		}
+		targets = append(targets, h)
+	}
+	if len(targets) == 0 {
+		return []platform.HostRuntimeStat{}, nil
+	}
+
+	out := make([]platform.HostRuntimeStat, len(targets))
+	var wg sync.WaitGroup
+	for i, h := range targets {
+		wg.Add(1)
+		go func(idx int, item Host) {
+			defer wg.Done()
+			hCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			st, qErr := r.querySingleHostMetrics(hCtx, item)
+			if qErr != nil {
+				if ctx.Err() == nil {
+					wCtx, wCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+					r.markOffline(wCtx, item.ID)
+					wCancel()
+				}
+				out[idx] = platform.HostRuntimeStat{
+					HostID: item.ID,
+					Online: false,
+				}
+				return
+			}
+			out[idx] = *st
+		}(i, h)
+	}
+	wg.Wait()
 	return out, nil
 }
 

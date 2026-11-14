@@ -15,7 +15,9 @@ import {
   Row,
   Segmented,
   Space,
+  Tag,
   Timeline,
+  Tooltip,
   Typography,
   message,
   theme,
@@ -32,6 +34,7 @@ import {
   HddOutlined,
   KeyOutlined,
   PlusOutlined,
+  ReloadOutlined,
   SyncOutlined,
   WarningOutlined,
   WifiOutlined,
@@ -42,9 +45,11 @@ import {
   api,
   ApiError,
   showApiError,
+  type DiskStat,
   type HostInfo,
   type HostInput,
   type HostItem,
+  type HostRuntimeStat,
   type HostTestResult,
 } from '../api/client'
 import { useI18n } from '../i18n'
@@ -98,6 +103,20 @@ export default function HostsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const authQuery = useQuery({ queryKey: ['authStatus'], queryFn: api.authStatus })
   const hostsQuery = useQuery({ queryKey: ['hosts', locale], queryFn: api.listHosts })
+
+  // 本地已收录快照（纯 SQLite 读取，首次进入毫秒级直出）
+  const cachedMetricsQuery = useQuery({
+    queryKey: ['host-metrics-cached'],
+    queryFn: () => api.listHostMetrics({ cached: true }),
+    staleTime: 30000,
+  })
+
+  // 实时设备资源轮询（对齐容器列表页，每 10 秒刷新并回写快照）
+  const liveMetricsQuery = useQuery({
+    queryKey: ['host-metrics'],
+    queryFn: () => api.listHostMetrics(),
+    refetchInterval: 10000,
+  })
 
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<HostItem | null>(null)
@@ -345,6 +364,8 @@ export default function HostsPage() {
       setModalOpen(false)
       qc.invalidateQueries({ queryKey: ['authStatus'] })
       qc.invalidateQueries({ queryKey: ['hosts'] })
+      qc.invalidateQueries({ queryKey: ['host-metrics'] })
+      qc.invalidateQueries({ queryKey: ['host-metrics-cached'] })
       qc.invalidateQueries({ queryKey: ['overview'] })
       qc.invalidateQueries({ queryKey: ['containers'] })
     } catch (e) {
@@ -372,6 +393,81 @@ export default function HostsPage() {
   }
 
   const hosts = hostsQuery.data?.items ?? []
+
+  const { metricsByHostId, isShowingCached } = useMemo(() => {
+    const liveItems = liveMetricsQuery.data?.items
+    const cachedItems = cachedMetricsQuery.data?.items
+    const map = new Map<string, HostRuntimeStat>()
+    if (liveItems) {
+      for (const m of liveItems) map.set(m.hostId, m)
+      return { metricsByHostId: map, isShowingCached: false }
+    }
+    if (cachedItems && cachedItems.some((m) => m.online)) {
+      for (const m of cachedItems) map.set(m.hostId, m)
+      return { metricsByHostId: map, isShowingCached: true }
+    }
+    return { metricsByHostId: map, isShowingCached: false }
+  }, [cachedMetricsQuery.data?.items, liveMetricsQuery.data?.items])
+
+  const liveOnlineByHostId = useMemo(() => {
+    const map = new Map<string, boolean>()
+    for (const m of liveMetricsQuery.data?.items ?? []) {
+      map.set(m.hostId, m.online)
+    }
+    return map
+  }, [liveMetricsQuery.data?.items])
+
+  const handleRefresh = () => {
+    void hostsQuery.refetch()
+    void liveMetricsQuery.refetch()
+  }
+
+  const isRefreshing = hostsQuery.isFetching || liveMetricsQuery.isFetching
+
+  const formatCap = (bytes: number): string => {
+    if (!bytes || bytes <= 0) return '0 GB'
+    const tb = bytes / 1024 ** 4
+    if (tb >= 1) return `${tb.toFixed(2)} TB`
+    const gb = bytes / 1024 ** 3
+    if (gb >= 100) return `${gb.toFixed(0)} GB`
+    if (gb >= 1) return `${gb.toFixed(1)} GB`
+    const mb = bytes / (1024 * 1024)
+    return `${Math.max(1, Math.round(mb))} MB`
+  }
+
+  const formatMemCompact = (usedBytes: number, totalBytes: number): string => {
+    if (!totalBytes || totalBytes <= 0) return '—'
+    const gbTotal = totalBytes / 1024 ** 3
+    if (gbTotal >= 1) {
+      const usedStr = (usedBytes / 1024 ** 3).toFixed(1)
+      const totalStr = gbTotal >= 10 ? gbTotal.toFixed(0) : gbTotal.toFixed(1).replace(/\.0$/, '')
+      return `${usedStr} / ${totalStr} GB`
+    }
+    const mbUsed = Math.round(usedBytes / (1024 * 1024))
+    const mbTotal = Math.round(totalBytes / (1024 * 1024))
+    return `${mbUsed} / ${mbTotal} MB`
+  }
+
+  const formatDiskTitle = (d: DiskStat): string => {
+    const m = d.mount.match(/^\/(?:volume|vol)(\d+)$/i)
+    if (m) {
+      const volTitle = t.hosts.metricVolumeLabel.replace('{n}', m[1])
+      return d.label ? `${volTitle} (${d.mount} · ${d.label})` : `${volTitle} (${d.mount})`
+    }
+    return d.label ? `${d.label} (${d.mount})` : d.mount
+  }
+
+  const getMetricColor = (pct: number) => {
+    if (pct >= 90) return token.colorError
+    if (pct >= 75) return token.colorWarning
+    return token.colorPrimary
+  }
+
+  const getMetricValueColor = (pct: number) => {
+    if (pct >= 90) return token.colorError
+    if (pct >= 75) return token.colorWarning
+    return token.colorText
+  }
   const transportVal = Form.useWatch('transport', form)
   const authVal = Form.useWatch('sshAuth', form)
   const currentSpec = PLATFORM_SPECS.find((p) => p.id === platformId) ?? PLATFORM_SPECS[0]
@@ -506,12 +602,26 @@ export default function HostsPage() {
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       <Flex justify="space-between" align="center" wrap gap={12}>
-        <Typography.Title level={3} style={{ margin: 0 }}>
-          {t.hosts.title}
-        </Typography.Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={openAdd}>
-          {t.hosts.addHost}
-        </Button>
+        <Space size={10} align="center" wrap>
+          <Typography.Title level={3} style={{ margin: 0 }}>
+            {t.hosts.title}
+          </Typography.Title>
+          {hosts.length > 0 && isShowingCached && isRefreshing && (
+            <Tag icon={<SyncOutlined spin />} color="processing" style={{ margin: 0 }}>
+              {t.hosts.syncingLiveBadge}
+            </Tag>
+          )}
+        </Space>
+        <Space wrap>
+          {hosts.length > 0 && (
+            <Button icon={<ReloadOutlined spin={isRefreshing} />} onClick={handleRefresh}>
+              {t.hosts.refresh}
+            </Button>
+          )}
+          <Button type="primary" icon={<PlusOutlined />} onClick={openAdd}>
+            {t.hosts.addHost}
+          </Button>
+        </Space>
       </Flex>
 
       {hosts.length === 0 ? (
@@ -522,15 +632,18 @@ export default function HostsPage() {
         <Row gutter={[16, 16]}>
           {hosts.map((h) => {
             const cardMeta = getHostCardMeta(h)
+            const liveOnline = liveOnlineByHostId.get(h.id)
+            const effectiveStatus =
+              liveOnline !== undefined ? (liveOnline ? 'online' : 'offline') : h.status
             const statusStyle =
-              h.status === 'online'
+              effectiveStatus === 'online'
                 ? {
                     fg: token.colorSuccess,
                     bg: token.colorSuccessBg,
                     dot: token.colorSuccess,
                     label: t.hosts.online,
                   }
-                : h.status === 'offline'
+                : effectiveStatus === 'offline'
                   ? {
                       fg: token.colorError,
                       bg: token.colorErrorBg,
@@ -545,6 +658,23 @@ export default function HostsPage() {
                     }
             const cleanDsmAddr = (h.dsmUrl || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '')
             const sysEnvText = formatSystemEnv(h.info)
+            const metric = metricsByHostId.get(h.id)
+            const hasLiveMetrics = Boolean(
+              effectiveStatus === 'online' && metric && metric.online && metric.memTotalBytes > 0,
+            )
+            const cpuPct = hasLiveMetrics
+              ? Math.max(0, Math.min(100, metric!.cpuPercent ?? 0))
+              : 0
+            const memPct =
+              hasLiveMetrics && metric!.memTotalBytes > 0
+                ? Math.max(
+                    0,
+                    Math.min(100, Math.round((metric!.memUsedBytes / metric!.memTotalBytes) * 100)),
+                  )
+                : 0
+            const disks = hasLiveMetrics ? (metric!.disks ?? []) : []
+            const totalDiskBytes = disks.reduce((s, d) => s + d.totalBytes, 0)
+            const totalFreeBytes = disks.reduce((s, d) => s + d.freeBytes, 0)
 
             return (
               <Col key={h.id} xs={24} md={12}>
@@ -572,6 +702,8 @@ export default function HostsPage() {
                           await api.deleteHost(h.id)
                           message.success(t.hosts.deleted)
                           qc.invalidateQueries({ queryKey: ['hosts'] })
+                          qc.invalidateQueries({ queryKey: ['host-metrics'] })
+                          qc.invalidateQueries({ queryKey: ['host-metrics-cached'] })
                           qc.invalidateQueries({ queryKey: ['overview'] })
                           qc.invalidateQueries({ queryKey: ['containers'] })
                         } catch (e) {
@@ -740,6 +872,255 @@ export default function HostsPage() {
                           {sysEnvText}
                         </Typography.Text>
                       </Flex>
+                    </div>
+
+                    {/* 实时系统资源区（CPU / 内存 / 多磁盘同行分段剩余空间；离线或待采集时保持完全同构等高骨架） */}
+                    <div
+                      style={{
+                        border: `1px solid ${token.colorBorderSecondary}`,
+                        background: token.colorFillQuaternary,
+                        borderRadius: token.borderRadiusLG,
+                        padding: '10px 14px',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 10,
+                        opacity: hasLiveMetrics ? 1 : 0.6,
+                      }}
+                    >
+                      <Row gutter={14}>
+                        <Col span={12}>
+                          <Tooltip
+                            title={
+                              hasLiveMetrics
+                                ? t.hosts.metricCpuTip.replace('{pct}', cpuPct.toFixed(1))
+                                : undefined
+                            }
+                          >
+                            <div>
+                              <Flex justify="space-between" align="center" gap={6} style={{ marginBottom: 5 }}>
+                                <Typography.Text
+                                  type="secondary"
+                                  ellipsis
+                                  style={{ fontSize: token.fontSizeSM }}
+                                >
+                                  {hasLiveMetrics && (metric?.cpuCores ?? 0) > 0
+                                    ? t.hosts.metricCpuCores.replace('{n}', String(metric!.cpuCores))
+                                    : t.hosts.metricCpu}
+                                </Typography.Text>
+                                <Typography.Text
+                                  style={{
+                                    fontSize: token.fontSizeSM,
+                                    fontFamily: token.fontFamilyCode,
+                                    fontWeight: hasLiveMetrics ? 500 : 400,
+                                    color: hasLiveMetrics
+                                      ? getMetricValueColor(cpuPct)
+                                      : token.colorTextSecondary,
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  {hasLiveMetrics ? `${cpuPct.toFixed(1)}%` : '—'}
+                                </Typography.Text>
+                              </Flex>
+                              <div
+                                style={{
+                                  width: '100%',
+                                  height: 6,
+                                  borderRadius: token.borderRadiusXS,
+                                  background: token.colorFillSecondary,
+                                  overflow: 'hidden',
+                                }}
+                              >
+                                {hasLiveMetrics && (
+                                  <div
+                                    style={{
+                                      width: `${cpuPct}%`,
+                                      height: '100%',
+                                      borderRadius: token.borderRadiusXS,
+                                      background: getMetricColor(cpuPct),
+                                      transition: 'width 0.25s ease, background-color 0.2s ease',
+                                    }}
+                                  />
+                                )}
+                              </div>
+                            </div>
+                          </Tooltip>
+                        </Col>
+
+                        <Col span={12}>
+                          <Tooltip
+                            title={
+                              hasLiveMetrics
+                                ? t.hosts.metricMemTip
+                                    .replace('{used}', formatCap(metric!.memUsedBytes))
+                                    .replace(
+                                      '{free}',
+                                      formatCap(
+                                        Math.max(0, metric!.memTotalBytes - metric!.memUsedBytes),
+                                      ),
+                                    )
+                                    .replace('{total}', formatCap(metric!.memTotalBytes))
+                                    .replace('{pct}', String(memPct))
+                                : undefined
+                            }
+                          >
+                            <div>
+                              <Flex justify="space-between" align="center" gap={6} style={{ marginBottom: 5 }}>
+                                <Typography.Text
+                                  type="secondary"
+                                  ellipsis
+                                  style={{ fontSize: token.fontSizeSM }}
+                                >
+                                  {t.hosts.metricMem}
+                                </Typography.Text>
+                                <Typography.Text
+                                  style={{
+                                    fontSize: token.fontSizeSM,
+                                    fontFamily: token.fontFamilyCode,
+                                    fontWeight: hasLiveMetrics ? 500 : 400,
+                                    color: hasLiveMetrics
+                                      ? getMetricValueColor(memPct)
+                                      : token.colorTextSecondary,
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  {hasLiveMetrics
+                                    ? formatMemCompact(metric!.memUsedBytes, metric!.memTotalBytes)
+                                    : '—'}
+                                </Typography.Text>
+                              </Flex>
+                              <div
+                                style={{
+                                  width: '100%',
+                                  height: 6,
+                                  borderRadius: token.borderRadiusXS,
+                                  background: token.colorFillSecondary,
+                                  overflow: 'hidden',
+                                }}
+                              >
+                                {hasLiveMetrics && (
+                                  <div
+                                    style={{
+                                      width: `${memPct}%`,
+                                      height: '100%',
+                                      borderRadius: token.borderRadiusXS,
+                                      background: getMetricColor(memPct),
+                                      transition: 'width 0.25s ease, background-color 0.2s ease',
+                                    }}
+                                  />
+                                )}
+                              </div>
+                            </div>
+                          </Tooltip>
+                        </Col>
+                      </Row>
+
+                      <div>
+                        <Flex justify="space-between" align="center" gap={8} style={{ marginBottom: 5 }}>
+                          <Flex align="center" gap={6} style={{ minWidth: 0 }}>
+                            <Typography.Text
+                              type="secondary"
+                              style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}
+                            >
+                              {t.hosts.metricStorage}
+                            </Typography.Text>
+                            {hasLiveMetrics && disks.length > 1 && (
+                              <span
+                                style={{
+                                  padding: '0 6px',
+                                  borderRadius: token.borderRadiusXS,
+                                  background: token.colorFillSecondary,
+                                  color: token.colorTextSecondary,
+                                  fontFamily: token.fontFamilyCode,
+                                  fontSize: 12,
+                                  lineHeight: '18px',
+                                  flexShrink: 0,
+                                }}
+                              >
+                                {t.hosts.metricVolumesBadge.replace('{n}', String(disks.length))}
+                              </span>
+                            )}
+                          </Flex>
+
+                          <Typography.Text
+                            style={{
+                              fontSize: token.fontSizeSM,
+                              fontFamily: token.fontFamilyCode,
+                              fontWeight: hasLiveMetrics && disks.length > 0 ? 500 : 400,
+                              color:
+                                hasLiveMetrics && disks.length > 0
+                                  ? token.colorText
+                                  : token.colorTextSecondary,
+                              flexShrink: 0,
+                            }}
+                          >
+                            {hasLiveMetrics && disks.length > 0 && totalDiskBytes > 0 ? (
+                              <>
+                                {t.hosts.metricFreePrefix} {formatCap(totalFreeBytes)}{' '}
+                                <span style={{ color: token.colorTextSecondary, fontWeight: 400 }}>
+                                  / {formatCap(totalDiskBytes)}
+                                </span>
+                              </>
+                            ) : (
+                              '—'
+                            )}
+                          </Typography.Text>
+                        </Flex>
+
+                        {hasLiveMetrics && disks.length > 0 ? (
+                          <Flex align="center" gap={4}>
+                            {disks.map((d, idx) => {
+                              const rawPct =
+                                d.totalBytes > 0
+                                  ? Math.round((d.usedBytes / d.totalBytes) * 100)
+                                  : 0
+                              const clampedPct = Math.max(0, Math.min(100, rawPct))
+                              const barWidth = d.usedBytes > 0 ? Math.max(2, clampedPct) : 0
+                              const tip = t.hosts.metricDiskTip
+                                .replace('{name}', formatDiskTitle(d))
+                                .replace('{free}', formatCap(d.freeBytes))
+                                .replace('{total}', formatCap(d.totalBytes))
+                                .replace('{used}', formatCap(d.usedBytes))
+                                .replace('{pct}', String(clampedPct))
+
+                              return (
+                                <Tooltip key={d.mount || idx} title={tip} mouseEnterDelay={0.12}>
+                                  <div
+                                    title={tip}
+                                    style={{
+                                      flex: 1,
+                                      minWidth: 6,
+                                      height: 8,
+                                      borderRadius: token.borderRadiusXS,
+                                      background: token.colorFillSecondary,
+                                      overflow: 'hidden',
+                                    }}
+                                  >
+                                    <div
+                                      style={{
+                                        width: `${barWidth}%`,
+                                        height: '100%',
+                                        borderRadius: token.borderRadiusXS,
+                                        background: getMetricColor(clampedPct),
+                                        transition: 'width 0.25s ease, background-color 0.2s ease',
+                                      }}
+                                    />
+                                  </div>
+                                </Tooltip>
+                              )
+                            })}
+                          </Flex>
+                        ) : (
+                          <div
+                            style={{
+                              width: '100%',
+                              height: 8,
+                              borderRadius: token.borderRadiusXS,
+                              background: token.colorFillSecondary,
+                              overflow: 'hidden',
+                            }}
+                          />
+                        )}
+                      </div>
                     </div>
 
                     {h.transport === 'ssh' && Boolean(h.sshHostKeyChangedAt) && (

@@ -100,6 +100,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/ignore", s.requireAuth(s.handleDeleteIgnore))
 
 	mux.HandleFunc("GET /api/v1/hosts", s.requireAuth(s.handleListHosts))
+	mux.HandleFunc("GET /api/v1/hosts/metrics", s.requireAuth(s.handleListHostMetrics))
 	mux.HandleFunc("POST /api/v1/hosts", s.requireAuth(s.handleCreateHost))
 	mux.HandleFunc("PUT /api/v1/hosts/{id}", s.requireAuth(s.handleUpdateHost))
 	mux.HandleFunc("DELETE /api/v1/hosts/{id}", s.requireAuth(s.handleDeleteHost))
@@ -462,6 +463,26 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleListHostMetrics(w http.ResponseWriter, r *http.Request) {
+	hostID := strings.TrimSpace(r.URL.Query().Get("hostId"))
+	cachedParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("cached")))
+	if cachedParam == "1" || cachedParam == "true" {
+		items, err := s.d.Hosts.ListCachedHostMetrics(r.Context(), hostID)
+		if err != nil {
+			writeError(w, s.langOf(r), http.StatusInternalServerError, "db_error", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items, "cached": true})
+		return
+	}
+	items, err := s.d.Hosts.ListHostMetrics(r.Context(), hostID)
+	if err != nil {
+		writeError(w, s.langOf(r), http.StatusInternalServerError, "db_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
 func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request) {
 	var in host.CreateOrUpdateInput
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -482,8 +503,9 @@ func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeErr(lang, err))
 		return
 	}
-	// 新增设备后自动触发对该设备的检查
+	// 新增设备后自动触发对该设备的检查与运行态快照收录
 	s.d.Checker.Trigger("manual", h.ID, false)
+	s.d.Hosts.RefreshRuntimeAsync(h.ID)
 	writeJSON(w, http.StatusOK, h)
 }
 
@@ -508,8 +530,9 @@ func (s *Server) handleUpdateHost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeErr(lang, err))
 		return
 	}
-	// 编辑保存并重连校验成功后，自动触发对该设备的检查
+	// 编辑保存并重连校验成功后，自动触发对该设备的检查与运行态快照收录
 	s.d.Checker.Trigger("manual", h.ID, false)
+	s.d.Hosts.RefreshRuntimeAsync(h.ID)
 	writeJSON(w, http.StatusOK, h)
 }
 

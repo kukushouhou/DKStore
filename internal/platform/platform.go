@@ -81,6 +81,34 @@ type RuntimeStatOptionsAdapter interface {
 	ListRuntimeAppsWithOptions(ctx context.Context, withStats bool) ([]AppRuntimeTree, error)
 }
 
+// DiskStat 描述单个有效数据存储卷或挂载点的容量状态。
+type DiskStat struct {
+	Mount      string `json:"mount"`
+	Label      string `json:"label,omitempty"`
+	Filesystem string `json:"filesystem,omitempty"`
+	TotalBytes int64  `json:"totalBytes"`
+	FreeBytes  int64  `json:"freeBytes"`
+	UsedBytes  int64  `json:"usedBytes"`
+}
+
+// HostRuntimeStat 描述单台设备的实时系统资源占用（CPU、物理内存与有效存储空间列表）。
+type HostRuntimeStat struct {
+	HostID        string     `json:"hostId"`
+	Online        bool       `json:"online"`
+	CPUPercent    float64    `json:"cpuPercent"`
+	CPUCores      int        `json:"cpuCores,omitempty"`
+	MemUsedBytes  int64      `json:"memUsedBytes"`
+	MemTotalBytes int64      `json:"memTotalBytes"`
+	Disks         []DiskStat `json:"disks,omitempty"`
+	SampledAt     int64      `json:"sampledAt,omitempty"`
+}
+
+// HostMetricsAdapter 扩展 Adapter，提供宿主机真实 CPU、内存与存储空间采集能力。
+type HostMetricsAdapter interface {
+	Adapter
+	CollectHostMetrics(ctx context.Context) (*HostRuntimeStat, error)
+}
+
 // LayerProgress 描述单个镜像层的实时下载/解压状态与进度（附录 E.1）。
 type LayerProgress struct {
 	ID      string `json:"id"`

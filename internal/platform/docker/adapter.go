@@ -32,10 +32,11 @@ type cpuSample struct {
 
 // Adapter 实现 platform.Adapter。
 type Adapter struct {
-	hostID  string
-	tr      transport.Transport
-	statsMu sync.Mutex
-	prevCPU map[string]cpuSample
+	hostID      string
+	tr          transport.Transport
+	statsMu     sync.Mutex
+	prevCPU     map[string]cpuSample
+	prevHostCPU *hostCPUSample
 }
 
 // New 创建原生 Docker 适配器。
@@ -57,6 +58,8 @@ type dockerInfoResp struct {
 	OperatingSystem string `json:"OperatingSystem"`
 	KernelVersion   string `json:"KernelVersion"`
 	ServerVersion   string `json:"ServerVersion"`
+	NCPU            int    `json:"NCPU"`
+	MemTotal        int64  `json:"MemTotal"`
 }
 
 // Probe 探测主机系统架构、Docker 版本与能力声明。

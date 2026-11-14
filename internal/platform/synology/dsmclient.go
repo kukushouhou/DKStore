@@ -110,6 +110,8 @@ type dsmClient struct {
 	deviceToken string
 	otpCode     string
 	inflight    *loginCall
+	cachedCores int
+	coresProbed bool
 }
 
 func newDSMClient(cfg DSMConfig) *dsmClient {
@@ -1160,4 +1162,229 @@ func cloneProfile(src map[string]any) map[string]any {
 		return nil
 	}
 	return dst
+}
+
+// GetHostMetrics 通过群晖 DSM WebAPI 读取宿主机实时 CPU、物理内存与各存储空间容量（免 SSH 模式专用）。
+func (c *dsmClient) GetHostMetrics(ctx context.Context) (*platform.HostRuntimeStat, error) {
+	var util struct {
+		CPU struct {
+			UserLoad   float64 `json:"user_load"`
+			SystemLoad float64 `json:"system_load"`
+			OtherLoad  float64 `json:"other_load"`
+		} `json:"cpu"`
+		Memory struct {
+			MemorySize int64   `json:"memory_size"`
+			TotalReal  int64   `json:"total_real"`
+			AvailReal  int64   `json:"avail_real"`
+			Buffer     int64   `json:"buffer"`
+			Cached     int64   `json:"cached"`
+			RealUsage  float64 `json:"real_usage"`
+		} `json:"memory"`
+	}
+	if err := c.call(ctx, "SYNO.Core.System.Utilization", "1", "get", nil, &util); err != nil {
+		return nil, err
+	}
+
+	cpuPct := util.CPU.UserLoad + util.CPU.SystemLoad + util.CPU.OtherLoad
+	if cpuPct < 0 {
+		cpuPct = 0
+	}
+	if cpuPct > 100 {
+		cpuPct = 100
+	}
+	cpuPct = float64(int(cpuPct*10+0.5)) / 10
+
+	totalKB := util.Memory.TotalReal
+	if totalKB <= 0 {
+		totalKB = util.Memory.MemorySize
+	}
+	var memTotalBytes, memUsedBytes int64
+	if totalKB > 0 {
+		memTotalBytes = totalKB * 1024
+		availKB := util.Memory.AvailReal + util.Memory.Buffer + util.Memory.Cached
+		if util.Memory.TotalReal > 0 && availKB > 0 && availKB <= util.Memory.TotalReal {
+			memUsedBytes = (util.Memory.TotalReal - availKB) * 1024
+		} else if util.Memory.RealUsage > 0 {
+			memUsedBytes = int64(float64(memTotalBytes) * util.Memory.RealUsage / 100.0)
+		}
+		if memUsedBytes < 0 {
+			memUsedBytes = 0
+		}
+		if memUsedBytes > memTotalBytes {
+			memUsedBytes = memTotalBytes
+		}
+	}
+
+	c.mu.Lock()
+	cores := c.cachedCores
+	probed := c.coresProbed
+	c.mu.Unlock()
+	if !probed {
+		var sysInfo map[string]any
+		if err := c.call(ctx, "SYNO.Core.System", "1", "info", nil, &sysInfo); err == nil {
+			cores = parseLeadingInt(anyString(sysInfo["cpu_cores"]))
+		}
+		c.mu.Lock()
+		c.cachedCores = cores
+		c.coresProbed = true
+		c.mu.Unlock()
+	}
+
+	disks := c.fetchDSMVolumes(ctx)
+
+	return &platform.HostRuntimeStat{
+		Online:        true,
+		CPUPercent:    cpuPct,
+		CPUCores:      cores,
+		MemUsedBytes:  memUsedBytes,
+		MemTotalBytes: memTotalBytes,
+		Disks:         disks,
+		SampledAt:     time.Now().Unix(),
+	}, nil
+}
+
+func (c *dsmClient) fetchDSMVolumes(ctx context.Context) []platform.DiskStat {
+	var sysStorage struct {
+		VolInfo []struct {
+			Name      string `json:"name"`
+			Desc      string `json:"desc"`
+			TotalSize any    `json:"total_size"`
+			UsedSize  any    `json:"used_size"`
+		} `json:"vol_info"`
+	}
+	if err := c.call(ctx, "SYNO.Core.System", "1", "info", map[string]string{"type": "storage"}, &sysStorage); err == nil && len(sysStorage.VolInfo) > 0 {
+		out := make([]platform.DiskStat, 0, len(sysStorage.VolInfo))
+		for _, v := range sysStorage.VolInfo {
+			total := parseAnyInt64(v.TotalSize)
+			used := parseAnyInt64(v.UsedSize)
+			if total <= 0 {
+				continue
+			}
+			if used < 0 {
+				used = 0
+			}
+			if used > total {
+				used = total
+			}
+			out = append(out, platform.DiskStat{
+				Mount:      normalizeDSMVolumeMount(v.Name, ""),
+				Label:      strings.TrimSpace(v.Desc),
+				TotalBytes: total,
+				UsedBytes:  used,
+				FreeBytes:  total - used,
+			})
+		}
+		if len(out) > 0 {
+			sortDSMVolumeDisks(out)
+			return out
+		}
+	}
+
+	var stResp struct {
+		Volumes []struct {
+			ID          string `json:"id"`
+			VolPath     string `json:"vol_path"`
+			Description string `json:"description"`
+			Size        struct {
+				Total any `json:"total"`
+				Used  any `json:"used"`
+			} `json:"size"`
+		} `json:"volumes"`
+	}
+	if err := c.call(ctx, "SYNO.Storage.CGI.Storage", "1", "load_info", nil, &stResp); err == nil && len(stResp.Volumes) > 0 {
+		out := make([]platform.DiskStat, 0, len(stResp.Volumes))
+		for _, v := range stResp.Volumes {
+			total := parseAnyInt64(v.Size.Total)
+			used := parseAnyInt64(v.Size.Used)
+			if total <= 0 {
+				continue
+			}
+			if used < 0 {
+				used = 0
+			}
+			if used > total {
+				used = total
+			}
+			out = append(out, platform.DiskStat{
+				Mount:      normalizeDSMVolumeMount(v.ID, v.VolPath),
+				Label:      strings.TrimSpace(v.Description),
+				TotalBytes: total,
+				UsedBytes:  used,
+				FreeBytes:  total - used,
+			})
+		}
+		sortDSMVolumeDisks(out)
+		return out
+	}
+	return nil
+}
+
+func normalizeDSMVolumeMount(id, volPath string) string {
+	vp := strings.TrimSpace(volPath)
+	if strings.HasPrefix(vp, "/") {
+		return vp
+	}
+	raw := strings.TrimSpace(id)
+	if strings.HasPrefix(raw, "/") {
+		return raw
+	}
+	// 如 "volume_1" -> "/volume1"
+	cleaned := strings.ReplaceAll(strings.ToLower(raw), "_", "")
+	if cleaned != "" {
+		return "/" + cleaned
+	}
+	return "/volume1"
+}
+
+func sortDSMVolumeDisks(disks []platform.DiskStat) {
+	if len(disks) <= 1 {
+		return
+	}
+	for i := 0; i < len(disks); i++ {
+		for j := i + 1; j < len(disks); j++ {
+			ni := parseLeadingInt(strings.TrimPrefix(disks[i].Mount, "/volume"))
+			nj := parseLeadingInt(strings.TrimPrefix(disks[j].Mount, "/volume"))
+			swap := false
+			if ni > 0 && nj > 0 && ni != nj {
+				swap = ni > nj
+			} else {
+				swap = disks[i].Mount > disks[j].Mount
+			}
+			if swap {
+				disks[i], disks[j] = disks[j], disks[i]
+			}
+		}
+	}
+}
+
+func parseAnyInt64(v any) int64 {
+	switch t := v.(type) {
+	case string:
+		n, _ := strconv.ParseInt(strings.TrimSpace(t), 10, 64)
+		return n
+	case float64:
+		return int64(t)
+	case int64:
+		return t
+	case int:
+		return int64(t)
+	}
+	return 0
+}
+
+func parseLeadingInt(s string) int {
+	s = strings.TrimSpace(s)
+	var digits strings.Builder
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+		} else {
+			break
+		}
+	}
+	if digits.Len() == 0 {
+		return 0
+	}
+	n, _ := strconv.Atoi(digits.String())
+	return n
 }
