@@ -63,14 +63,29 @@
 
 Download ready-to-install packages from [**GitHub Releases**](https://github.com/kukushouhou/DKStore/releases/latest), or deploy via Docker.
 
-<sub>**Package Selection Guide** (check system info if unsure; mismatched packages are safely rejected):</sub>
+<sub><strong>Package Selection Guide</strong> (check system info on the left if unsure; mismatched packages are safely rejected):</sub>
 
-| <sub>Platform</sub> | <sub>How to Check Architecture</sub> | <sub>Package Filename</sub> |
-| :--- | :--- | :--- |
-| <sub>**fnOS**</sub> | <sub>**Settings → Device Info**: ARM NAS/boxes → `arm`; Intel/AMD → `x86`</sub> | <sub>`dkstore-fnos-arm-<version>.fpk` · `dkstore-fnos-x86-<version>.fpk`</sub> |
-| <sub>**Synology DSM 7+**</sub> | <sub>**Control Panel → Info Center**: ARM → `aarch64`; Intel/AMD → `x86_64`</sub> | <sub>`dkstore-aarch64-<version>-0001.spk` · `dkstore-x86_64-<version>-0001.spk`</sub> |
-| <sub>**iStoreOS / OpenWrt**</sub> | <sub>**Status → Overview**: 64-bit ARM → `aarch64`, x86 → `x86_64` (`.run` for iStoreOS)</sub> | <sub>`dkstore-openwrt-<arch>-<version>.run` · `luci-app-dkstore_<version>-1_<arch>.ipk` / `.apk`</sub> |
-| <sub>**Docker / PC / Linux**</sub> | <sub>Docker image auto-matches ARM/x86; Windows PC → `.zip`; Linux → `uname -m`</sub> | <sub>`ghcr.io/kukushouhou/dkstore:latest` · `dkstore-windows-amd64-<version>.zip`</sub> |
+<table>
+  <thead>
+    <tr>
+      <th align="left"><sub>Platform (Where to Check)</sub></th>
+      <th align="left"><sub>CPU / Architecture</sub></th>
+      <th align="left"><sub>Package Filename</sub></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td rowspan="2"><sub><strong>fnOS</strong><br>Settings → Device Info</sub></td><td><sub><strong>ARM 64-bit</strong> (ARM NAS, RK3588/3568, OEC / ARM boxes)</sub></td><td><sub><code>dkstore-fnos-arm-&lt;version&gt;.fpk</code></sub></td></tr>
+    <tr><td><sub><strong>x86 64-bit</strong> (Intel / AMD mini PCs, DIY PCs)</sub></td><td><sub><code>dkstore-fnos-x86-&lt;version&gt;.fpk</code></sub></td></tr>
+    <tr><td rowspan="2"><sub><strong>Synology DSM 7.0+</strong><br>Control Panel → Info Center</sub></td><td><sub><strong>ARM 64-bit</strong> (DS223 / DS124 / j-series Realtek models)</sub></td><td><sub><code>dkstore-aarch64-&lt;version&gt;-0001.spk</code></sub></td></tr>
+    <tr><td><sub><strong>x86 64-bit</strong> (DS220+ / DS423+ / DS920+ Intel/AMD)</sub></td><td><sub><code>dkstore-x86_64-&lt;version&gt;-0001.spk</code></sub></td></tr>
+    <tr><td rowspan="3"><sub><strong>iStoreOS / OpenWrt</strong><br>Status → Overview</sub></td><td><sub><strong>ARM 64-bit (aarch64)</strong> (R2S / R4S / R5S / N1 / 64-bit ARM routers)</sub></td><td><sub>iStoreOS: <code>dkstore-openwrt-aarch64-&lt;version&gt;.run</code> · OpenWrt: <code>..._aarch64.ipk</code> / <code>.apk</code></sub></td></tr>
+    <tr><td><sub><strong>x86 64-bit (x86_64)</strong> (N100 / J4125 routers, VMs)</sub></td><td><sub>iStoreOS: <code>dkstore-openwrt-x86_64-&lt;version&gt;.run</code> · OpenWrt: <code>..._x86_64.ipk</code> / <code>.apk</code></sub></td></tr>
+    <tr><td><sub><strong>ARM 32-bit (arm)</strong> (legacy 32-bit ARM routers)</sub></td><td><sub>OpenWrt: <code>luci-app-dkstore_&lt;version&gt;-1_arm.ipk</code></sub></td></tr>
+    <tr><td rowspan="3"><sub><strong>Other NAS / PC</strong><br>Docker / Standalone</sub></td><td><sub><strong>Auto-Match CPU (Docker)</strong> (UGREEN / ZSpace / QNAP / Unraid / Linux)</sub></td><td><sub><code>ghcr.io/kukushouhou/dkstore:latest</code></sub></td></tr>
+    <tr><td><sub><strong>Linux Standalone Binary</strong> (check via <code>uname -m</code>)</sub></td><td><sub><code>dkstore-linux-&lt;arm64|amd64|armv7&gt;-&lt;version&gt;.tar.gz</code></sub></td></tr>
+    <tr><td><sub><strong>Windows 64-bit PC</strong> (Win 10 / 11 extract & run)</sub></td><td><sub><code>dkstore-windows-amd64-&lt;version&gt;.zip</code></sub></td></tr>
+  </tbody>
+</table>
 
 ### 1. fnOS App Package (`.fpk`)
 1. Download `dkstore-fnos-arm-<version>.fpk` (ARM64) or `dkstore-fnos-x86-<version>.fpk` (x86_64).

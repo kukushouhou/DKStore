@@ -63,14 +63,29 @@
 
 前往 [**GitHub Releases**](https://github.com/kukushouhou/DKStore/releases/latest) 下载对应平台的安装包，或直接使用 Docker 部署。
 
-<sub>**安装包选型对照**（不确定芯片可在对应后台菜单查看；若选错系统会提示不匹配拒绝安装，换另一个即可）：</sub>
+<sub><strong>安装包选型对照</strong>（不确定芯片可按左侧路径在设备后台查看；若选错包系统会提示不匹配拒绝安装，换另一行即可）：</sub>
 
-| <sub>设备系统</sub> | <sub>芯片查看位置与对应规则</sub> | <sub>对应安装包文件名</sub> |
-| :--- | :--- | :--- |
-| <sub>**飞牛 fnOS**</sub> | <sub>「设置→设备信息」看 CPU：ARM 盒子/NAS 选 `arm`；Intel/AMD 选 `x86`</sub> | <sub>`dkstore-fnos-arm-<版本>.fpk` · `dkstore-fnos-x86-<版本>.fpk`</sub> |
-| <sub>**群晖 DSM 7+**</sub> | <sub>「控制面板→信息中心」：ARM 机型选 `aarch64`；Intel/AMD 选 `x86_64`</sub> | <sub>`dkstore-aarch64-<版本>-0001.spk` · `dkstore-x86_64-<版本>-0001.spk`</sub> |
-| <sub>**iStoreOS / OpenWrt**</sub> | <sub>「状态→概览」看架构：64 位 ARM 选 `aarch64`，x86 选 `x86_64`（iStoreOS 选 `.run`）</sub> | <sub>`dkstore-openwrt-<架构>-<版本>.run` · `luci-app-dkstore_<版本>-1_<架构>.ipk` / `.apk`</sub> |
-| <sub>**其他 NAS / 电脑**</sub> | <sub>任意 Docker 设备用镜像自动匹配芯片；Windows 电脑下 `.zip`；Linux 按 `uname -m`</sub> | <sub>`ghcr.io/kukushouhou/dkstore:latest` · `dkstore-windows-amd64-<版本>.zip`</sub> |
+<table>
+  <thead>
+    <tr>
+      <th align="left"><sub>设备系统（后台查看位置）</sub></th>
+      <th align="left"><sub>CPU / 架构类型</sub></th>
+      <th align="left"><sub>对应安装包文件名</sub></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr><td rowspan="2"><sub><strong>飞牛 fnOS</strong><br>设置 → 设备信息</sub></td><td><sub><strong>ARM 64位</strong>（ARM 成品 NAS、RK3588/3568、OEC 等盒子）</sub></td><td><sub><code>dkstore-fnos-arm-&lt;版本&gt;.fpk</code></sub></td></tr>
+    <tr><td><sub><strong>x86 64位</strong>（Intel / AMD 小主机、电脑组装机）</sub></td><td><sub><code>dkstore-fnos-x86-&lt;版本&gt;.fpk</code></sub></td></tr>
+    <tr><td rowspan="2"><sub><strong>群晖 DSM 7.0+</strong><br>控制面板 → 信息中心</sub></td><td><sub><strong>ARM 64位</strong>（DS223 / DS124 / j 系列等 Realtek 机型）</sub></td><td><sub><code>dkstore-aarch64-&lt;版本&gt;-0001.spk</code></sub></td></tr>
+    <tr><td><sub><strong>x86 64位</strong>（DS220+ / DS423+ / DS920+ 等 Intel/AMD）</sub></td><td><sub><code>dkstore-x86_64-&lt;版本&gt;-0001.spk</code></sub></td></tr>
+    <tr><td rowspan="3"><sub><strong>iStoreOS / OpenWrt</strong><br>状态 → 概览</sub></td><td><sub><strong>ARM 64位 (aarch64)</strong>（R2S / R4S / R5S / N1 等 64位路由盒子）</sub></td><td><sub>iStoreOS: <code>dkstore-openwrt-aarch64-&lt;版本&gt;.run</code> · OpenWrt: <code>..._aarch64.ipk</code> / <code>.apk</code></sub></td></tr>
+    <tr><td><sub><strong>x86 64位 (x86_64)</strong>（N100 / J4125 软路由、虚拟机）</sub></td><td><sub>iStoreOS: <code>dkstore-openwrt-x86_64-&lt;版本&gt;.run</code> · OpenWrt: <code>..._x86_64.ipk</code> / <code>.apk</code></sub></td></tr>
+    <tr><td><sub><strong>ARM 32位 (arm)</strong>（老款 32 位 ARM 路由器）</sub></td><td><sub>OpenWrt: <code>luci-app-dkstore_&lt;版本&gt;-1_arm.ipk</code></sub></td></tr>
+    <tr><td rowspan="3"><sub><strong>其他 NAS / 电脑</strong><br>Docker / 独立运行</sub></td><td><sub><strong>自动匹配芯片（Docker）</strong>（绿联 / 极空间 / 威联通 / Unraid / Linux）</sub></td><td><sub><code>ghcr.io/kukushouhou/dkstore:latest</code></sub></td></tr>
+    <tr><td><sub><strong>Linux 命令行二进制</strong>（<code>uname -m</code> 查看架构）</sub></td><td><sub><code>dkstore-linux-&lt;arm64|amd64|armv7&gt;-&lt;版本&gt;.tar.gz</code></sub></td></tr>
+    <tr><td><sub><strong>Windows 64位电脑</strong>（Win 10 / 11 解压双击运行）</sub></td><td><sub><code>dkstore-windows-amd64-&lt;版本&gt;.zip</code></sub></td></tr>
+  </tbody>
+</table>
 
 ### 方式一：飞牛 fnOS 应用包（`.fpk`）
 1. 按上方表格下载 `dkstore-fnos-arm-<版本>.fpk`（ARM64）或 `dkstore-fnos-x86-<版本>.fpk`（x86_64）。
