@@ -6,10 +6,18 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+## [v0.5.0] - 2026-11-15
+
+### 新功能
+- **商店更新方式设置**：在初始化向导第 3 步与设置页新增「商店更新(非容器更新)」选项，支持切换「自动更新」（默认，无容器任务运行时自动升级商店并推送通知）、「仅推送提醒」（发现新版本时通过已配通知渠道提醒一次）与「手动更新」（不自动升级、不发通知推送，仅在页面展示待更新状态），并将向导页 GitHub 连通状态改为独立状态徽章展示 ([`3fd7e37`](https://github.com/kukushouhou/DKStore/commit/3fd7e37), [`a333586`](https://github.com/kukushouhou/DKStore/commit/a333586))
+
 ### 问题修复
-- **自更新兼容性与版本号显示修复**：兼容数据目录挂载带 `noexec` 标记的系统环境（如部分 OpenMediaVault / Linux 数据盘），保留数据盘持久化文件的同时自动拷入可执行目录运行；修复设置页等待远端版本检查返回前当前版本号短暂显示旧占位符的问题 ([`a66a25b`](https://github.com/kukushouhou/DKStore/commit/a66a25b))
+- **自更新兼容与版本号显示**：兼容数据目录挂载带 `noexec` 标记的系统环境（如部分 OpenMediaVault / Linux 数据盘），保留数据盘持久化文件的同时自动拷入可执行目录运行；修复设置页等待远端版本检查返回前当前版本号短暂显示旧占位符的问题 ([`a66a25b`](https://github.com/kukushouhou/DKStore/commit/a66a25b))
 
 ---
+
+### Features
+- **Store Update Mode**: Added `Store Update (Not Containers)` mode selection to both Setup Wizard Step 3 and Settings, supporting `Auto Update` (default, upgrades DKStore when idle and sends a notification), `Notify Only` (pushes a notification once per new release without auto-upgrading), and `Manual Only` (shows update status in the UI without auto-upgrading or sending push notifications), with GitHub connectivity status displayed as a standalone badge in the wizard ([`3fd7e37`](https://github.com/kukushouhou/DKStore/commit/3fd7e37), [`a333586`](https://github.com/kukushouhou/DKStore/commit/a333586))
 
 ### Fixes
 - **Self-Update Compatibility & Version Display**: Added automatic fallback execution staging when the data directory resides on a `noexec`-mounted volume while keeping update persistence intact, and fixed Settings briefly showing a stale current-version placeholder before remote update checks complete ([`a66a25b`](https://github.com/kukushouhou/DKStore/commit/a66a25b))
