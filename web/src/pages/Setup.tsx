@@ -24,6 +24,7 @@ import {
   Row,
   Segmented,
   Space,
+  Tag,
   Typography,
   message,
   theme,
@@ -638,38 +639,42 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
     </div>
   )
 
-  // 步骤 3：更新源设置（始终进入，根据前两步期间后台 GitHub 检测状态切换标题文案）
+  // 步骤 3：商店更新设置（始终进入，标题右侧以状态徽章展示后台 GitHub 连通性结果）
   if (step === 3) {
-    const wizardTitle =
-      probeState === 'ok'
-        ? t.selfUpdate.wizardTitleOk
-        : probeState === 'probing'
-          ? t.selfUpdate.wizardTitleProbing
-          : t.selfUpdate.wizardTitleFail
     const wizardDesc =
       probeState === 'ok'
         ? t.selfUpdate.wizardDescOk
         : probeState === 'probing'
           ? t.selfUpdate.wizardDescProbing
           : t.selfUpdate.wizardDescFail
-    const statusIcon =
+    const probeTagColor =
+      probeState === 'ok' ? 'success' : probeState === 'probing' ? 'processing' : 'warning'
+    const probeTagIcon =
       probeState === 'ok' ? (
-        <CheckCircleFilled style={{ color: token.colorSuccess }} />
+        <CheckCircleFilled />
       ) : probeState === 'probing' ? (
-        <LoadingOutlined style={{ color: token.colorPrimary }} />
+        <LoadingOutlined spin />
       ) : (
-        <ExclamationCircleFilled style={{ color: token.colorWarning }} />
+        <ExclamationCircleFilled />
       )
+    const probeTagText =
+      probeState === 'ok'
+        ? t.selfUpdate.probeTagOk
+        : probeState === 'probing'
+          ? t.selfUpdate.probeTagProbing
+          : t.selfUpdate.probeTagFail
 
     return renderSplitShell(
       <div>
         {renderStepPill(3)}
         <div style={{ marginBottom: 20 }}>
-          <Flex align="center" gap={8}>
-            {statusIcon}
+          <Flex align="center" gap={10} wrap>
             <Typography.Title level={4} style={{ margin: 0 }}>
-              {wizardTitle}
+              {t.selfUpdate.wizardTitle}
             </Typography.Title>
+            <Tag color={probeTagColor} icon={probeTagIcon} style={{ margin: 0 }}>
+              {probeTagText}
+            </Tag>
           </Flex>
           <Typography.Text
             type="secondary"
@@ -877,7 +882,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
               </Button>
             }
           >
-            <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <Space orientation="vertical" size={12} style={{ width: '100%' }}>
               <Card size="small" style={{ background: token.colorFillAlter }}>
                 <Flex justify="space-between" align="center" style={{ marginBottom: 4 }}>
                   <Typography.Text strong>{t.auth.dockerGuideMethod1Title}</Typography.Text>
@@ -990,7 +995,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
               background: token.colorFillAlter,
             }}
           >
-            <Space direction="vertical" size={4} style={{ width: '100%' }}>
+            <Space orientation="vertical" size={4} style={{ width: '100%' }}>
               <div>
                 <Typography.Text
                   strong
@@ -1147,7 +1152,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
             </Button>
           }
         >
-          <Space direction="vertical" size={10}>
+          <Space orientation="vertical" size={10}>
             <Typography.Text type="secondary">{t.auth.spkWhyP1}</Typography.Text>
             <Typography.Text type="secondary">{t.auth.spkWhyP2}</Typography.Text>
           </Space>
@@ -1171,7 +1176,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
             </Flex>
           }
         >
-          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Space orientation="vertical" size={12} style={{ width: '100%' }}>
             <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
               {t.hosts.otpModalDesc}
             </Typography.Text>
@@ -1231,7 +1236,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
         </div>
       )}
 
-      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+      <Space orientation="vertical" size={12} style={{ width: '100%' }}>
         <Input.Password
           size="large"
           prefix={<LockOutlined style={{ color: token.colorTextQuaternary }} />}
