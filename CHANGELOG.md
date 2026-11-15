@@ -6,6 +6,14 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+### 问题修复
+- **自更新兼容性与版本号显示修复**：兼容数据目录挂载带 `noexec` 标记的系统环境（如部分 OpenMediaVault / Linux 数据盘），保留数据盘持久化文件的同时自动拷入可执行目录运行；修复设置页等待远端版本检查返回前当前版本号短暂显示旧占位符的问题 ([`a66a25b`](https://github.com/kukushouhou/DKStore/commit/a66a25b))
+
+---
+
+### Fixes
+- **Self-Update Compatibility & Version Display**: Added automatic fallback execution staging when the data directory resides on a `noexec`-mounted volume while keeping update persistence intact, and fixed Settings briefly showing a stale current-version placeholder before remote update checks complete ([`a66a25b`](https://github.com/kukushouhou/DKStore/commit/a66a25b))
+
 ## [v0.4.0] - 2026-11-15
 
 ### 新功能
