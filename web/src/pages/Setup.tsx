@@ -127,6 +127,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
   // 步骤 3（更新源选择与前两步期间后台 GitHub 连通性探测）
   const [probeState, setProbeState] = useState<'probing' | 'ok' | 'unreachable'>('probing')
   const [suCfg, setSuCfg] = useState<SelfUpdateConfig>({
+    policy: 'auto',
     repo: 'kukushouhou/DKStore',
     channel: 'github',
     customHost: '',

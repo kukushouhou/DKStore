@@ -90,8 +90,12 @@ func run() error {
 		default:
 		}
 	})
+	selfUpdSvc.SetAutoUpdateDeps(ntfSvc, func() bool {
+		return upSvc.HasActiveJobs() || chkSvc.CurrentProgress().Phase == "running"
+	})
 
 	chkSvc.StartScheduler(ctx)
+	selfUpdSvc.StartScheduler(ctx)
 	// 启动时若从未检查过且存在主机，自动后台触发一次初始检查
 	go func() {
 		time.Sleep(1 * time.Second)

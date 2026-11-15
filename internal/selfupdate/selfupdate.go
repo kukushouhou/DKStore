@@ -24,6 +24,7 @@ import (
 
 	"github.com/kukushouhou/DKStore/internal/hostauth"
 	"github.com/kukushouhou/DKStore/internal/i18n"
+	"github.com/kukushouhou/DKStore/internal/notify"
 	"github.com/kukushouhou/DKStore/internal/store"
 	"github.com/kukushouhou/DKStore/internal/version"
 )
@@ -107,6 +108,13 @@ type Service struct {
 	dataDir    string
 	httpClient *http.Client
 	reloadFn   func(execPath string)
+	ntf        *notify.Service
+	isBusy     func() bool
+	wakeupCh   chan struct{}
+
+	schedMu        sync.Mutex
+	autoFailVer    string
+	autoFailAt     time.Time
 
 	cacheMu     sync.Mutex
 	cachedRel   *resolvedRelease
@@ -132,8 +140,15 @@ func New(log *slog.Logger, st *store.Store, dataDir string, reloadFn func(execPa
 		dataDir:    dataDir,
 		httpClient: &http.Client{Timeout: 12 * time.Second},
 		reloadFn:   reloadFn,
+		wakeupCh:   make(chan struct{}, 1),
 		job:        ApplyJob{State: "idle"},
 	}
+}
+
+// SetAutoUpdateDeps 注入通知推送服务与系统忙碌判定回调（用于自动更新策略与仅推送提醒策略）。
+func (s *Service) SetAutoUpdateDeps(ntf *notify.Service, isBusy func() bool) {
+	s.ntf = ntf
+	s.isBusy = isBusy
 }
 
 // LoadConfig 从 SQLite setting 表读取当前自更新配置（不存在时返回默认 GitHub 配置）。
@@ -176,7 +191,169 @@ func (s *Service) SaveConfig(ctx context.Context, in Config) (Config, error) {
 		}
 	}
 	s.invalidateCache()
+	if s.wakeupCh != nil && (norm.Policy == PolicyAuto || norm.Policy == PolicyNotify) {
+		select {
+		case s.wakeupCh <- struct{}{}:
+		default:
+		}
+	}
 	return norm, nil
+}
+
+type upgradedNoticePayload struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// StartScheduler 启动商店版本后台巡检循环，按用户选定的策略执行「自动更新」或「仅推送提醒」。
+func (s *Service) StartScheduler(ctx context.Context) {
+	if s == nil || s.st == nil {
+		return
+	}
+	go func() {
+		// 启动后先检查上次自动更新是否已完成切换，若是则发送升级完成通知
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(6 * time.Second):
+		}
+		s.flushPendingUpgradedNotice(ctx)
+
+		// 首次后台商店版本巡检延迟 35 秒，避开启动高峰
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.wakeupCh:
+		case <-time.After(35 * time.Second):
+		}
+		nextWait := s.runScheduledPolicyCheck(ctx)
+
+		timer := time.NewTimer(nextWait)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-s.wakeupCh:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				nextWait = s.runScheduledPolicyCheck(ctx)
+				timer.Reset(nextWait)
+			case <-timer.C:
+				nextWait = s.runScheduledPolicyCheck(ctx)
+				timer.Reset(nextWait)
+			}
+		}
+	}()
+}
+
+func (s *Service) checkInterval(ctx context.Context) time.Duration {
+	if s.ntf != nil {
+		if h := s.ntf.LoadConfig(ctx).CheckIntervalHours; h > 0 {
+			return time.Duration(h) * time.Hour
+		}
+	}
+	return 6 * time.Hour
+}
+
+func (s *Service) flushPendingUpgradedNotice(ctx context.Context) {
+	if s.st == nil || s.st.DB == nil {
+		return
+	}
+	var raw string
+	if err := s.st.DB.QueryRowContext(ctx, `SELECT v FROM setting WHERE k=?`, settingKeyUpgradedNotify).Scan(&raw); err != nil || raw == "" {
+		return
+	}
+	var p upgradedNoticePayload
+	if json.Unmarshal([]byte(raw), &p) != nil || p.To == "" {
+		_, _ = s.st.DB.ExecContext(ctx, `DELETE FROM setting WHERE k=?`, settingKeyUpgradedNotify)
+		return
+	}
+	// 仅当当前运行版本确实已切换至目标版本时才发送升级成功通知
+	cur := ensureVPrefix(version.Version)
+	target := ensureVPrefix(p.To)
+	if cur != "" && target != "" && !strings.EqualFold(cur, target) {
+		_, _ = s.st.DB.ExecContext(ctx, `DELETE FROM setting WHERE k=?`, settingKeyUpgradedNotify)
+		return
+	}
+	if s.ntf != nil {
+		err := s.ntf.SendMessage(
+			ctx,
+			fmt.Sprintf("DKStore 商店已自动更新至 %s", target),
+			fmt.Sprintf("商店已从 %s 自动升级至 %s 并正常运行。", nonEmpty(p.From, "旧版本"), target),
+			fmt.Sprintf("DKStore Auto-Updated to %s", target),
+			fmt.Sprintf("DKStore has automatically updated from %s to %s and is running normally.", nonEmpty(p.From, "previous version"), target),
+		)
+		if errors.Is(err, notify.ErrQuietHours) {
+			return
+		}
+	}
+	_, _ = s.st.DB.ExecContext(ctx, `DELETE FROM setting WHERE k=?`, settingKeyUpgradedNotify)
+}
+
+func (s *Service) runScheduledPolicyCheck(ctx context.Context) time.Duration {
+	s.flushPendingUpgradedNotice(ctx)
+	interval := s.checkInterval(ctx)
+
+	lang := i18n.ZhCN
+	if s.ntf != nil {
+		lang = i18n.Normalize(s.ntf.LoadConfig(ctx).Locale)
+	}
+	st := s.CheckStatus(ctx, lang, true)
+	if !st.HasUpdate || st.LatestVersion == "" {
+		return interval
+	}
+
+	switch st.Config.Policy {
+	case PolicyManual:
+		// 手动更新：已完成检测并更新缓存，不发通知推送、不自动升级
+		return interval
+
+	case PolicyNotify:
+		if s.ntf == nil || s.st == nil {
+			return interval
+		}
+		var notifiedVer string
+		_ = s.st.DB.QueryRowContext(ctx, `SELECT v FROM setting WHERE k=?`, settingKeyNotifiedVer).Scan(&notifiedVer)
+		if strings.EqualFold(strings.TrimSpace(notifiedVer), strings.TrimSpace(st.LatestVersion)) {
+			return interval
+		}
+		err := s.ntf.SendMessage(
+			ctx,
+			fmt.Sprintf("DKStore 商店发现新版本 %s", st.LatestVersion),
+			fmt.Sprintf("当前商店版本 %s，可前往「设置」一键更新。", st.CurrentVersion),
+			fmt.Sprintf("DKStore Update Available: %s", st.LatestVersion),
+			fmt.Sprintf("Current store version is %s. Open Settings to update.", st.CurrentVersion),
+		)
+		if errors.Is(err, notify.ErrQuietHours) {
+			return 30 * time.Minute
+		}
+		if err == nil {
+			_, _ = s.st.DB.ExecContext(ctx, `
+				INSERT INTO setting(k, v) VALUES (?, ?)
+				ON CONFLICT(k) DO UPDATE SET v=excluded.v`, settingKeyNotifiedVer, st.LatestVersion)
+		}
+		return interval
+
+	case PolicyAuto:
+		if s.isBusy != nil && s.isBusy() {
+			// 当前有容器升级或巡检正在执行，延后 2 分钟待空闲后再自动升级
+			return 2 * time.Minute
+		}
+		s.schedMu.Lock()
+		recentlyFailed := strings.EqualFold(s.autoFailVer, st.LatestVersion) && time.Since(s.autoFailAt) < 2*time.Hour
+		s.schedMu.Unlock()
+		if recentlyFailed {
+			return interval
+		}
+		_, _ = s.applyOnlineInternal(ctx, lang, true)
+		return interval
+	}
+	return interval
 }
 
 func (s *Service) invalidateCache() {
@@ -612,6 +789,10 @@ func (s *Service) tryEnrichGitHubReleaseNotes(parentCtx context.Context, repo st
 
 // ApplyOnline 启动后台异步在线下载、SHA-256 校验并执行原地热更新。
 func (s *Service) ApplyOnline(ctx context.Context, lang i18n.Lang) (ApplyJob, error) {
+	return s.applyOnlineInternal(ctx, lang, false)
+}
+
+func (s *Service) applyOnlineInternal(ctx context.Context, lang i18n.Lang, isAuto bool) (ApplyJob, error) {
 	s.jobMu.Lock()
 	if s.job.State == "running" || s.job.State == "restarting" {
 		cp := s.job
@@ -634,8 +815,21 @@ func (s *Service) ApplyOnline(ctx context.Context, lang i18n.Lang) (ApplyJob, er
 		bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 
+		markAutoFail := func(ver string) {
+			if !isAuto {
+				return
+			}
+			s.schedMu.Lock()
+			s.autoFailVer = ver
+			s.autoFailAt = time.Now()
+			s.schedMu.Unlock()
+		}
+
 		rel, err := s.fetchReleaseInfo(bgCtx, baseURL, cfg.Repo, cfg.Channel, 15*time.Second)
 		if err != nil || rel == nil || rel.AssetName == "" {
+			if rel != nil {
+				markAutoFail(rel.TagName)
+			}
 			s.failJob(localizeApplyError(lang, firstErr(err, errors.New("no matching package for current platform"))))
 			return
 		}
@@ -647,6 +841,7 @@ func (s *Service) ApplyOnline(ctx context.Context, lang i18n.Lang) (ApplyJob, er
 
 		dlDir := filepath.Join(s.stagingBaseDir(), "bin")
 		if mkErr := os.MkdirAll(dlDir, 0o755); mkErr != nil {
+			markAutoFail(rel.TagName)
 			s.failJob(mkErr.Error())
 			return
 		}
@@ -655,6 +850,7 @@ func (s *Service) ApplyOnline(ctx context.Context, lang i18n.Lang) (ApplyJob, er
 
 		dlURL := baseURL + "/releases/download/" + rel.TagName + "/" + rel.AssetName
 		if err := s.downloadWithResume(bgCtx, dlURL, partPath, rel.AssetSHA256, rel.AssetSize); err != nil {
+			markAutoFail(rel.TagName)
 			s.failJob(localizeApplyError(lang, err))
 			return
 		}
@@ -666,10 +862,12 @@ func (s *Service) ApplyOnline(ctx context.Context, lang i18n.Lang) (ApplyJob, er
 
 		binBytes, err := ExtractBinaryFromFile(partPath, rel.AssetName)
 		if err != nil {
+			markAutoFail(rel.TagName)
 			s.failJob(localizeApplyError(lang, err))
 			return
 		}
-		if err := s.verifyAndInstallBinary(binBytes, rel.TagName, lang); err != nil {
+		if err := s.verifyAndInstallBinary(binBytes, rel.TagName, lang, isAuto); err != nil {
+			markAutoFail(rel.TagName)
 			s.failJob(err.Error())
 			return
 		}
@@ -721,7 +919,7 @@ func (s *Service) ApplyUpload(r io.Reader, filename string, lang i18n.Lang) (App
 		return ApplyJob{}, errors.New(msg)
 	}
 
-	if err := s.verifyAndInstallBinary(binBytes, "", lang); err != nil {
+	if err := s.verifyAndInstallBinary(binBytes, "", lang, false); err != nil {
 		s.failJob(err.Error())
 		return ApplyJob{}, err
 	}
@@ -865,7 +1063,7 @@ func (s *Service) downloadWithResume(ctx context.Context, url, destPath, expecte
 	return nil
 }
 
-func (s *Service) verifyAndInstallBinary(binBytes []byte, knownVersion string, lang i18n.Lang) error {
+func (s *Service) verifyAndInstallBinary(binBytes []byte, knownVersion string, lang i18n.Lang, isAuto bool) error {
 	if err := verifyBinaryArch(binBytes, runtime.GOOS, runtime.GOARCH); err != nil {
 		return errors.New(localizeApplyError(lang, err))
 	}
@@ -916,6 +1114,17 @@ func (s *Service) verifyAndInstallBinary(binBytes []byte, knownVersion string, l
 	execTarget, err := s.commitBinaryToDisk(binBytes, binHash, knownVersion, noexecFallbackPath)
 	if err != nil {
 		return errors.New(localizeApplyError(lang, err))
+	}
+
+	if isAuto && s.st != nil && s.st.DB != nil && knownVersion != "" {
+		if b, mErr := json.Marshal(upgradedNoticePayload{
+			From: strings.TrimSpace(version.Version),
+			To:   knownVersion,
+		}); mErr == nil {
+			_, _ = s.st.DB.ExecContext(context.Background(), `
+				INSERT INTO setting(k, v) VALUES (?, ?)
+				ON CONFLICT(k) DO UPDATE SET v=excluded.v`, settingKeyUpgradedNotify, string(b))
+		}
 	}
 
 	s.updateJob(func(j *ApplyJob) {

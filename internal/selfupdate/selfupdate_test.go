@@ -18,6 +18,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/kukushouhou/DKStore/internal/notify"
+	"github.com/kukushouhou/DKStore/internal/store"
+	"github.com/kukushouhou/DKStore/internal/version"
 )
 
 func TestConfigNormalizeAndEffectiveURL(t *testing.T) {
@@ -28,8 +32,8 @@ func TestConfigNormalizeAndEffectiveURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if cfg.Repo != "myfork/DKStore" {
-		t.Fatalf("got repo %q, want myfork/DKStore", cfg.Repo)
+	if cfg.Repo != "myfork/DKStore" || cfg.Policy != PolicyAuto {
+		t.Fatalf("got repo=%q policy=%q, want myfork/DKStore + auto", cfg.Repo, cfg.Policy)
 	}
 	if got := EffectiveBaseURL(cfg); got != "https://github.com/myfork/DKStore" {
 		t.Fatalf("got %q", got)
@@ -212,5 +216,76 @@ func TestExtractAndVerifyArch(t *testing.T) {
 	extractedPE, err := extractBinaryFromBytes(zBuf.Bytes(), "dkstore.zip", 0)
 	if err != nil || !bytes.Equal(extractedPE, peAmd64) {
 		t.Fatalf("extract from .zip failed: err=%v", err)
+	}
+}
+
+func TestPolicyNotifyOnceAndManualSilent(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	st, err := store.Open(ctx, dataDir)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	defer st.Close()
+
+	oldVer := version.Version
+	version.Version = "v0.4.0"
+	defer func() { version.Version = oldVer }()
+
+	var pushCount int32
+	webhookSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&pushCount, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer webhookSrv.Close()
+
+	relSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"version":"v0.5.0","notesZh":"test"}`))
+	}))
+	defer relSrv.Close()
+
+	ntfSvc := notify.New(st)
+	if err := ntfSvc.SaveConfig(ctx, notify.Config{
+		Locale:             "zh-CN",
+		CheckIntervalHours: 6,
+		Channel:            "webhook",
+		WebhookURL:         webhookSrv.URL,
+	}); err != nil {
+		t.Fatalf("SaveConfig notify: %v", err)
+	}
+
+	svc := New(nil, st, dataDir, nil)
+	svc.SetAutoUpdateDeps(ntfSvc, func() bool { return false })
+
+	// 1. 手动更新（manual）：检测新版本但不发外部推送
+	if _, err := svc.SaveConfig(ctx, Config{
+		Policy:     PolicyManual,
+		Repo:       "kukushouhou/DKStore",
+		Channel:    ChannelCustom,
+		CustomHost: relSrv.URL,
+		CustomMode: CustomModeHost,
+	}); err != nil {
+		t.Fatalf("SaveConfig manual: %v", err)
+	}
+	svc.runScheduledPolicyCheck(ctx)
+	if got := atomic.LoadInt32(&pushCount); got != 0 {
+		t.Fatalf("manual policy should not push notification, got %d", got)
+	}
+
+	// 2. 仅推送提醒（notify）：同一新版本仅推送一次
+	if _, err := svc.SaveConfig(ctx, Config{
+		Policy:     PolicyNotify,
+		Repo:       "kukushouhou/DKStore",
+		Channel:    ChannelCustom,
+		CustomHost: relSrv.URL,
+		CustomMode: CustomModeHost,
+	}); err != nil {
+		t.Fatalf("SaveConfig notify: %v", err)
+	}
+	svc.runScheduledPolicyCheck(ctx)
+	svc.runScheduledPolicyCheck(ctx)
+	if got := atomic.LoadInt32(&pushCount); got != 1 {
+		t.Fatalf("notify policy should push exactly once per version, got %d", got)
 	}
 }

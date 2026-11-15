@@ -625,6 +625,7 @@ export interface RollbackVerifyResult {
 }
 
 export interface SelfUpdateConfig {
+  policy?: 'auto' | 'notify' | 'manual'
   repo: string
   channel: 'github' | 'mirror' | 'custom'
   customHost: string

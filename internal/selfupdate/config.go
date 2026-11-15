@@ -15,6 +15,10 @@ const (
 	// OfficialMirrorEnabled 控制是否在前端开放官方镜像源入口（待 gh.h5.gg Worker 正式上线后开启为 true）。
 	OfficialMirrorEnabled = false
 
+	PolicyAuto   = "auto"
+	PolicyNotify = "notify"
+	PolicyManual = "manual"
+
 	ChannelGitHub = "github"
 	ChannelMirror = "mirror"
 	ChannelCustom = "custom"
@@ -22,7 +26,9 @@ const (
 	CustomModePrefix = "prefix"
 	CustomModeHost   = "host"
 
-	settingKeyConfig = "self_update_config"
+	settingKeyConfig         = "self_update_config"
+	settingKeyNotifiedVer    = "self_update_notified_ver"
+	settingKeyUpgradedNotify = "self_update_upgraded_notify"
 )
 
 // PresetMirrors 是内置的常用 GitHub Release 加速节点候选列表。
@@ -42,8 +48,9 @@ var (
 
 var validRepoRe = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
 
-// Config 保存商店自更新的源码仓库与下载通道配置。
+// Config 保存商店自更新的策略、源码仓库与下载源配置。
 type Config struct {
+	Policy     string `json:"policy"`     // "auto" | "notify" | "manual"，默认 "auto"
 	Repo       string `json:"repo"`       // 形如 "kukushouhou/DKStore"
 	Channel    string `json:"channel"`    // "github" | "mirror" | "custom"
 	CustomHost string `json:"customHost"` // 形如 "https://gh-proxy.org"
@@ -59,9 +66,10 @@ func DefaultRepoSlug() string {
 	return r
 }
 
-// DefaultConfig 返回默认配置（始终默认直连 GitHub 官方仓库）。
+// DefaultConfig 返回默认配置（默认自动更新商店，直连 GitHub 官方仓库）。
 func DefaultConfig() Config {
 	return Config{
+		Policy:     PolicyAuto,
 		Repo:       DefaultRepoSlug(),
 		Channel:    ChannelGitHub,
 		CustomHost: "",
@@ -129,6 +137,13 @@ func NormalizeCustomHost(raw string) (string, error) {
 
 // NormalizeAndValidate 校验并归一化自更新配置。requireComplete=true 时要求自定义镜像必填地址。
 func NormalizeAndValidate(in Config, requireComplete bool) (Config, error) {
+	pol := strings.ToLower(strings.TrimSpace(in.Policy))
+	switch pol {
+	case PolicyAuto, PolicyNotify, PolicyManual:
+	default:
+		pol = PolicyAuto
+	}
+
 	repo, err := NormalizeRepo(in.Repo)
 	if err != nil {
 		return Config{}, err
@@ -165,6 +180,7 @@ func NormalizeAndValidate(in Config, requireComplete bool) (Config, error) {
 	}
 
 	return Config{
+		Policy:     pol,
 		Repo:       repo,
 		Channel:    ch,
 		CustomHost: host,

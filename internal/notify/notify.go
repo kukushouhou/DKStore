@@ -135,6 +135,26 @@ func (s *Service) SendUpdates(ctx context.Context, items []i18n.NotifyItem) erro
 	return s.dispatch(ctx, cfg, lang, title, body)
 }
 
+// SendMessage 按系统当前语言配置向已启用的通知渠道发送自定义消息；未启用推送渠道时静默返回 nil，处于免打扰时段返回 ErrQuietHours。
+func (s *Service) SendMessage(ctx context.Context, titleZh, bodyZh, titleEn, bodyEn string) error {
+	if s == nil || s.st == nil {
+		return nil
+	}
+	cfg := s.LoadConfig(ctx)
+	if cfg.Channel == "" {
+		return nil
+	}
+	if inQuietHours(time.Now(), cfg.QuietHoursStart, cfg.QuietHoursEnd) {
+		return ErrQuietHours
+	}
+	lang := i18n.Normalize(cfg.Locale)
+	title, body := titleZh, bodyZh
+	if lang == i18n.EnUS {
+		title, body = titleEn, bodyEn
+	}
+	return s.dispatch(ctx, cfg, lang, title, body)
+}
+
 // inQuietHours 判断当前本地时间是否处于 [start, end) 免打扰区间（支持跨零点，如 "23:00" 至 "08:00"）。
 func inQuietHours(now time.Time, startStr, endStr string) bool {
 	startMin, ok1 := parseHHMM(startStr)

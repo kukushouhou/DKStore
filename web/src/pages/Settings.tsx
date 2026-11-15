@@ -63,6 +63,7 @@ export default function SettingsPage() {
   const [suCfgDraft, setSuCfg] = useState<SelfUpdateConfig | null>(null)
   const suCfg: SelfUpdateConfig = suCfgDraft ??
     selfUpdateQuery.data?.config ?? {
+      policy: 'auto',
       repo: 'kukushouhou/DKStore',
       channel: 'github',
       customHost: '',

@@ -87,6 +87,14 @@ export default function SelfUpdateSourceFields({
   }
 
   const isVertical = layout === 'vertical'
+  const effectivePolicy =
+    value.policy === 'notify' || value.policy === 'manual' ? value.policy : 'auto'
+  const policyDesc =
+    effectivePolicy === 'notify'
+      ? t.selfUpdate.policyDescNotify
+      : effectivePolicy === 'manual'
+        ? t.selfUpdate.policyDescManual
+        : t.selfUpdate.policyDescAuto
   const hasOfficialMirror = Boolean(officialMirror.trim())
   const cleanRepo = (value.repo || defaultRepo).trim().replace(/^\/+|\/+$/g, '') || defaultRepo
   const isOfficialRepo = cleanRepo.toLowerCase() === defaultRepo.toLowerCase()
@@ -143,6 +151,10 @@ export default function SelfUpdateSourceFields({
     onChange({ ...value, channel: ch })
   }
 
+  const handlePolicyChange = (pol: 'auto' | 'notify' | 'manual') => {
+    onChange({ ...value, policy: pol })
+  }
+
   const handleCustomHostChange = (host: string) => {
     setTestOkLatency(null)
     onChange({ ...value, customHost: host })
@@ -170,6 +182,19 @@ export default function SelfUpdateSourceFields({
       setTesting(false)
     }
   }
+
+  const policySegmented = (
+    <Segmented
+      block={isVertical}
+      value={effectivePolicy}
+      onChange={(v) => handlePolicyChange(v as 'auto' | 'notify' | 'manual')}
+      options={[
+        { label: t.selfUpdate.policyAuto, value: 'auto' },
+        { label: t.selfUpdate.policyNotify, value: 'notify' },
+        { label: t.selfUpdate.policyManual, value: 'manual' },
+      ]}
+    />
+  )
 
   const channelSegmented = (
     <Segmented
@@ -280,6 +305,14 @@ export default function SelfUpdateSourceFields({
       <>
         <Form layout="vertical" component="div">
           <Form.Item
+            label={t.selfUpdate.policyLabel}
+            extra={policyDesc}
+            style={{ marginBottom: 14 }}
+          >
+            {policySegmented}
+          </Form.Item>
+
+          <Form.Item
             label={
               <Flex align="center" justify="space-between" style={{ width: '100%' }}>
                 <span>{t.selfUpdate.repoLabel}</span>
@@ -297,7 +330,7 @@ export default function SelfUpdateSourceFields({
               </Flex>
             }
             extra={repoFocused ? t.selfUpdate.repoFocusHint : undefined}
-            style={{ marginBottom: 16 }}
+            style={{ marginBottom: 14 }}
           >
             <Space.Compact style={{ width: '100%' }}>
               <Space.Addon style={{ fontFamily: token.fontFamilyCode }}>github.com/</Space.Addon>
@@ -335,14 +368,25 @@ export default function SelfUpdateSourceFields({
   }
 
   // Horizontal layout (Settings Page)
-  const labelWidth = 84
+  const labelWidth = 148
   return (
     <>
       <Space orientation="vertical" size={12} style={{ width: '100%' }}>
-        {/* 行 1：源码仓库 */}
+        {/* 行 1：商店更新(非容器更新) */}
+        <Flex align="center" gap={12} wrap>
+          <Typography.Text style={{ width: labelWidth, flexShrink: 0, whiteSpace: 'nowrap' }}>
+            {t.selfUpdate.policyLabel}
+          </Typography.Text>
+          {policySegmented}
+          <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+            {policyDesc}
+          </Typography.Text>
+        </Flex>
+
+        {/* 行 2：源码仓库 */}
         <div>
           <Flex align="center" gap={12} wrap>
-            <Typography.Text style={{ width: labelWidth, flexShrink: 0 }}>
+            <Typography.Text style={{ width: labelWidth, flexShrink: 0, whiteSpace: 'nowrap' }}>
               {t.selfUpdate.repoLabel}
             </Typography.Text>
             <Space.Compact style={{ width: '100%', maxWidth: 580 }}>
@@ -378,9 +422,9 @@ export default function SelfUpdateSourceFields({
           )}
         </div>
 
-        {/* 行 2：更新方式 */}
+        {/* 行 3：下载源 */}
         <Flex align="center" gap={12} wrap>
-          <Typography.Text style={{ width: labelWidth, flexShrink: 0 }}>
+          <Typography.Text style={{ width: labelWidth, flexShrink: 0, whiteSpace: 'nowrap' }}>
             {t.selfUpdate.channelLabel}
           </Typography.Text>
           {channelSegmented}
@@ -397,10 +441,13 @@ export default function SelfUpdateSourceFields({
           )}
         </Flex>
 
-        {/* 行 3：请求地址（严格限制最大 460px 与源码仓库左/右对齐） */}
+        {/* 行 4：请求地址 */}
         <div>
           <Flex align="center" gap={12} wrap>
-            <Typography.Text type="secondary" style={{ width: labelWidth, flexShrink: 0 }}>
+            <Typography.Text
+              type="secondary"
+              style={{ width: labelWidth, flexShrink: 0, whiteSpace: 'nowrap' }}
+            >
               {t.selfUpdate.urlLabel}
             </Typography.Text>
             <Flex align="center" gap={8} wrap style={{ flex: 1, minWidth: 0 }}>

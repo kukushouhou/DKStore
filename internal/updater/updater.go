@@ -165,6 +165,16 @@ func (s *Service) SetOnHostUpdated(fn func(hostID string)) {
 	s.onHostUpdated = fn
 }
 
+// HasActiveJobs 返回当前是否存在正在排队或执行中的容器升级/回退任务。
+func (s *Service) HasActiveJobs() bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.activeJobs) > 0
+}
+
 func (s *Service) recoverInterruptedJobs() {
 	if s.st == nil {
 		return
