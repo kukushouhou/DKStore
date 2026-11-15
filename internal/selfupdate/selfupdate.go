@@ -883,7 +883,7 @@ func (s *Service) verifyAndInstallBinary(binBytes []byte, knownVersion string, l
 		return err
 	}
 
-	// 先落临时可执行文件并试运行 --print-version，确保内核与当前文件系统可正常拉起进程
+	// 先落临时可执行文件并试运行 --print-version；若数据目录挂载了 noexec，自动回退至系统/容器内可执行目录校验并运行
 	probeTmp := filepath.Join(binDir, fmt.Sprintf(".dkstore-probe-%d", time.Now().UnixNano()))
 	if runtime.GOOS == "windows" {
 		probeTmp += ".exe"
@@ -893,6 +893,19 @@ func (s *Service) verifyAndInstallBinary(binBytes []byte, knownVersion string, l
 	}
 	detectedVer, execErr := probeBinaryVersion(probeTmp)
 	_ = os.Remove(probeTmp)
+
+	var noexecFallbackPath string
+	if execErr != nil && runtime.GOOS != "windows" && errors.Is(execErr, os.ErrPermission) {
+		outerExe := os.Getenv(envBaseExecutable)
+		if outerExe == "" {
+			outerExe, _ = os.Executable()
+		}
+		if fbPath, fbVer, fbErr := stageExecFallbackCopy(binBytes, outerExe); fbErr == nil {
+			noexecFallbackPath = fbPath
+			detectedVer = fbVer
+			execErr = nil
+		}
+	}
 	if execErr != nil {
 		return errors.New(localizeApplyError(lang, execErr))
 	}
@@ -900,7 +913,7 @@ func (s *Service) verifyAndInstallBinary(binBytes []byte, knownVersion string, l
 		knownVersion = detectedVer
 	}
 
-	execTarget, err := s.commitBinaryToDisk(binBytes, binHash, knownVersion)
+	execTarget, err := s.commitBinaryToDisk(binBytes, binHash, knownVersion, noexecFallbackPath)
 	if err != nil {
 		return errors.New(localizeApplyError(lang, err))
 	}
@@ -945,7 +958,7 @@ func probeBinaryVersion(binPath string) (string, error) {
 	return line, nil
 }
 
-func (s *Service) commitBinaryToDisk(binBytes []byte, binHash, targetVersion string) (string, error) {
+func (s *Service) commitBinaryToDisk(binBytes []byte, binHash, targetVersion, noexecFallbackPath string) (string, error) {
 	mode := detectInstallMode()
 	exePath, _ := os.Executable()
 
@@ -1024,6 +1037,9 @@ func (s *Service) commitBinaryToDisk(binBytes []byte, binHash, targetVersion str
 		Healthy:       true,
 		UpdatedAt:     time.Now().Unix(),
 	})
+	if noexecFallbackPath != "" {
+		return noexecFallbackPath, nil
+	}
 	return overrideBin, nil
 }
 

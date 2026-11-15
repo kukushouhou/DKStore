@@ -50,6 +50,11 @@ export default function SettingsPage() {
 
   const settingsQuery = useQuery({ queryKey: ['settings'], queryFn: api.getSettings })
   const credsQuery = useQuery({ queryKey: ['regCreds'], queryFn: api.listRegCreds })
+  const healthQuery = useQuery({
+    queryKey: ['health'],
+    queryFn: api.health,
+    staleTime: 5 * 60 * 1000,
+  })
   const selfUpdateQuery = useQuery({
     queryKey: ['selfUpdate', locale],
     queryFn: () => api.selfUpdateStatus(false),
@@ -329,18 +334,29 @@ export default function SettingsPage() {
             <Space wrap>
               <Typography.Text type="secondary">{t.settings.curVersionLabel}:</Typography.Text>
               <Tag style={{ fontFamily: token.fontFamilyCode, margin: 0 }}>
-                {selfUpdateQuery.data?.currentVersion || 'v0.3.0'}
+                {selfUpdateQuery.data?.currentVersion || healthQuery.data?.version || '-'}
               </Tag>
               <Typography.Text type="secondary">{t.settings.latestVersionLabel}:</Typography.Text>
-              <Tag
-                color={selfUpdateQuery.data?.hasUpdate ? 'processing' : 'success'}
-                style={{ fontFamily: token.fontFamilyCode, margin: 0 }}
-              >
-                {selfUpdateQuery.data?.latestVersion || selfUpdateQuery.data?.currentVersion || 'v0.3.0'}
-              </Tag>
-              <Tag color={selfUpdateQuery.data?.hasUpdate ? 'processing' : 'success'} style={{ margin: 0 }}>
-                {selfUpdateQuery.data?.hasUpdate ? t.settings.newVersionBadge : t.settings.upToDateBadge}
-              </Tag>
+              {selfUpdateQuery.data ? (
+                <>
+                  <Tag
+                    color={selfUpdateQuery.data.hasUpdate ? 'processing' : 'success'}
+                    style={{ fontFamily: token.fontFamilyCode, margin: 0 }}
+                  >
+                    {selfUpdateQuery.data.latestVersion || selfUpdateQuery.data.currentVersion}
+                  </Tag>
+                  <Tag
+                    color={selfUpdateQuery.data.hasUpdate ? 'processing' : 'success'}
+                    style={{ margin: 0 }}
+                  >
+                    {selfUpdateQuery.data.hasUpdate
+                      ? t.settings.newVersionBadge
+                      : t.settings.upToDateBadge}
+                  </Tag>
+                </>
+              ) : (
+                <Tag style={{ margin: 0 }}>{t.home.checking}</Tag>
+              )}
               {selfUpdateQuery.data?.releaseNotes ? (
                 <Button
                   size="small"

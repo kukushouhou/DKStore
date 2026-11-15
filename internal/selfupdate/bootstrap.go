@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -130,6 +131,9 @@ func MaybeBootstrap(dataDir string, log *slog.Logger) {
 		if cmp > 0 || (cmp == 0 && outerChanged) {
 			_ = os.Remove(overrideBin)
 			_ = os.Remove(overrideStatePath(dataDir))
+			if exePath != "" {
+				_ = os.Remove(filepath.Join(filepath.Dir(exePath), ".dkstore-override"))
+			}
 			if log != nil {
 				log.Info("检测到外层程序版本已追平或超越热更包，自动切回主程序", "outer", version.Version, "override", st.Version)
 			}
@@ -176,7 +180,16 @@ func MaybeBootstrap(dataDir string, log *slog.Logger) {
 		env = withEnv(env, envBaseExecutable, exePath)
 	}
 	if err := execReplaceProcess(overrideBin, os.Args, env); err != nil {
-		// 如遇挂载卷 noexec 等导致无法直接执行，记录原因并回退继续运行原程序
+		// 如遇数据卷挂载为 noexec（如部分 OMV/Linux 数据盘或 /tmp），自动拷入可执行运行路径后再启动
+		if errors.Is(err, os.ErrPermission) {
+			if binBytes, rErr := os.ReadFile(overrideBin); rErr == nil {
+				if fbPath, _, fbErr := stageExecFallbackCopy(binBytes, exePath); fbErr == nil {
+					if execReplaceProcess(fbPath, os.Args, env) == nil {
+						return
+					}
+				}
+			}
+		}
 		_ = os.Remove(overrideBin)
 		st.RolledBackNote = fmt.Sprintf("exec override failed (%v); rolled back", err)
 		_ = writeOverrideState(dataDir, st)
@@ -212,10 +225,12 @@ func MarkBootHealthy(dataDir string) {
 func ExecReload(targetBin, dataDir string) error {
 	env := os.Environ()
 	overrideBin := OverrideBinaryPath(dataDir)
-	if dataDir != "" && sameFilePath(targetBin, overrideBin) {
+	isFallbackOverride := strings.HasSuffix(filepath.Base(targetBin), ".dkstore-override")
+	if isFallbackOverride || (dataDir != "" && sameFilePath(targetBin, overrideBin)) {
 		env = withEnv(env, envBootstrapped, "1")
 		if os.Getenv(envBaseExecutable) == "" {
-			if exe, err := os.Executable(); err == nil && exe != "" && !sameFilePath(exe, overrideBin) {
+			if exe, err := os.Executable(); err == nil && exe != "" &&
+				!sameFilePath(exe, overrideBin) && !strings.HasSuffix(filepath.Base(exe), ".dkstore-override") {
 				env = withEnv(env, envBaseExecutable, exe)
 			}
 		}
@@ -223,6 +238,54 @@ func ExecReload(targetBin, dataDir string) error {
 		env = withEnv(env, envBootstrapped, "0")
 	}
 	return execReplaceProcess(targetBin, os.Args, env)
+}
+
+// stageExecFallbackCopy 在数据目录挂载了 noexec 时，将已校验的新版二进制拷入容器/系统可执行目录以供运行。
+func stageExecFallbackCopy(binBytes []byte, baseExe string) (string, string, error) {
+	var dirs []string
+	if baseExe != "" {
+		if resolved, err := filepath.EvalSymlinks(baseExe); err == nil && resolved != "" {
+			dirs = append(dirs, filepath.Dir(resolved))
+		} else {
+			dirs = append(dirs, filepath.Dir(baseExe))
+		}
+	}
+	dirs = append(dirs, "/usr/local/bin", "/dev/shm", "/run")
+
+	var lastErr error
+	seen := make(map[string]bool, len(dirs))
+	for _, d := range dirs {
+		d = filepath.Clean(d)
+		if d == "" || seen[d] {
+			continue
+		}
+		seen[d] = true
+		if st, err := os.Stat(d); err != nil || !st.IsDir() {
+			continue
+		}
+		dst := filepath.Join(d, ".dkstore-override")
+		tmp := fmt.Sprintf("%s.tmp-%d", dst, time.Now().UnixNano())
+		if err := os.WriteFile(tmp, binBytes, 0o755); err != nil {
+			lastErr = err
+			continue
+		}
+		ver, pErr := probeBinaryVersion(tmp)
+		if pErr != nil {
+			_ = os.Remove(tmp)
+			lastErr = pErr
+			continue
+		}
+		if err := os.Rename(tmp, dst); err != nil {
+			_ = os.Remove(tmp)
+			lastErr = err
+			continue
+		}
+		return dst, ver, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no executable fallback directory available")
+	}
+	return "", "", lastErr
 }
 
 // RolledBackNote 读取并返回可能存在的自动熔断回退提示。
