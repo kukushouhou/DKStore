@@ -58,6 +58,7 @@ type Job struct {
 	RollbackRef        string                `json:"rollbackRef,omitempty"`
 	RollbackReason     string                `json:"rollbackReason,omitempty"`
 	RollbackReasonText string                `json:"rollbackReasonText,omitempty"`
+	Retryable          bool                  `json:"retryable"`
 	ErrorCode          string                `json:"errorCode,omitempty"`
 	ErrorMsg           string                `json:"errorMsg,omitempty"`
 	rawErrorMsg        string
@@ -1500,6 +1501,7 @@ func (s *Service) finishJobFailed(j Job, code, msg, logs string) {
 	finished := time.Now().Unix()
 	j.Status = "failed"
 	j.Phase = "done"
+	j.Retryable = j.Source != string(platform.SourceVendorManaged)
 	j.ErrorCode = code
 	j.rawErrorMsg = msg
 	j.ErrorMsg = i18n.FormatUpdateError(i18n.ZhCN, code, msg)

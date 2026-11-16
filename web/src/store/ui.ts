@@ -76,6 +76,7 @@ function isSameJobVisualState(prev: UpdateJobItem, next: UpdateJobItem): boolean
   if (
     prev.status !== next.status ||
     prev.phase !== next.phase ||
+    prev.retryable !== next.retryable ||
     prev.errorCode !== next.errorCode ||
     prev.errorMsg !== next.errorMsg ||
     prev.finishedAt !== next.finishedAt ||
@@ -211,15 +212,16 @@ export const useUIStore = create<UIState>((set) => ({
       const isNewRunning =
         !existing && (job.status === 'queued' || job.status === 'running')
       const nextQueue = { ...s.updateQueueJobs }
-      if (job.status === 'queued' || job.status === 'running') {
-        for (const [oldId, oldJob] of Object.entries(nextQueue)) {
-          if (
-            oldId !== job.id &&
-            oldJob.serviceKey === job.serviceKey &&
-            (oldJob.status === 'failed' || oldJob.status === 'succeeded')
-          ) {
-            delete nextQueue[oldId]
-          }
+      for (const [oldId, oldJob] of Object.entries(nextQueue)) {
+        if (
+          oldId !== job.id &&
+          oldJob.serviceKey === job.serviceKey &&
+          (oldJob.status === 'failed' || oldJob.status === 'succeeded') &&
+          (job.status === 'queued' ||
+            job.status === 'running' ||
+            (job.startedAt || 0) >= (oldJob.startedAt || 0))
+        ) {
+          delete nextQueue[oldId]
         }
       }
       nextQueue[job.id] = job

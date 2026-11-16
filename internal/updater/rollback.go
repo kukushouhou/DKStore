@@ -40,7 +40,7 @@ func (s *Service) ListJobs(ctx context.Context, limit int, lang i18n.Lang) ([]Jo
 		       COALESCE(error_code,''), COALESCE(error_msg,''), COALESCE(logs_text,''),
 		       started_at, COALESCE(finished_at,0)
 		FROM update_job
-		ORDER BY started_at DESC
+		ORDER BY started_at DESC, rowid DESC
 		LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
@@ -59,13 +59,35 @@ func (s *Service) ListJobs(ctx context.Context, limit int, lang i18n.Lang) ([]Jo
 		return nil, err
 	}
 
-	// 若任务仍在运行中，叠加内存态的最新实时分层进度与日志偏移量
+	// 若任务仍在运行中，叠加内存态的最新实时分层进度与日志偏移量，并按项目/服务计算唯一可重试状态
+	activeSvc := make(map[string]bool)
+	activeWholeApp := make(map[string]bool)
+	activeAnySvcInApp := make(map[string]bool)
 	s.mu.Lock()
 	if len(s.activeJobs) > 0 {
 		byID := make(map[string]Job, len(s.activeJobs))
 		for _, aj := range s.activeJobs {
 			if aj.ID != "" {
 				byID[aj.ID] = aj
+			}
+			if aj.Status == "running" || aj.Status == "queued" {
+				sk := aj.ServiceKey
+				if sk == "" {
+					sk = aj.AppKey
+				}
+				ak := aj.AppKey
+				if ak == "" {
+					ak = sk
+				}
+				if sk != "" {
+					activeSvc[sk] = true
+				}
+				if ak != "" {
+					activeAnySvcInApp[ak] = true
+					if aj.ServiceKey == "" || aj.ServiceKey == aj.AppKey {
+						activeWholeApp[ak] = true
+					}
+				}
 			}
 		}
 		for i := range out {
@@ -78,6 +100,38 @@ func (s *Service) ListJobs(ctx context.Context, limit int, lang i18n.Lang) ([]Jo
 		}
 	}
 	s.mu.Unlock()
+
+	seenSvc := make(map[string]bool, len(out))
+	seenWholeApp := make(map[string]bool, len(out))
+	seenAnySvcInApp := make(map[string]bool, len(out))
+	for i := range out {
+		sk := out[i].ServiceKey
+		if sk == "" {
+			sk = out[i].AppKey
+		}
+		ak := out[i].AppKey
+		if ak == "" {
+			ak = sk
+		}
+		isWholeApp := out[i].ServiceKey == "" || out[i].ServiceKey == out[i].AppKey
+		superseded := seenSvc[sk] || seenWholeApp[ak] || activeSvc[sk] || activeWholeApp[ak]
+		if isWholeApp && (seenAnySvcInApp[ak] || activeAnySvcInApp[ak]) {
+			superseded = true
+		}
+		out[i].Retryable = !superseded &&
+			out[i].Status == "failed" &&
+			out[i].Source != string(platform.SourceVendorManaged)
+
+		if sk != "" {
+			seenSvc[sk] = true
+		}
+		if ak != "" {
+			seenAnySvcInApp[ak] = true
+			if isWholeApp {
+				seenWholeApp[ak] = true
+			}
+		}
+	}
 	return out, nil
 }
 
@@ -123,7 +177,58 @@ func (s *Service) GetJob(ctx context.Context, id string, lang i18n.Lang) (*Job, 
 	if err != nil {
 		return nil, err
 	}
+	rows.Close()
+	j.Retryable = s.computeSingleJobRetryable(ctx, j)
 	return &j, nil
+}
+
+func (s *Service) computeSingleJobRetryable(ctx context.Context, j Job) bool {
+	if j.Status != "failed" || j.Source == string(platform.SourceVendorManaged) {
+		return false
+	}
+	sk := j.ServiceKey
+	if sk == "" {
+		sk = j.AppKey
+	}
+	ak := j.AppKey
+	if ak == "" {
+		ak = sk
+	}
+	isWholeApp := j.ServiceKey == "" || j.ServiceKey == j.AppKey
+
+	s.mu.Lock()
+	for _, aj := range s.activeJobs {
+		if aj.Status != "running" && aj.Status != "queued" {
+			continue
+		}
+		if (sk != "" && aj.ServiceKey == sk) ||
+			(ak != "" && (aj.ServiceKey == ak || aj.ServiceKey == "") && aj.AppKey == ak) ||
+			(isWholeApp && ak != "" && aj.AppKey == ak) {
+			s.mu.Unlock()
+			return false
+		}
+	}
+	s.mu.Unlock()
+
+	var latestID string
+	var err error
+	if isWholeApp {
+		err = s.st.DB.QueryRowContext(ctx, `
+			SELECT id FROM update_job
+			WHERE app_key = ?
+			ORDER BY started_at DESC, rowid DESC
+			LIMIT 1`, ak).Scan(&latestID)
+	} else {
+		err = s.st.DB.QueryRowContext(ctx, `
+			SELECT id FROM update_job
+			WHERE service_key = ? OR (app_key = ? AND (service_key = app_key OR service_key = ''))
+			ORDER BY started_at DESC, rowid DESC
+			LIMIT 1`, sk, ak).Scan(&latestID)
+	}
+	if err != nil {
+		return false
+	}
+	return latestID == j.ID
 }
 
 // VerifyRollback 动态核验一条历史升级记录当前是否仍可安全无歧义回退（立项文档 §8.2 / A10 / A12）。

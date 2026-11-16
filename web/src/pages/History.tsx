@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Alert,
   Button,
@@ -56,6 +56,44 @@ export default function HistoryPage() {
 
   const updateItems = updatesQuery.data?.items ?? []
   const scanItems = runsQuery.data?.items ?? []
+  const activeUpdateJobs = useUIStore((s) => s.activeUpdateJobs)
+
+  // 同一项目/容器仅在其“最新一条记录仍是失败”且当前未在执行更新时才展示「重试」按钮
+  const retryableJobIds = useMemo(() => {
+    const items = updatesQuery.data?.items ?? []
+    const seenSvc = new Set<string>()
+    const seenWholeApp = new Set<string>()
+    const seenAnySvcInApp = new Set<string>()
+    const allow = new Set<string>()
+    const activeAppKeys = new Set(
+      Object.values(activeUpdateJobs)
+        .map((j) => j.appKey)
+        .filter(Boolean),
+    )
+    for (const j of items) {
+      const sk = j.serviceKey || j.appKey
+      const ak = j.appKey || sk
+      const isWholeApp = !j.serviceKey || j.serviceKey === j.appKey
+      const hasActive =
+        Boolean(sk && activeUpdateJobs[sk]) ||
+        Boolean(ak && activeUpdateJobs[ak]) ||
+        (isWholeApp && Boolean(ak && activeAppKeys.has(ak)))
+      const superseded =
+        seenSvc.has(sk) ||
+        seenWholeApp.has(ak) ||
+        (isWholeApp && seenAnySvcInApp.has(ak)) ||
+        hasActive
+      if (!superseded && j.status === 'failed' && j.retryable !== false) {
+        allow.add(j.id)
+      }
+      if (sk) seenSvc.add(sk)
+      if (ak) {
+        seenAnySvcInApp.add(ak)
+        if (isWholeApp) seenWholeApp.add(ak)
+      }
+    }
+    return allow
+  }, [updatesQuery.data?.items, activeUpdateJobs])
 
   const failedCount = updateItems.filter((j) => j.status === 'failed').length
   const clearableCount = updateItems.filter(
@@ -279,7 +317,7 @@ export default function HistoryPage() {
                       >
                         {t.home.viewLogs}
                       </Button>
-                      {job.status === 'failed' && (
+                      {retryableJobIds.has(job.id) && (
                         <Button
                           size="small"
                           type="primary"

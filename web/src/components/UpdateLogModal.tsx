@@ -40,6 +40,7 @@ function UpdateLogModalBody({ jobId, onClose }: { jobId: string; onClose: () => 
   const { t } = useI18n()
   const qc = useQueryClient()
   const liveJob = useUIStore((s) => s.updateQueueJobs[jobId])
+  const activeUpdateJobs = useUIStore((s) => s.activeUpdateJobs)
   const [fetchedJob, setFetchedJob] = useState<UpdateJobItem | null>(null)
   const [hasAnyOutput, setHasAnyOutput] = useState(false)
   const [retrying, setRetrying] = useState(false)
@@ -180,7 +181,10 @@ function UpdateLogModalBody({ jobId, onClose }: { jobId: string; onClose: () => 
         const res = await api.getUpdateJob(jobId)
         if (disposed) return
         setFetchedJob(res)
-        useUIStore.getState().upsertUpdateJob(res)
+        const curSt = useUIStore.getState()
+        if (curSt.updateQueueJobs[jobId] || res.status === 'queued' || res.status === 'running') {
+          curSt.upsertUpdateJob(res)
+        }
         let baseLogs = res.logs ?? ''
         if (!baseLogs && (res.status === 'failed' || res.status === 'succeeded')) {
           const headerLine = `\x1b[36m==> ${res.appName} / ${res.serviceName} (${res.oldImageRef} -> ${res.targetImageRef})\x1b[0m\n`
@@ -312,6 +316,13 @@ function UpdateLogModalBody({ jobId, onClose }: { jobId: string; onClose: () => 
       ? `${job.appName} (${job.serviceName})`
       : job?.appName || jobId
   const titleText = t.logModal.title.replace('{name}', displayName)
+  const hasRunningSameTarget = Boolean(
+    job &&
+      ((job.serviceKey && activeUpdateJobs[job.serviceKey]) ||
+        (job.appKey && activeUpdateJobs[job.appKey])),
+  )
+  const canRetry =
+    status === 'failed' && job?.retryable !== false && !hasRunningSameTarget
 
   const handleRetry = async () => {
     setRetrying(true)
@@ -391,12 +402,12 @@ function UpdateLogModalBody({ jobId, onClose }: { jobId: string; onClose: () => 
           </Button>
           <Button
             size="small"
-            type={status === 'failed' ? 'default' : 'primary'}
+            type={canRetry ? 'default' : 'primary'}
             onClick={onClose}
           >
             {t.logModal.closeBtn}
           </Button>
-          {status === 'failed' && (
+          {canRetry && (
             <Button size="small" type="primary" loading={retrying} onClick={handleRetry}>
               {t.queue.retryBtn}
             </Button>

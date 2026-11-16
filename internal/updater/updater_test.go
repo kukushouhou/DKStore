@@ -560,3 +560,72 @@ func TestRetryJob_PreservesTargetAndRefreshesCurrentImage(t *testing.T) {
 		}
 	}
 }
+
+func TestListAndGetJobs_OnlyLatestFailedPerServiceIsRetryable(t *testing.T) {
+	up, _ := newTestUpdater(t, nil)
+	ctx := context.Background()
+
+	mk := func(id, status string, ts int64) Job {
+		return Job{
+			ID:             id,
+			Kind:           "upgrade",
+			HostID:         "h1",
+			HostName:       "软路由模拟器",
+			AppKey:         "h1/standalone/home-assistant",
+			AppName:        "home-assistant",
+			ServiceKey:     "h1/standalone/home-assistant/main",
+			ServiceName:    "main",
+			Source:         "standalone",
+			Status:         status,
+			Phase:          "done",
+			OldImageRef:    "homeassistant/home-assistant:latest",
+			TargetImageRef: "homeassistant/home-assistant:latest",
+			StartedAt:      ts,
+		}
+	}
+
+	if err := up.insertJob(ctx, mk("j_old_fail", "failed", 1000)); err != nil {
+		t.Fatal(err)
+	}
+	if err := up.insertJob(ctx, mk("j_new_fail", "failed", 2000)); err != nil {
+		t.Fatal(err)
+	}
+
+	list1, err := up.ListJobs(ctx, 50, i18n.ZhCN)
+	if err != nil || len(list1) != 2 {
+		t.Fatalf("ListJobs len=%d err=%v", len(list1), err)
+	}
+	if !list1[0].Retryable || list1[0].ID != "j_new_fail" {
+		t.Fatalf("expected newest failed job to be retryable, got %+v", list1[0])
+	}
+	if list1[1].Retryable || list1[1].ID != "j_old_fail" {
+		t.Fatalf("expected older failed job to NOT be retryable, got %+v", list1[1])
+	}
+
+	gotOld, err := up.GetJob(ctx, "j_old_fail", i18n.ZhCN)
+	if err != nil || gotOld.Retryable {
+		t.Fatalf("expected GetJob(j_old_fail).Retryable=false, got %+v err=%v", gotOld, err)
+	}
+	gotNew, err := up.GetJob(ctx, "j_new_fail", i18n.ZhCN)
+	if err != nil || !gotNew.Retryable {
+		t.Fatalf("expected GetJob(j_new_fail).Retryable=true, got %+v err=%v", gotNew, err)
+	}
+
+	// 一旦同一服务后续已有成功记录，此前的所有失败记录均不再可重试
+	if err := up.insertJob(ctx, mk("j_later_ok", "succeeded", 3000)); err != nil {
+		t.Fatal(err)
+	}
+	list2, err := up.ListJobs(ctx, 50, i18n.ZhCN)
+	if err != nil || len(list2) != 3 {
+		t.Fatalf("ListJobs after success len=%d err=%v", len(list2), err)
+	}
+	for _, item := range list2 {
+		if item.Retryable {
+			t.Fatalf("expected no retryable jobs after later success, got %+v", item)
+		}
+	}
+	gotNewAfterOK, err := up.GetJob(ctx, "j_new_fail", i18n.ZhCN)
+	if err != nil || gotNewAfterOK.Retryable {
+		t.Fatalf("expected j_new_fail Retryable=false after later success, got %+v err=%v", gotNewAfterOK, err)
+	}
+}

@@ -606,6 +606,7 @@ export interface UpdateJobItem {
   rollbackRef?: string
   rollbackReason?: string
   rollbackReasonText?: string
+  retryable?: boolean
   errorCode?: string
   errorMsg?: string
   logChunk?: string
