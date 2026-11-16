@@ -634,7 +634,11 @@ func (s *Server) handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, s.langOf(r), http.StatusInternalServerError, "db_error", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, s.d.Notify.LoadConfig(r.Context()))
+	saved := s.d.Notify.LoadConfig(r.Context())
+	if strings.TrimSpace(saved.Channel) != "" && s.d.SelfUpdate != nil {
+		s.d.SelfUpdate.Wakeup(r.Context())
+	}
+	writeJSON(w, http.StatusOK, saved)
 }
 
 func (s *Server) handleTestNotify(w http.ResponseWriter, r *http.Request) {

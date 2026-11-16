@@ -108,9 +108,11 @@ type Service struct {
 	dataDir    string
 	httpClient *http.Client
 	reloadFn   func(execPath string)
-	ntf        *notify.Service
-	isBusy     func() bool
-	wakeupCh   chan struct{}
+	ntf             *notify.Service
+	isBusy          func() bool
+	wakeupCh        chan struct{}
+	bootDelay       time.Duration
+	firstCheckDelay time.Duration
 
 	schedMu        sync.Mutex
 	autoFailVer    string
@@ -139,9 +141,11 @@ func New(log *slog.Logger, st *store.Store, dataDir string, reloadFn func(execPa
 		st:         st,
 		dataDir:    dataDir,
 		httpClient: &http.Client{Timeout: 12 * time.Second},
-		reloadFn:   reloadFn,
-		wakeupCh:   make(chan struct{}, 1),
-		job:        ApplyJob{State: "idle"},
+		reloadFn:        reloadFn,
+		wakeupCh:        make(chan struct{}, 1),
+		bootDelay:       6 * time.Second,
+		firstCheckDelay: 35 * time.Second,
+		job:             ApplyJob{State: "idle"},
 	}
 }
 
@@ -191,18 +195,37 @@ func (s *Service) SaveConfig(ctx context.Context, in Config) (Config, error) {
 		}
 	}
 	s.invalidateCache()
-	if s.wakeupCh != nil && (norm.Policy == PolicyAuto || norm.Policy == PolicyNotify) {
+	if norm.Policy == PolicyAuto || norm.Policy == PolicyNotify {
+		s.Wakeup(ctx)
+	}
+	return norm, nil
+}
+
+// Wakeup 在用户保存通知渠道配置或切换更新策略时非阻塞唤醒后台巡检，及时补发待送达的更新提醒。
+func (s *Service) Wakeup(ctx context.Context) {
+	if s == nil || s.wakeupCh == nil {
+		return
+	}
+	cfg := s.LoadConfig(ctx)
+	hasPendingUpgraded := false
+	if s.st != nil && s.st.DB != nil {
+		var raw string
+		if err := s.st.DB.QueryRowContext(ctx, `SELECT v FROM setting WHERE k=?`, settingKeyUpgradedNotify).Scan(&raw); err == nil && strings.TrimSpace(raw) != "" {
+			hasPendingUpgraded = true
+		}
+	}
+	if cfg.Policy == PolicyAuto || cfg.Policy == PolicyNotify || hasPendingUpgraded {
 		select {
 		case s.wakeupCh <- struct{}{}:
 		default:
 		}
 	}
-	return norm, nil
 }
 
 type upgradedNoticePayload struct {
-	From string `json:"from"`
-	To   string `json:"to"`
+	From      string `json:"from"`
+	To        string `json:"to"`
+	CreatedAt int64  `json:"createdAt,omitempty"`
 }
 
 // StartScheduler 启动商店版本后台巡检循环，按用户选定的策略执行「自动更新」或「仅推送提醒」。
@@ -210,12 +233,20 @@ func (s *Service) StartScheduler(ctx context.Context) {
 	if s == nil || s.st == nil {
 		return
 	}
+	bootWait := s.bootDelay
+	if bootWait <= 0 {
+		bootWait = 6 * time.Second
+	}
+	firstWait := s.firstCheckDelay
+	if firstWait <= 0 {
+		firstWait = 35 * time.Second
+	}
 	go func() {
 		// 启动后先检查上次自动更新是否已完成切换，若是则发送升级完成通知
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(6 * time.Second):
+		case <-time.After(bootWait):
 		}
 		s.flushPendingUpgradedNotice(ctx)
 
@@ -224,7 +255,7 @@ func (s *Service) StartScheduler(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-s.wakeupCh:
-		case <-time.After(35 * time.Second):
+		case <-time.After(firstWait):
 		}
 		nextWait := s.runScheduledPolicyCheck(ctx)
 
@@ -291,6 +322,21 @@ func (s *Service) flushPendingUpgradedNotice(ctx context.Context) {
 		if errors.Is(err, notify.ErrQuietHours) {
 			return
 		}
+		if err != nil && !errors.Is(err, notify.ErrNoChannel) {
+			if s.log != nil {
+				s.log.Warn("发送商店自动升级完成通知失败", "version", target, "err", err)
+			}
+			if p.CreatedAt <= 0 {
+				p.CreatedAt = time.Now().Unix()
+				if b, mErr := json.Marshal(p); mErr == nil {
+					_, _ = s.st.DB.ExecContext(ctx, `UPDATE setting SET v=? WHERE k=?`, string(b), settingKeyUpgradedNotify)
+				}
+				return
+			}
+			if time.Since(time.Unix(p.CreatedAt, 0)) < 24*time.Hour {
+				return
+			}
+		}
 	}
 	_, _ = s.st.DB.ExecContext(ctx, `DELETE FROM setting WHERE k=?`, settingKeyUpgradedNotify)
 }
@@ -329,14 +375,21 @@ func (s *Service) runScheduledPolicyCheck(ctx context.Context) time.Duration {
 			fmt.Sprintf("DKStore Update Available: %s", st.LatestVersion),
 			fmt.Sprintf("Current store version is %s. Open Settings to update.", st.CurrentVersion),
 		)
+		if errors.Is(err, notify.ErrNoChannel) {
+			return interval
+		}
 		if errors.Is(err, notify.ErrQuietHours) {
 			return 30 * time.Minute
 		}
-		if err == nil {
-			_, _ = s.st.DB.ExecContext(ctx, `
-				INSERT INTO setting(k, v) VALUES (?, ?)
-				ON CONFLICT(k) DO UPDATE SET v=excluded.v`, settingKeyNotifiedVer, st.LatestVersion)
+		if err != nil {
+			if s.log != nil {
+				s.log.Warn("发送商店更新提醒失败", "version", st.LatestVersion, "err", err)
+			}
+			return interval
 		}
+		_, _ = s.st.DB.ExecContext(ctx, `
+			INSERT INTO setting(k, v) VALUES (?, ?)
+			ON CONFLICT(k) DO UPDATE SET v=excluded.v`, settingKeyNotifiedVer, st.LatestVersion)
 		return interval
 
 	case PolicyAuto:
@@ -1118,8 +1171,9 @@ func (s *Service) verifyAndInstallBinary(binBytes []byte, knownVersion string, l
 
 	if isAuto && s.st != nil && s.st.DB != nil && knownVersion != "" {
 		if b, mErr := json.Marshal(upgradedNoticePayload{
-			From: strings.TrimSpace(version.Version),
-			To:   knownVersion,
+			From:      strings.TrimSpace(version.Version),
+			To:        knownVersion,
+			CreatedAt: time.Now().Unix(),
 		}); mErr == nil {
 			_, _ = s.st.DB.ExecContext(context.Background(), `
 				INSERT INTO setting(k, v) VALUES (?, ?)

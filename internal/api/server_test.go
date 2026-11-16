@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,8 +20,10 @@ import (
 	"github.com/kukushouhou/DKStore/internal/notify"
 	"github.com/kukushouhou/DKStore/internal/registry"
 	"github.com/kukushouhou/DKStore/internal/secret"
+	"github.com/kukushouhou/DKStore/internal/selfupdate"
 	"github.com/kukushouhou/DKStore/internal/store"
 	"github.com/kukushouhou/DKStore/internal/updater"
+	"github.com/kukushouhou/DKStore/internal/version"
 )
 
 func TestAPIEndpoints_IconsTagsIgnoreAndCustomUpdateValidation(t *testing.T) {
@@ -203,4 +206,87 @@ func TestAPIEndpoints_IconsTagsIgnoreAndCustomUpdateValidation(t *testing.T) {
 
 	// Wait briefly for background goroutines launched against mock local socket to settle before TempDir cleanup
 	time.Sleep(150 * time.Millisecond)
+}
+
+func TestSaveSettings_WakesSelfUpdateNotifyAfterChannelConfigured(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	dir := t.TempDir()
+	st, err := store.Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	oldVer := version.Version
+	version.Version = "v0.5.0"
+	defer func() { version.Version = oldVer }()
+
+	relSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"version":"v0.6.0","notesZh":"test"}`))
+	}))
+	defer relSrv.Close()
+
+	var whHits int32
+	whSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&whHits, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer whSrv.Close()
+
+	authSvc := auth.New(st, nil)
+	ntfSvc := notify.New(st)
+	suSvc := selfupdate.New(slog.Default(), st, dir, nil)
+	suSvc.SetAutoUpdateDeps(ntfSvc, func() bool { return false })
+	suSvc.StartScheduler(ctx)
+
+	srv := New(Deps{
+		Log:        slog.Default(),
+		Store:      st,
+		Auth:       authSvc,
+		Notify:     ntfSvc,
+		SelfUpdate: suSvc,
+	}).Handler()
+
+	setupRec := httptest.NewRecorder()
+	srv.ServeHTTP(setupRec, httptest.NewRequest(http.MethodPost, "/api/v1/auth/setup", strings.NewReader(`{"password":"password123"}`)))
+	cookies := setupRec.Result().Cookies()
+
+	doReq := func(method, target, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, target, strings.NewReader(body))
+		for _, ck := range cookies {
+			req.AddCookie(ck)
+		}
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 1. User selects "notify" in Setup Wizard before configuring any push channel
+	recSu := doReq(http.MethodPut, "/api/v1/self-update/config", `{"policy":"notify","repo":"kukushouhou/DKStore","channel":"custom","customHost":"`+relSrv.URL+`","customMode":"host"}`)
+	if recSu.Code != http.StatusOK {
+		t.Fatalf("save self-update config failed: %d %s", recSu.Code, recSu.Body.String())
+	}
+
+	// Wait past initial 6s scheduler boot window so unconfigured check actually runs first
+	time.Sleep(6300 * time.Millisecond)
+	if got := atomic.LoadInt32(&whHits); got != 0 {
+		t.Fatalf("expected 0 hits before webhook configured, got %d", got)
+	}
+
+	// 2. User saves Webhook channel via PUT /api/v1/settings -> immediately wakes SelfUpdate and delivers v0.6.0 once
+	recSet := doReq(http.MethodPut, "/api/v1/settings", `{"locale":"zh-CN","checkIntervalHours":6,"channel":"webhook","webhookUrl":"`+whSrv.URL+`"}`)
+	if recSet.Code != http.StatusOK {
+		t.Fatalf("save settings failed: %d %s", recSet.Code, recSet.Body.String())
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && atomic.LoadInt32(&whHits) == 0 {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := atomic.LoadInt32(&whHits); got != 1 {
+		t.Fatalf("expected PUT /api/v1/settings to immediately trigger pending store update push once, got %d", got)
+	}
 }

@@ -2,6 +2,9 @@ package notify
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -86,5 +89,65 @@ func TestProgressStylePersistence_DefaultAndPreservation(t *testing.T) {
 	loaded := svc.LoadConfig(ctx)
 	if loaded.ProgressStyle != "unified" || loaded.Locale != "zh-CN" {
 		t.Fatalf("expected progressStyle=unified preserved, got %+v", loaded)
+	}
+}
+
+func TestSendMessage_DistinguishesNoChannelQuietHoursAndActualDelivery(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	svc := New(st)
+
+	// 1. Channel unconfigured (even with quiet hours set) -> ErrNoChannel
+	_ = svc.SaveConfig(ctx, Config{
+		Locale:          "zh-CN",
+		Channel:         "",
+		QuietHoursStart: "00:00",
+		QuietHoursEnd:   "23:59",
+	})
+	if err := svc.SendMessage(ctx, "标题", "正文", "Title", "Body"); !errors.Is(err, ErrNoChannel) {
+		t.Fatalf("expected ErrNoChannel when channel is empty, got %v", err)
+	}
+	// Container incremental SendUpdates preserves nil when channel is empty
+	if err := svc.SendUpdates(ctx, []i18n.NotifyItem{{AppName: "nginx"}}); err != nil {
+		t.Fatalf("expected SendUpdates to return nil when channel is empty, got %v", err)
+	}
+
+	// 2. Channel configured + inside quiet hours -> ErrQuietHours
+	hits := 0
+	whSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer whSrv.Close()
+
+	_ = svc.SaveConfig(ctx, Config{
+		Locale:          "zh-CN",
+		Channel:         "webhook",
+		WebhookURL:      whSrv.URL,
+		QuietHoursStart: "00:00",
+		QuietHoursEnd:   "23:59",
+	})
+	if err := svc.SendMessage(ctx, "标题", "正文", "Title", "Body"); !errors.Is(err, ErrQuietHours) {
+		t.Fatalf("expected ErrQuietHours, got %v", err)
+	}
+	if hits != 0 {
+		t.Fatalf("expected 0 hits during quiet hours, got %d", hits)
+	}
+
+	// 3. Outside quiet hours -> delivers HTTP POST and returns nil
+	_ = svc.SaveConfig(ctx, Config{
+		Locale:     "zh-CN",
+		Channel:    "webhook",
+		WebhookURL: whSrv.URL,
+	})
+	if err := svc.SendMessage(ctx, "标题", "正文", "Title", "Body"); err != nil {
+		t.Fatalf("expected nil on successful delivery, got %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("expected 1 hit, got %d", hits)
 	}
 }

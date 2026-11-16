@@ -21,6 +21,9 @@ import (
 // ErrQuietHours 表示当前处于免打扰时段，暂缓发送推送（保留待通知状态，免打扰结束后再补推）。
 var ErrQuietHours = errors.New("notification skipped during quiet hours")
 
+// ErrNoChannel 表示当前尚未启用任何通知推送渠道，调用方不应将本次调用视为已实际送达。
+var ErrNoChannel = errors.New("notification channel not configured")
+
 // Config 是通知推送与全局偏好的设置结构（保存在 setting 表）。
 type Config struct {
 	Locale             string `json:"locale"`             // "zh-CN" | "en-US"
@@ -135,14 +138,14 @@ func (s *Service) SendUpdates(ctx context.Context, items []i18n.NotifyItem) erro
 	return s.dispatch(ctx, cfg, lang, title, body)
 }
 
-// SendMessage 按系统当前语言配置向已启用的通知渠道发送自定义消息；未启用推送渠道时静默返回 nil，处于免打扰时段返回 ErrQuietHours。
+// SendMessage 按系统当前语言配置向已启用的通知渠道发送自定义消息；未启用推送渠道时返回 ErrNoChannel，处于免打扰时段返回 ErrQuietHours。
 func (s *Service) SendMessage(ctx context.Context, titleZh, bodyZh, titleEn, bodyEn string) error {
 	if s == nil || s.st == nil {
-		return nil
+		return ErrNoChannel
 	}
 	cfg := s.LoadConfig(ctx)
-	if cfg.Channel == "" {
-		return nil
+	if strings.TrimSpace(cfg.Channel) == "" {
+		return ErrNoChannel
 	}
 	if inQuietHours(time.Now(), cfg.QuietHoursStart, cfg.QuietHoursEnd) {
 		return ErrQuietHours
