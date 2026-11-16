@@ -6,6 +6,14 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+### 问题修复
+- **商店更新提醒推送修复**：修复「仅推送提醒」模式在尚未配置通知渠道时提前将新版本标记为已提醒、导致后续补配渠道后漏发推送的问题；保存通知渠道配置后支持即时补推待送达的新版本提醒，并支持自动升级重启后如遇临时网络错误保留通知重试 ([`1348471`](https://github.com/kukushouhou/DKStore/commit/1348471))
+
+---
+
+### Fixes
+- **Store Update Notification Fix**: Fixed `Notify Only` store update mode prematurely marking a new release as notified before any notification channel was configured; saving a notification channel now immediately delivers pending store update reminders, and post-auto-update notifications retry on transient network errors ([`1348471`](https://github.com/kukushouhou/DKStore/commit/1348471))
+
 ## [v0.5.0] - 2026-11-15
 
 ### 新功能
