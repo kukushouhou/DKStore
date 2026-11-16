@@ -6,6 +6,16 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+## [v0.5.3] - 2026-11-17
+
+### 问题修复
+- **历史记录重试按钮修复**：同一容器仅在最新一条记录仍处于失败状态（且当前无正在执行的更新任务）时显示「重试」按钮，已被后续成功或新失败记录取代的旧记录及对应日志弹窗仅保留查看日志；同时修复在历史页查看过往日志会将旧记录重新带回顶栏更新队列的问题 ([`05ed794`](https://github.com/kukushouhou/DKStore/commit/05ed794))
+
+---
+
+### Fixes
+- **History Retry Button Fix**: Restricted the `Retry` button so each container only shows it when its newest history record is still `failed` with no active update running, keeping `View Log` only on older superseded records and their log modals; fixed viewing historical logs on `/history` re-inserting old records into the header update queue ([`05ed794`](https://github.com/kukushouhou/DKStore/commit/05ed794))
+
 ## [v0.5.2] - 2026-11-17
 
 ### 新功能
