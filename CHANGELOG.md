@@ -6,6 +6,22 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+## [v0.5.2] - 2026-11-17
+
+### 新功能
+- **更新失败提示与一键重试**：将下载断流（`EOF`）、连接超时、仓库限流、无访问权限、找不到版本、存储空间不足、端口占用等底层报错统一转为直白易懂的原因说明（同时兼容已有历史记录展示）；在更新队列卡片、日志弹窗顶栏、首页失败提示条与历史记录页新增「重试」主按钮，点击后原地接着已下载进度重新执行更新，并优化超长容器名称与长版本号的单行省略排版 ([`3311c0c`](https://github.com/kukushouhou/DKStore/commit/3311c0c))
+
+### 问题修复
+- **镜像下载断流自动续传与更新队列浮层修复**：镜像下载遇到临时网络中断时支持自动续传重试并同行刷新倒计时日志，为远程 SSH 连接补充心跳保活；修复非首页点击顶栏更新队列按钮无法展开浮层及打开日志弹窗时浮层遮挡弹窗的问题 ([`3311c0c`](https://github.com/kukushouhou/DKStore/commit/3311c0c))
+
+---
+
+### Features
+- **Update Error Messages & One-Click Retry**: Replaced raw low-level error strings (`EOF`, timeouts, rate limits, auth failures, missing tags, insufficient disk space, and port conflicts) with clear plain-language explanations across live updates and existing history records; added a primary `Retry` button to update queue cards, the log modal header, Home failure alerts, and History cards with single-line ellipsis protection for long container names ([`3311c0c`](https://github.com/kukushouhou/DKStore/commit/3311c0c))
+
+### Fixes
+- **Auto-Resume on Image Download Drops & Queue Popover Fix**: Added automatic resume retries on transient image download interruptions, same-line countdown log updates, and SSH keepalive heartbeats; fixed the header update queue popover toggle on non-Home pages and hid the popover cleanly while viewing the log modal ([`3311c0c`](https://github.com/kukushouhou/DKStore/commit/3311c0c))
+
 ## [v0.5.1] - 2026-11-16
 
 ### 新功能
