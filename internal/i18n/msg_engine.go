@@ -168,7 +168,11 @@ func EngineMessage(lang Lang, key string, args ...string) string {
 	}
 	vals := make([]any, len(args))
 	for i, a := range args {
-		vals[i] = LocalizeDetail(lang, a)
+		loc := LocalizeDetail(lang, a)
+		if (key == MsgRegistryNetwork || key == MsgTransportTCPFailed || key == MsgTransportHandshakeFailed) && i == len(args)-1 {
+			loc = HumanizeRawNetError(lang, loc)
+		}
+		vals[i] = loc
 	}
 	return fmt.Sprintf(tmpl, vals...)
 }

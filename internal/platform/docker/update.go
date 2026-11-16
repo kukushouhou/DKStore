@@ -280,7 +280,81 @@ func formatBytesShort(b int64) string {
 	}
 }
 
+const maxPullStreamAttempts = 3
+
+var pullRetryBaseDelay = 2 * time.Second
+
+func isTransientPullError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(i18n.DetailOf(err)))
+	for _, perm := range []string{
+		"unauthorized", "authentication required", "access denied", "insufficient_scope",
+		"toomanyrequests", "rate limit", "http 429", "status code 429",
+		"manifest unknown", "not found", "http 404", "status code 404",
+		"no matching manifest", "no space left", "disk quota", "read-only file system",
+		"invalid tar header", "zstd",
+	} {
+		if strings.Contains(lower, perm) {
+			return false
+		}
+	}
+	if lower == "eof" || strings.Contains(lower, "unexpected eof") || strings.Contains(lower, "early eof") {
+		return true
+	}
+	for _, suf := range []string{": eof", "— eof", "- eof", "(eof)", "\"eof\""} {
+		if strings.HasSuffix(lower, suf) {
+			return true
+		}
+	}
+	for _, tr := range []string{
+		"connection reset", "broken pipe", "server sent goaway", "stream error",
+		"tls: bad record mac", "i/o timeout", "tls handshake timeout", "client.timeout",
+		"context deadline exceeded", "bad gateway", "service unavailable", "gateway timeout",
+		"http 502", "http 503", "http 504",
+	} {
+		if strings.Contains(lower, tr) {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *Adapter) pullImageStream(
+	ctx context.Context,
+	execTr transport.ExecutableTransport,
+	targetRef string,
+	registryAuthB64 string,
+	emit func(platform.PullProgress),
+) (imageID, repoDigest string, err error) {
+	for attempt := 1; attempt <= maxPullStreamAttempts; attempt++ {
+		imageID, repoDigest, err = a.pullImageStreamOnce(ctx, execTr, targetRef, registryAuthB64, emit)
+		if err == nil {
+			return imageID, repoDigest, nil
+		}
+		if ctx.Err() != nil || attempt >= maxPullStreamAttempts || !isTransientPullError(err) {
+			return "", "", err
+		}
+		delay := pullRetryBaseDelay * time.Duration(attempt)
+		emit(platform.PullProgress{
+			Phase:      "pulling",
+			StatusText: fmt.Sprintf("Retrying image download (%d/%d)", attempt+1, maxPullStreamAttempts),
+			Percent:    12,
+			LogChunk:   fmt.Sprintf("\r\n\x1b[33m↻ 网络连接中断，正在自动接着下载剩余镜像层（第 %d/%d 次）...\x1b[0m\r\n", attempt+1, maxPullStreamAttempts),
+		})
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", "", err
+		case <-timer.C:
+		}
+	}
+	return "", "", err
+}
+
+func (a *Adapter) pullImageStreamOnce(
 	ctx context.Context,
 	execTr transport.ExecutableTransport,
 	targetRef string,
@@ -340,7 +414,8 @@ func (a *Adapter) pullImageStream(
 				strings.Contains(stLower, "verifying") ||
 				strings.Contains(stLower, "download complete") ||
 				strings.Contains(stLower, "pull complete") ||
-				strings.Contains(stLower, "already exists"))
+				strings.Contains(stLower, "already exists") ||
+				strings.Contains(stLower, "retrying in"))
 
 		var logChunk string
 		if isLayerEv {
@@ -372,6 +447,11 @@ func (a *Adapter) pullImageStream(
 				}
 				if ls.lastRawSt != ev.Status {
 					logChunk = fmt.Sprintf("%s\x1b[32m✔\x1b[0m \x1b[36m%s\x1b[0m: %s\r\n", prefix, ev.ID, ev.Status)
+				}
+			case strings.Contains(stLower, "retrying in"):
+				if !ls.done {
+					logChunk = fmt.Sprintf("\r\x1b[2K\x1b[33m%s\x1b[0m: %s", ev.ID, ev.Status)
+					prevWasOverwrite = true
 				}
 			case strings.Contains(stLower, "extracting"):
 				if !ls.done {
@@ -1033,7 +1113,11 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 	origSum := sha256.Sum256(origBytes)
 	origSHA := hex.EncodeToString(origSum[:])
 
+	lastPhase := "precheck"
 	emit := func(p platform.PullProgress) {
+		if p.Phase != "" {
+			lastPhase = p.Phase
+		}
 		if onProgress != nil {
 			onProgress(p)
 		}
@@ -1114,8 +1198,12 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 				Message: i18n.EngineDetail(i18n.MsgDockerComposeRebuildErr, runErr.Error(), rbErr.Error()),
 			}
 		}
+		errCode := "recreate_failed"
+		if lastPhase == "pulling" || strings.Contains(strings.ToLower(runErr.Error()), "compose pull:") {
+			errCode = "pull_failed"
+		}
 		return &platform.UpdateError{
-			Code:    "recreate_failed",
+			Code:    errCode,
 			Message: i18n.EngineDetail(i18n.MsgDockerComposeRestored, runErr.Error()),
 		}
 	}

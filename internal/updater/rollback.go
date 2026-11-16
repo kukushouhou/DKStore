@@ -341,6 +341,137 @@ func (s *Service) ExecuteRollback(ctx context.Context, jobID string, lang i18n.L
 	return &rbJob, nil
 }
 
+// RetryJob 按原失败任务的目标镜像与类型重新发起更新或回退任务。
+func (s *Service) RetryJob(ctx context.Context, jobID string, lang i18n.Lang) (*Job, error) {
+	jobID = strings.TrimSpace(jobID)
+	var (
+		orig                     Job
+		oldTagsJSON, tgtTagsJSON string
+		eligibleInt              int
+	)
+	err := s.st.DB.QueryRowContext(ctx, `
+		SELECT id, kind, host_id, host_name, app_key, app_name, service_key, service_name, source,
+		       status, old_image_ref, COALESCE(old_image_id,''), COALESCE(old_repo_digest,''), COALESCE(old_version,''), COALESCE(old_resolved_tag,''), COALESCE(old_matched_tags_json,''),
+		       target_image_ref, COALESCE(target_repo_digest,''), COALESCE(target_version,''), COALESCE(target_resolved_tag,''), COALESCE(target_matched_tags_json,''),
+		       rollback_eligible, COALESCE(rollback_ref,''), COALESCE(rollback_reason,'')
+		FROM update_job WHERE id=?`, jobID).Scan(
+		&orig.ID, &orig.Kind, &orig.HostID, &orig.HostName, &orig.AppKey, &orig.AppName, &orig.ServiceKey, &orig.ServiceName, &orig.Source,
+		&orig.Status, &orig.OldImageRef, &orig.OldImageID, &orig.OldRepoDigest, &orig.OldVersion, &orig.OldResolvedTag, &oldTagsJSON,
+		&orig.TargetImageRef, &orig.TargetRepoDigest, &orig.TargetVersion, &orig.TargetResolvedTag, &tgtTagsJSON,
+		&eligibleInt, &orig.RollbackRef, &orig.RollbackReason,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, i18n.NewEngineError(i18n.MsgUpdateJobNotFound, jobID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	orig.RollbackEligible = eligibleInt == 1
+	if oldTagsJSON != "" {
+		_ = json.Unmarshal([]byte(oldTagsJSON), &orig.OldMatchedTags)
+	}
+	if tgtTagsJSON != "" {
+		_ = json.Unmarshal([]byte(tgtTagsJSON), &orig.TargetMatchedTags)
+	}
+
+	s.mu.Lock()
+	if active, ok := s.activeJobs[orig.ServiceKey]; ok && (active.Status == "running" || active.Status == "queued") {
+		s.mu.Unlock()
+		loc := active.LocalizeFor(lang)
+		return &loc, nil
+	}
+	s.activeJobs[orig.ServiceKey] = Job{ServiceKey: orig.ServiceKey, Status: "queued", Phase: "precheck"}
+	s.mu.Unlock()
+
+	cleanupPlaceholder := func() {
+		s.mu.Lock()
+		if cur, ok := s.activeJobs[orig.ServiceKey]; ok && cur.ID == "" {
+			delete(s.activeJobs, orig.ServiceKey)
+		}
+		s.mu.Unlock()
+	}
+
+	var hostID, hostName, appName, svcName, source, curImageRef, curImageID, curRepoDigest string
+	err = s.st.DB.QueryRowContext(ctx, `
+		SELECT a.host_id, h.name, a.name, s.name, a.source,
+		       COALESCE(s.image_ref,''), COALESCE(s.image_id,''), COALESCE(s.repo_digest,'')
+		FROM service s
+		JOIN app a ON s.app_key = a.key
+		JOIN host h ON a.host_id = h.id
+		WHERE s.key=? AND s.gone_at IS NULL`, orig.ServiceKey).Scan(
+		&hostID, &hostName, &appName, &svcName, &source,
+		&curImageRef, &curImageID, &curRepoDigest,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		cleanupPlaceholder()
+		return nil, i18n.NewEngineError(i18n.MsgUpdateServiceNotFound, orig.ServiceKey)
+	}
+	if err != nil {
+		cleanupPlaceholder()
+		return nil, err
+	}
+	if source == string(platform.SourceVendorManaged) {
+		cleanupPlaceholder()
+		return nil, errors.New(i18n.FormatUpdateError(lang, "vendor_managed_readonly", ""))
+	}
+
+	if curImageRef == "" {
+		curImageRef = orig.OldImageRef
+	}
+	targetRef := orig.TargetImageRef
+	if targetRef == "" {
+		targetRef = curImageRef
+	}
+
+	now := time.Now().Unix()
+	kind := orig.Kind
+	if kind == "" {
+		kind = "upgrade"
+	}
+	retryJob := Job{
+		ID:                 newJobID(),
+		Kind:               kind,
+		HostID:             hostID,
+		HostName:           hostName,
+		AppKey:             orig.AppKey,
+		AppName:            appName,
+		ServiceKey:         orig.ServiceKey,
+		ServiceName:        svcName,
+		Source:             source,
+		Status:             "running",
+		Phase:              "precheck",
+		Progress:           platform.PullProgress{Phase: "precheck", StatusText: "Preparing update", Percent: 5},
+		OldImageRef:        curImageRef,
+		OldImageID:         curImageID,
+		OldRepoDigest:      curRepoDigest,
+		OldVersion:         orig.OldVersion,
+		OldResolvedTag:     orig.OldResolvedTag,
+		OldMatchedTags:     orig.OldMatchedTags,
+		TargetImageRef:     targetRef,
+		TargetRepoDigest:   orig.TargetRepoDigest,
+		TargetVersion:      orig.TargetVersion,
+		TargetResolvedTag:  orig.TargetResolvedTag,
+		TargetMatchedTags:  orig.TargetMatchedTags,
+		RollbackEligible:   orig.RollbackEligible,
+		RollbackRef:        orig.RollbackRef,
+		RollbackReason:     orig.RollbackReason,
+		RollbackReasonText: i18n.FormatRollbackReason(lang, orig.RollbackReason),
+		StartedAt:          now,
+	}
+	initHeader := formatJobHeader(retryJob)
+	retryJob.Logs = initHeader
+	retryJob.LogChunk = initHeader
+	retryJob.LogOffset = len(initHeader)
+	if err := s.insertJob(ctx, retryJob); err != nil {
+		cleanupPlaceholder()
+		return nil, err
+	}
+	s.broadcast(retryJob)
+	go s.executeJob(retryJob)
+	loc := retryJob.LocalizeFor(lang)
+	return &loc, nil
+}
+
 // ClearJobs 按范围清理历史更新/回退记录（scope: "failed" 仅清理失败记录；"all" 清理全部非执行中记录）。
 func (s *Service) ClearJobs(ctx context.Context, scope string) (int64, error) {
 	var (
@@ -397,6 +528,11 @@ func scanJobRow(rows *sql.Rows, lang i18n.Lang) (Job, error) {
 	}
 	if j.ErrorCode != "" {
 		j.ErrorMsg = i18n.FormatUpdateError(lang, j.ErrorCode, j.ErrorMsg)
+		if j.Status == "failed" && j.Logs != "" {
+			if idx := strings.LastIndex(j.Logs, "\x1b[31m✖ "); idx >= 0 {
+				j.Logs = j.Logs[:idx] + "\x1b[31m✖ " + j.ErrorMsg + "\x1b[0m\r\n"
+			}
+		}
 	}
 	if j.TargetVersion != "" {
 		j.TargetVersion = i18n.FormatTargetVersion(lang, j.TargetVersion)

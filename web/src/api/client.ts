@@ -809,6 +809,8 @@ export const api = {
     }),
   getUpdateJob: (id: string) =>
     request<UpdateJobItem>(`/updates/${encodeURIComponent(id)}`),
+  retryUpdateJob: (id: string) =>
+    request<UpdateJobItem>(`/updates/${encodeURIComponent(id)}/retry`, { method: 'POST' }),
   startUpdates: (payload: string[] | StartUpdatesPayload) =>
     request<{ items: UpdateJobItem[] }>('/updates', {
       method: 'POST',

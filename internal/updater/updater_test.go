@@ -318,22 +318,22 @@ func TestJobProgressTracker_MonotonicPercentLiveMemoryLogsAndErrorFormatting(t *
 		t.Fatalf("expected monotonic percent 45, got %d", job.Progress.Percent)
 	}
 
-	// Fail the job -> error must be appended in ANSI red to Logs and persisted to SQLite
+	// Fail the job -> humanized error must be appended in ANSI red to Logs and persisted to SQLite
 	tracker.fail(job, "pull_failed", "unauthorized: authentication required")
 
 	persisted, err := up.GetJob(ctx, job.ID, i18n.EnUS)
 	if err != nil {
 		t.Fatalf("GetJob after failure: %v", err)
 	}
-	if persisted.Status != "failed" || !strings.Contains(persisted.Logs, "\x1b[31m✖ ERROR:") || !strings.Contains(persisted.Logs, "unauthorized") {
-		t.Fatalf("expected ANSI error persisted in logs_text, got: %q", persisted.Logs)
+	if persisted.Status != "failed" || !strings.Contains(persisted.Logs, "\x1b[31m✖ ") || !strings.Contains(persisted.ErrorMsg, "authentication required") {
+		t.Fatalf("expected ANSI error persisted in logs_text and localized ErrorMsg, got logs=%q err=%q", persisted.Logs, persisted.ErrorMsg)
 	}
 
 	// Drain SSE events to confirm LogChunk was broadcast
 	sawChunk := false
 	for len(subCh) > 0 {
 		ev := <-subCh
-		if strings.Contains(ev.LogChunk, "✖ ERROR:") {
+		if strings.Contains(ev.LogChunk, "✖ ") {
 			sawChunk = true
 		}
 	}
@@ -504,5 +504,59 @@ func TestClearJobs_FailedVsAll(t *testing.T) {
 	rem2, _ := up.ListJobs(ctx, 50, i18n.ZhCN)
 	if len(rem2) != 1 || rem2[0].ID != "j_run" {
 		t.Fatalf("expected only running job preserved, got %+v", rem2)
+	}
+}
+
+func TestRetryJob_PreservesTargetAndRefreshesCurrentImage(t *testing.T) {
+	up, st := newTestUpdater(t, nil)
+	ctx := context.Background()
+
+	_, _ = st.DB.ExecContext(ctx, `INSERT INTO host(id, name, kind, transport, status, created_at) VALUES ('h_retry', '软路由模拟器', 'docker', 'ssh', 'online', 1700000000)`)
+	_, _ = st.DB.ExecContext(ctx, `INSERT INTO app(key, host_id, name, source, updated_at) VALUES ('h_retry/standalone/ha', 'h_retry', 'home-assistant', 'standalone', 1700000000)`)
+	_, _ = st.DB.ExecContext(ctx, `INSERT INTO service(key, app_key, name, image_ref, image_id, repo_digest, updated_at) VALUES ('h_retry/standalone/ha/main', 'h_retry/standalone/ha', 'main', 'homeassistant/home-assistant:latest', 'sha256:curimg999', 'sha256:curdig999', 1700000000)`)
+
+	failedOrig := Job{
+		ID:                "up_failed_eof",
+		Kind:              "upgrade",
+		HostID:            "h_retry",
+		HostName:          "软路由模拟器",
+		AppKey:            "h_retry/standalone/ha",
+		AppName:           "home-assistant",
+		ServiceKey:        "h_retry/standalone/ha/main",
+		ServiceName:       "main",
+		Source:            "standalone",
+		Status:            "failed",
+		Phase:             "done",
+		OldImageRef:       "homeassistant/home-assistant:latest",
+		OldImageID:        "sha256:oldimg111",
+		OldVersion:        "latest (fccef8)",
+		TargetImageRef:    "homeassistant/home-assistant:latest",
+		TargetVersion:     "latest (2026.11.1)",
+		TargetResolvedTag: "2026.11.1",
+		StartedAt:         1700000100,
+	}
+	if err := up.insertJob(ctx, failedOrig); err != nil {
+		t.Fatal(err)
+	}
+
+	subCh, unsub := up.Subscribe()
+	defer unsub()
+
+	retried, err := up.RetryJob(ctx, failedOrig.ID, i18n.ZhCN)
+	if err != nil {
+		t.Fatalf("RetryJob failed: %v", err)
+	}
+	if retried.ID == failedOrig.ID || retried.TargetImageRef != "homeassistant/home-assistant:latest" || retried.TargetVersion != "latest (2026.11.1)" {
+		t.Fatalf("unexpected retried job: %+v", retried)
+	}
+	if retried.OldImageID != "sha256:curimg999" {
+		t.Fatalf("expected refreshed OldImageID sha256:curimg999, got %q", retried.OldImageID)
+	}
+
+	// 等待后台协程完成收尾，避免 TempDir 关闭竞态
+	for ev := range subCh {
+		if ev.ID == retried.ID && (ev.Status == "failed" || ev.Status == "succeeded") {
+			break
+		}
 	}
 }

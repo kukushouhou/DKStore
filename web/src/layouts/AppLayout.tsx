@@ -67,6 +67,7 @@ export default function AppLayout() {
   const isUltrawide = useIsUltrawide()
   const queueJobs = useOrderedQueueJobs()
   const queueCollapsed = useUIStore((s) => s.queueCollapsed)
+  const activeLogJobId = useUIStore((s) => s.activeLogJobId)
   const toggleQueueCollapsed = useUIStore((s) => s.toggleQueueCollapsed)
   const [popoverOpen, setPopoverOpen] = useState(false)
   const hydratedProgressStyleRef = useRef(false)
@@ -498,16 +499,12 @@ export default function AppLayout() {
         }
         onClick={() => {
           if (useHeaderPopover) {
-            if (popoverOpen) {
-              useUIStore.getState().clearFinishedQueueJobs()
-            }
-            setPopoverOpen((v) => !v)
-          } else {
-            if (!queueCollapsed) {
-              useUIStore.getState().clearFinishedQueueJobs()
-            }
-            toggleQueueCollapsed()
+            return
           }
+          if (!queueCollapsed) {
+            useUIStore.getState().clearFinishedQueueJobs()
+          }
+          toggleQueueCollapsed()
         }}
       >
         {t.queue.headerPill.replace('{count}', String(queueJobs.length))}
@@ -574,9 +571,9 @@ export default function AppLayout() {
             {queuePillBtn &&
               (useHeaderPopover ? (
                 <Popover
-                  open={popoverOpen && queueJobs.length > 0}
+                  open={popoverOpen && queueJobs.length > 0 && !activeLogJobId}
                   onOpenChange={(nextOpen) => {
-                    if (!nextOpen) {
+                    if (!nextOpen && !useUIStore.getState().activeLogJobId) {
                       useUIStore.getState().clearFinishedQueueJobs()
                     }
                     setPopoverOpen(nextOpen)

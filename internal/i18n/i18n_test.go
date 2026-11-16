@@ -34,3 +34,44 @@ func TestNormalizeAndFormat(t *testing.T) {
 		t.Fatalf("unexpected en notification: %s / %s", tEn, bEn)
 	}
 }
+
+func TestFormatUpdateError_HumanizedPlainLanguage(t *testing.T) {
+	cases := []struct {
+		code   string
+		detail string
+		wantZh string
+		wantEn string
+	}{
+		{"pull_failed", "EOF", "网络连接中途断开，已下载的部分会保留", "network connection dropped"},
+		{"pull_failed", "homeassistant/home-assistant:latest — EOF", "网络连接中途断开，已下载的部分会保留", "network connection dropped"},
+		{"pull_failed", "unexpected EOF", "网络连接中途断开，已下载的部分会保留", "network connection dropped"},
+		{"pull_failed", "Get \"https://registry-1.docker.io/v2/\": net/http: TLS handshake timeout", "下载新镜像超时", "Image download timed out"},
+		{"pull_failed", "toomanyrequests: You have reached your pull rate limit", "临时限流", "rate-limited"},
+		{"pull_failed", "unauthorized: authentication required", "需要登录或当前账号无访问权限", "authentication required"},
+		{"pull_failed", "manifest unknown", "找不到该版本镜像", "version not found"},
+		{"pull_failed", "write /var/lib/docker: no space left on device", "设备存储空间不足", "Insufficient disk space"},
+		{"recreate_failed", "Bind for 0.0.0.0:8123 failed: port is already allocated", "所需端口已被其他程序占用", "port is already in use"},
+	}
+	for _, c := range cases {
+		zh := FormatUpdateError(ZhCN, c.code, c.detail)
+		en := FormatUpdateError(EnUS, c.code, c.detail)
+		if !strings.Contains(zh, c.wantZh) || strings.Contains(zh, "EOF") {
+			t.Fatalf("FormatUpdateError(ZhCN, %q, %q) = %q, want substring %q without raw EOF", c.code, c.detail, zh, c.wantZh)
+		}
+		if !strings.Contains(en, c.wantEn) {
+			t.Fatalf("FormatUpdateError(EnUS, %q, %q) = %q, want substring %q", c.code, c.detail, en, c.wantEn)
+		}
+	}
+
+	// 容器或镜像名包含 eof 子串（如 geofence）不应误判为网络断流 EOF
+	nonEOF := FormatUpdateError(ZhCN, "pull_failed", "custom error on geofence image")
+	if strings.Contains(nonEOF, "网络连接中途断开") {
+		t.Fatalf("unexpected false-positive EOF match on geofence: %q", nonEOF)
+	}
+
+	// 镜像仓库检测网络报错同样不再暴露裸 EOF
+	regMsg := EngineMessage(ZhCN, MsgRegistryNetwork, "Docker Hub", `Get "https://registry-1.docker.io/v2/": EOF`)
+	if !strings.Contains(regMsg, "网络连接中途断开") || strings.Contains(regMsg, "EOF") {
+		t.Fatalf("expected humanized registry network error, got %q", regMsg)
+	}
+}

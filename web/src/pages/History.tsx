@@ -39,6 +39,7 @@ export default function HistoryPage() {
   const qc = useQueryClient()
   const [tab, setTab] = useState<'updates' | 'scans'>('updates')
   const [verifyingId, setVerifyingId] = useState<string | null>(null)
+  const [retryingId, setRetryingId] = useState<string | null>(null)
   const [rollbackModalJob, setRollbackModalJob] = useState<UpdateJobItem | null>(null)
   const [rollbackRef, setRollbackRef] = useState('')
   const [dataWarning, setDataWarning] = useState('')
@@ -77,6 +78,22 @@ export default function HistoryPage() {
     if (st === 'succeeded') return <Tag color="success">{t.history.statusSucceeded}</Tag>
     if (st === 'failed') return <Tag color="error">{t.history.statusFailed}</Tag>
     return <Tag color="processing">{t.history.statusRunning}</Tag>
+  }
+
+  const onRetryJob = async (job: UpdateJobItem) => {
+    setRetryingId(job.id)
+    try {
+      const next = await api.retryUpdateJob(job.id)
+      const st = useUIStore.getState()
+      st.dismissQueueJob(job.id)
+      st.upsertUpdateJob(next)
+      message.info(t.home.updating)
+      await qc.invalidateQueries({ queryKey: ['updates'] })
+    } catch (e) {
+      showApiError(e)
+    } finally {
+      setRetryingId(null)
+    }
   }
 
   const onVerifyRollback = async (job: UpdateJobItem) => {
@@ -262,6 +279,16 @@ export default function HistoryPage() {
                       >
                         {t.home.viewLogs}
                       </Button>
+                      {job.status === 'failed' && (
+                        <Button
+                          size="small"
+                          type="primary"
+                          loading={retryingId === job.id}
+                          onClick={() => onRetryJob(job)}
+                        >
+                          {t.queue.retryBtn}
+                        </Button>
+                      )}
                       {job.kind === 'upgrade' &&
                         job.status === 'succeeded' &&
                         (job.rollbackEligible ? (

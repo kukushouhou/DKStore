@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import {
   Button,
   Card,
@@ -8,6 +9,7 @@ import {
   Tag,
   Tooltip,
   Typography,
+  message,
   theme,
 } from 'antd'
 import {
@@ -63,11 +65,28 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
   const setProgressStyle = useUIStore((s) => s.setProgressStyle)
   const setQueueCollapsed = useUIStore((s) => s.setQueueCollapsed)
   const setActiveLogJobId = useUIStore((s) => s.setActiveLogJobId)
+  const dismissQueueJob = useUIStore((s) => s.dismissQueueJob)
+  const upsertUpdateJob = useUIStore((s) => s.upsertUpdateJob)
   const clearFinishedQueueJobs = useUIStore((s) => s.clearFinishedQueueJobs)
+  const [retryingId, setRetryingId] = useState<string | null>(null)
 
   if (jobs.length === 0) return null
 
   const anyRunning = jobs.some((j) => j.status === 'queued' || j.status === 'running')
+
+  const handleRetry = async (job: UpdateJobItem) => {
+    setRetryingId(job.id)
+    try {
+      const next = await api.retryUpdateJob(job.id)
+      dismissQueueJob(job.id)
+      upsertUpdateJob(next)
+      void qc.invalidateQueries({ queryKey: ['updates'] })
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setRetryingId(null)
+    }
+  }
 
   const handleSwitchStyle = (next: ProgressStyle) => {
     if (next === progressStyle) return
@@ -312,80 +331,93 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
                   job.status === 'failed' ? token.colorErrorBorder : token.colorBorderSecondary,
               }}
             >
-              {/* 第一行：应用名 + 完整版本号变化（短文本同行、长文本自动换行，两侧均 0 截断） + 右侧「详情」按钮 */}
-              <Flex align="flex-start" justify="space-between" gap={8}>
-                <Flex
-                  align="center"
-                  gap={6}
-                  wrap="wrap"
-                  style={{ minWidth: 0, flex: 1 }}
+              {/* 第一行：左侧容器名（超出单行省略 + 悬停全称），右侧固定按钮组（失败时详情在左、主按钮重试在最右） */}
+              <Flex align="center" justify="space-between" gap={8} style={{ minWidth: 0 }}>
+                <Typography.Text
+                  strong
+                  ellipsis={{ tooltip: `${displayName} (${job.hostName})` }}
+                  style={{ fontSize: token.fontSizeSM, minWidth: 0, flex: 1 }}
                 >
-                  <Typography.Text
-                    strong
-                    ellipsis={{ tooltip: `${displayName} (${job.hostName})` }}
-                    style={{ fontSize: token.fontSizeSM, maxWidth: '100%' }}
-                  >
-                    {displayName}
-                  </Typography.Text>
-                  {verText && (
-                    <Tooltip title={verText.length > 32 ? verText : undefined}>
-                      <Tag
-                        variant="filled"
-                        style={{
-                          margin: 0,
-                          fontFamily: token.fontFamilyCode,
-                          fontSize: 12,
-                          maxWidth: '100%',
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          flexShrink: 0,
-                        }}
-                      >
-                        {verText}
-                      </Tag>
-                    </Tooltip>
-                  )}
-                </Flex>
+                  {displayName}
+                </Typography.Text>
 
-                <Button
-                  size="small"
-                  style={{ flexShrink: 0 }}
-                  onClick={() => setActiveLogJobId(job.id)}
-                >
-                  {t.queue.detailBtn}
-                </Button>
+                <Space size={6} style={{ flexShrink: 0 }}>
+                  <Button size="small" onClick={() => setActiveLogJobId(job.id)}>
+                    {t.queue.detailBtn}
+                  </Button>
+                  {job.status === 'failed' && (
+                    <Button
+                      size="small"
+                      type="primary"
+                      loading={retryingId === job.id}
+                      onClick={() => handleRetry(job)}
+                    >
+                      {t.queue.retryBtn}
+                    </Button>
+                  )}
+                </Space>
               </Flex>
 
-              {/* 第二行：阶段文案 / 字节进度 / 失败摘要 */}
-              <Flex align="center" justify="space-between" gap={8}>
+              {/* 第二行：版本号变化标签独占全宽（超长单行省略 + 悬停完整提示） */}
+              {verText && (
+                <div style={{ minWidth: 0 }}>
+                  <Tooltip title={verText.length > 28 ? verText : undefined}>
+                    <Tag
+                      variant="filled"
+                      style={{
+                        margin: 0,
+                        fontFamily: token.fontFamilyCode,
+                        fontSize: 12,
+                        maxWidth: '100%',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        verticalAlign: 'bottom',
+                      }}
+                    >
+                      {verText}
+                    </Tag>
+                  </Tooltip>
+                </div>
+              )}
+
+              {/* 第三行：阶段文案 / 字节进度 / 失败完整说明（失败时自然换行完整展示，不截断） */}
+              {job.status === 'failed' ? (
                 <Typography.Text
-                  type={
-                    job.status === 'failed'
-                      ? 'danger'
-                      : job.status === 'succeeded'
-                        ? 'success'
-                        : 'secondary'
-                  }
-                  strong={job.status === 'succeeded' || job.status === 'failed'}
-                  ellipsis={{ tooltip: phaseText }}
-                  style={{ fontSize: token.fontSizeSM, minWidth: 0, flex: 1 }}
+                  type="danger"
+                  strong
+                  style={{
+                    fontSize: token.fontSizeSM,
+                    lineHeight: 1.5,
+                    wordBreak: 'break-word',
+                  }}
                 >
                   {phaseText}
                 </Typography.Text>
-                {hasBytes && (
+              ) : (
+                <Flex align="center" justify="space-between" gap={8}>
                   <Typography.Text
-                    type="secondary"
-                    style={{
-                      fontFamily: token.fontFamilyCode,
-                      fontSize: 11,
-                      flexShrink: 0,
-                    }}
+                    type={job.status === 'succeeded' ? 'success' : 'secondary'}
+                    strong={job.status === 'succeeded'}
+                    ellipsis={{ tooltip: phaseText }}
+                    style={{ fontSize: token.fontSizeSM, minWidth: 0, flex: 1 }}
                   >
-                    {formatBytes(job.progress.downloadedBytes)} /{' '}
-                    {formatBytes(job.progress.totalBytes)}
+                    {phaseText}
                   </Typography.Text>
-                )}
-              </Flex>
+                  {hasBytes && (
+                    <Typography.Text
+                      type="secondary"
+                      style={{
+                        fontFamily: token.fontFamilyCode,
+                        fontSize: 11,
+                        flexShrink: 0,
+                      }}
+                    >
+                      {formatBytes(job.progress.downloadedBytes)} /{' '}
+                      {formatBytes(job.progress.totalBytes)}
+                    </Typography.Text>
+                  )}
+                </Flex>
+              )}
 
               {/* 第三行：分层细条（默认）或 整体单条 */}
               {showLayered ? (

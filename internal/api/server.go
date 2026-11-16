@@ -127,6 +127,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/updates", s.requireAuth(s.handleStartUpdates))
 	mux.HandleFunc("DELETE /api/v1/updates", s.requireAuth(s.handleClearUpdates))
 	mux.HandleFunc("GET /api/v1/updates/{id}", s.requireAuth(s.handleGetUpdateJob))
+	mux.HandleFunc("POST /api/v1/updates/{id}/retry", s.requireAuth(s.handleRetryUpdate))
 	mux.HandleFunc("GET /api/v1/updates/{id}/rollback-check", s.requireAuth(s.handleVerifyRollback))
 	mux.HandleFunc("POST /api/v1/updates/{id}/rollback", s.requireAuth(s.handleExecuteRollback))
 	mux.HandleFunc("GET /api/v1/self-update/probe-github", s.handleSelfUpdateProbeGitHub)
@@ -443,7 +444,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 				upCh = nil
 				continue
 			}
-			b, _ := json.Marshal(j)
+			b, _ := json.Marshal(j.LocalizeFor(s.langOf(r)))
 			_, _ = fmt.Fprintf(w, "event: update_job\ndata: %s\n\n", string(b))
 			flusher.Flush()
 		case <-keepAlive.C:
@@ -1071,6 +1072,21 @@ func (s *Server) handleExecuteRollback(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	lang := s.langOf(r)
 	job, err := s.d.Updater.ExecuteRollback(r.Context(), id, lang)
+	if err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *Server) handleRetryUpdate(w http.ResponseWriter, r *http.Request) {
+	if s.d.Updater == nil {
+		writeError(w, s.langOf(r), http.StatusInternalServerError, "updater_unavailable", "")
+		return
+	}
+	id := r.PathValue("id")
+	lang := s.langOf(r)
+	job, err := s.d.Updater.RetryJob(r.Context(), id, lang)
 	if err != nil {
 		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
 		return

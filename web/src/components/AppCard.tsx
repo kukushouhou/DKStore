@@ -83,6 +83,7 @@ export default function AppCard({
   const lastFinishedJobs = useUIStore((s) => s.lastFinishedJobs)
   const updateQueueJobs = useUIStore((s) => s.updateQueueJobs)
   const upsertUpdateJob = useUIStore((s) => s.upsertUpdateJob)
+  const dismissQueueJob = useUIStore((s) => s.dismissQueueJob)
   const setActiveLogJobId = useUIStore((s) => s.setActiveLogJobId)
 
   const [metaOpen, setMetaOpen] = useState(false)
@@ -95,6 +96,7 @@ export default function AppCard({
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [cautionTargetSvc, setCautionTargetSvc] = useState<ServiceItem | null>(null)
   const [updatingSvcKey, setUpdatingSvcKey] = useState('')
+  const [retryingJobId, setRetryingJobId] = useState<string | null>(null)
   const [restoring, setRestoring] = useState(false)
 
   const isNoUpdate =
@@ -217,6 +219,20 @@ export default function AppCard({
     } finally {
       setUpdatingSvcKey('')
       setCautionTargetSvc(null)
+    }
+  }
+
+  const handleRetryFailedJob = async (jobId: string) => {
+    setRetryingJobId(jobId)
+    try {
+      const next = await api.retryUpdateJob(jobId)
+      dismissQueueJob(jobId)
+      upsertUpdateJob(next)
+      message.info(t.home.updating)
+    } catch (e) {
+      showApiError(e)
+    } finally {
+      setRetryingJobId(null)
     }
   }
 
@@ -670,12 +686,22 @@ export default function AppCard({
               type="error"
               showIcon
               action={
-                <Typography.Link
-                  onClick={() => setActiveLogJobId(job.id)}
-                  style={{ fontSize: token.fontSizeSM, whiteSpace: 'nowrap' }}
-                >
-                  {t.home.viewLogs}
-                </Typography.Link>
+                <Space size={8} align="center">
+                  <Typography.Link
+                    onClick={() => setActiveLogJobId(job.id)}
+                    style={{ fontSize: token.fontSizeSM, whiteSpace: 'nowrap' }}
+                  >
+                    {t.home.viewLogs}
+                  </Typography.Link>
+                  <Button
+                    size="small"
+                    type="primary"
+                    loading={retryingJobId === job.id}
+                    onClick={() => handleRetryFailedJob(job.id)}
+                  >
+                    {t.queue.retryBtn}
+                  </Button>
+                </Space>
               }
               title={
                 <Typography.Text style={{ fontSize: token.fontSizeSM, wordBreak: 'break-word' }}>

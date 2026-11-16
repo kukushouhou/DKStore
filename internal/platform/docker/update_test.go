@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kukushouhou/DKStore/internal/platform"
 	"github.com/kukushouhou/DKStore/internal/transport"
@@ -519,5 +520,71 @@ func TestUpdateProjectCompose_ReportsRollbackRebuildError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "compose_rebuild_err") && !strings.Contains(err.Error(), "rollback up also failed") {
 		t.Fatalf("expected rollback rebuild failure to be surfaced, got %v", err)
+	}
+}
+
+func TestPullImageStream_AutoRetriesTransientEOFAndOverwritesRetryingLine(t *testing.T) {
+	origDelay := pullRetryBaseDelay
+	pullRetryBaseDelay = 5 * time.Millisecond
+	defer func() { pullRetryBaseDelay = origDelay }()
+
+	pullCalls := 0
+	tr := &fakeExecTransport{
+		doHandler: func(path string) (*http.Response, error) {
+			if strings.Contains(path, "/images/") && strings.HasSuffix(path, "/json") {
+				return jsonHTTPResp(200, map[string]any{
+					"Id":          "sha256:pulled123456",
+					"RepoDigests": []string{"homeassistant/home-assistant@sha256:abcdef123456"},
+				}), nil
+			}
+			return jsonHTTPResp(404, nil), nil
+		},
+		reqHandler: func(method, path string, _ []byte) (*http.Response, error) {
+			if method == http.MethodPost && strings.HasPrefix(path, "/images/create") {
+				pullCalls++
+				if pullCalls == 1 {
+					stream := strings.Join([]string{
+						`{"id":"d39b05c796cb","status":"Retrying in 2 seconds"}`,
+						`{"id":"d39b05c796cb","status":"Retrying in 1 second"}`,
+						`{"error":"EOF"}`,
+					}, "\n") + "\n"
+					return &http.Response{
+						StatusCode: 200,
+						Body:       io.NopCloser(strings.NewReader(stream)),
+					}, nil
+				}
+				stream := strings.Join([]string{
+					`{"id":"d39b05c796cb","status":"Already exists"}`,
+					`{"id":"eb516ffa6b74","status":"Pull complete"}`,
+				}, "\n") + "\n"
+				return &http.Response{
+					StatusCode: 200,
+					Body:       io.NopCloser(strings.NewReader(stream)),
+				}, nil
+			}
+			return jsonHTTPResp(200, nil), nil
+		},
+	}
+
+	ad := New("h1", tr)
+	var chunks strings.Builder
+	imgID, digest, err := ad.pullImageStream(context.Background(), tr, "homeassistant/home-assistant:latest", "", func(p platform.PullProgress) {
+		chunks.WriteString(p.LogChunk)
+	})
+	if err != nil {
+		t.Fatalf("expected auto-retry to recover from transient EOF, got err=%v", err)
+	}
+	if pullCalls != 2 {
+		t.Fatalf("expected 2 pull attempts, got %d", pullCalls)
+	}
+	if imgID != "sha256:pulled123456" || digest != "sha256:abcdef123456" {
+		t.Fatalf("unexpected image inspect result: id=%q digest=%q", imgID, digest)
+	}
+	logs := chunks.String()
+	if !strings.Contains(logs, "\r\x1b[2K\x1b[33md39b05c796cb\x1b[0m: Retrying in 2 seconds") {
+		t.Fatalf("expected Retrying countdown to overwrite on same line, got logs=%q", logs)
+	}
+	if !strings.Contains(logs, "正在自动接着下载剩余镜像层") {
+		t.Fatalf("expected auto-resume notice in logs, got logs=%q", logs)
 	}
 }

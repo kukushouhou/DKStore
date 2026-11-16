@@ -296,7 +296,18 @@ function VersionPickerModalBody({
     setPolicy(atLatest ? 'all' : 'skip_latest')
   }
 
+  const tagsLoadedForKeyRef = useRef<string>('')
   useEffect(() => {
+    if (tab !== 'version' && !isStandaloneConfigMode) {
+      setLoading(false)
+      return
+    }
+    const fetchKey = `${service.key}::${initialSelectedTag ?? ''}`
+    if (tagsLoadedForKeyRef.current === fetchKey) {
+      return
+    }
+    tagsLoadedForKeyRef.current = fetchKey
+
     let cancelled = false
     const initTag = cleanInitialTag(service, initialSelectedTag)
 
@@ -335,7 +346,7 @@ function VersionPickerModalBody({
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [service, initialSelectedTag])
+  }, [service, initialSelectedTag, tab, isStandaloneConfigMode])
 
   // 加载单容器 YAML 配置（Case A）
   useEffect(() => {

@@ -9,6 +9,7 @@ import {
 import '@xterm/xterm/css/xterm.css'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { useQueryClient } from '@tanstack/react-query'
 import { api, type UpdateJobItem } from '../api/client'
 import { useI18n } from '../i18n'
 import { subscribeJobLog, useUIStore } from '../store/ui'
@@ -37,9 +38,11 @@ export default function UpdateLogModal() {
 function UpdateLogModalBody({ jobId, onClose }: { jobId: string; onClose: () => void }) {
   const { token } = theme.useToken()
   const { t } = useI18n()
+  const qc = useQueryClient()
   const liveJob = useUIStore((s) => s.updateQueueJobs[jobId])
   const [fetchedJob, setFetchedJob] = useState<UpdateJobItem | null>(null)
   const [hasAnyOutput, setHasAnyOutput] = useState(false)
+  const [retrying, setRetrying] = useState(false)
 
   const containerRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<Terminal | null>(null)
@@ -308,6 +311,23 @@ function UpdateLogModalBody({ jobId, onClose }: { jobId: string; onClose: () => 
     job?.serviceName && job.serviceName !== 'main' && job.serviceName !== job.appName
       ? `${job.appName} (${job.serviceName})`
       : job?.appName || jobId
+  const titleText = t.logModal.title.replace('{name}', displayName)
+
+  const handleRetry = async () => {
+    setRetrying(true)
+    try {
+      const next = await api.retryUpdateJob(jobId)
+      const st = useUIStore.getState()
+      st.dismissQueueJob(jobId)
+      st.upsertUpdateJob(next)
+      st.setActiveLogJobId(next.id)
+      void qc.invalidateQueries({ queryKey: ['updates'] })
+    } catch (e) {
+      message.error((e as Error).message)
+    } finally {
+      setRetrying(false)
+    }
+  }
 
   const renderStatusBadge = () => {
     if (status === 'succeeded') {
@@ -333,10 +353,9 @@ function UpdateLogModalBody({ jobId, onClose }: { jobId: string; onClose: () => 
 
   return (
     <Flex vertical gap={12}>
-      {/* 顶栏 */}
+      {/* 顶栏：左侧单行省略防挤压，右侧按钮组固定同行（失败时关闭退为次按钮、重试居最右主按钮位） */}
       <Flex
-        wrap="wrap"
-        align="center"
+        align="flex-start"
         justify="space-between"
         gap={12}
         style={{
@@ -345,12 +364,16 @@ function UpdateLogModalBody({ jobId, onClose }: { jobId: string; onClose: () => 
         }}
       >
         <div style={{ minWidth: 0, flex: 1 }}>
-          <Space size={8} wrap align="center">
-            <Typography.Title level={5} style={{ margin: 0 }}>
-              {t.logModal.title.replace('{name}', displayName)}
+          <Flex align="center" gap={8} style={{ minWidth: 0 }}>
+            <Typography.Title
+              level={5}
+              ellipsis={{ tooltip: titleText }}
+              style={{ margin: 0, minWidth: 0 }}
+            >
+              {titleText}
             </Typography.Title>
-            {renderStatusBadge()}
-          </Space>
+            <span style={{ flexShrink: 0, display: 'inline-flex' }}>{renderStatusBadge()}</span>
+          </Flex>
           {job && (
             <Typography.Text
               type="secondary"
@@ -366,9 +389,18 @@ function UpdateLogModalBody({ jobId, onClose }: { jobId: string; onClose: () => 
           <Button size="small" icon={<CopyOutlined />} onClick={handleCopyLogs}>
             {t.logModal.copyBtn}
           </Button>
-          <Button size="small" type="primary" onClick={onClose}>
+          <Button
+            size="small"
+            type={status === 'failed' ? 'default' : 'primary'}
+            onClick={onClose}
+          >
             {t.logModal.closeBtn}
           </Button>
+          {status === 'failed' && (
+            <Button size="small" type="primary" loading={retrying} onClick={handleRetry}>
+              {t.queue.retryBtn}
+            </Button>
+          )}
         </Space>
       </Flex>
 

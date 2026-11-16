@@ -60,11 +60,30 @@ type Job struct {
 	RollbackReasonText string                `json:"rollbackReasonText,omitempty"`
 	ErrorCode          string                `json:"errorCode,omitempty"`
 	ErrorMsg           string                `json:"errorMsg,omitempty"`
+	rawErrorMsg        string
 	Logs               string                `json:"logs,omitempty"`
 	LogChunk           string                `json:"logChunk,omitempty"`
 	LogOffset          int                   `json:"logOffset,omitempty"`
 	StartedAt          int64                 `json:"startedAt"`
 	FinishedAt         int64                 `json:"finishedAt,omitempty"`
+}
+
+// LocalizeFor 按请求语言格式化错误消息、回退不可用说明与目标版本显示。
+func (j Job) LocalizeFor(lang i18n.Lang) Job {
+	if j.ErrorCode != "" {
+		raw := j.rawErrorMsg
+		if raw == "" {
+			raw = j.ErrorMsg
+		}
+		j.ErrorMsg = i18n.FormatUpdateError(lang, j.ErrorCode, raw)
+	}
+	if j.RollbackReason != "" {
+		j.RollbackReasonText = i18n.FormatRollbackReason(lang, j.RollbackReason)
+	}
+	if j.TargetVersion != "" {
+		j.TargetVersion = i18n.FormatTargetVersion(lang, j.TargetVersion)
+	}
+	return j
 }
 
 // UpdateItemRequest 是单个服务的更新请求（支持自定义目标版本标签与更新后提醒策略，附录 D.3）。
@@ -1165,7 +1184,7 @@ func (t *jobProgressTracker) handleProgress(ctx context.Context, j *Job, p platf
 
 func (t *jobProgressTracker) fail(j Job, code, msg string) {
 	displayErr := i18n.FormatUpdateError(i18n.ZhCN, code, msg)
-	errChunk := fmt.Sprintf("\r\n\x1b[31m✖ ERROR: %s\x1b[0m\r\n", displayErr)
+	errChunk := fmt.Sprintf("\r\n\x1b[31m✖ %s\x1b[0m\r\n", displayErr)
 	t.logBuf.WriteString(errChunk)
 	j.LogChunk = errChunk
 	j.Logs = t.logBuf.String()
@@ -1482,9 +1501,10 @@ func (s *Service) finishJobFailed(j Job, code, msg, logs string) {
 	j.Status = "failed"
 	j.Phase = "done"
 	j.ErrorCode = code
+	j.rawErrorMsg = msg
 	j.ErrorMsg = i18n.FormatUpdateError(i18n.ZhCN, code, msg)
 	if logs == "" {
-		errChunk := fmt.Sprintf("\r\n\x1b[31m✖ ERROR: %s\x1b[0m\r\n", j.ErrorMsg)
+		errChunk := fmt.Sprintf("\r\n\x1b[31m✖ %s\x1b[0m\r\n", j.ErrorMsg)
 		logs = j.Logs + errChunk
 		j.LogChunk = errChunk
 	}

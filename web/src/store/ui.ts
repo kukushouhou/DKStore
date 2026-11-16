@@ -210,7 +210,19 @@ export const useUIStore = create<UIState>((set) => ({
 
       const isNewRunning =
         !existing && (job.status === 'queued' || job.status === 'running')
-      const nextQueue = { ...s.updateQueueJobs, [job.id]: job }
+      const nextQueue = { ...s.updateQueueJobs }
+      if (job.status === 'queued' || job.status === 'running') {
+        for (const [oldId, oldJob] of Object.entries(nextQueue)) {
+          if (
+            oldId !== job.id &&
+            oldJob.serviceKey === job.serviceKey &&
+            (oldJob.status === 'failed' || oldJob.status === 'succeeded')
+          ) {
+            delete nextQueue[oldId]
+          }
+        }
+      }
+      nextQueue[job.id] = job
 
       if (job.status === 'succeeded' || job.status === 'failed') {
         const nextActive = { ...s.activeUpdateJobs }

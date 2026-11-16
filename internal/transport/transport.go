@@ -113,13 +113,12 @@ func newReadOnlyHTTPClient(dial func(ctx context.Context, network, addr string) 
 }
 
 // newStreamingHTTPClient 构建不设固定总超时（由 ctx 控制生命周期）的 Docker HTTP 客户端，用于镜像拉取流与容器操作。
+// 禁用连接池复用（DisableKeepAlives: true），避免远程 SSH dial-stdio 会话结束后复用残留通道触发 EOF。
 func newStreamingHTTPClient(dial func(ctx context.Context, network, addr string) (net.Conn, error)) *http.Client {
 	return &http.Client{
 		Transport: &http.Transport{
-			DialContext:         dial,
-			DisableKeepAlives:   false,
-			MaxIdleConnsPerHost: 4,
-			IdleConnTimeout:     30 * time.Second,
+			DialContext:       dial,
+			DisableKeepAlives: true,
 		},
 	}
 }
@@ -288,7 +287,7 @@ func (l *LocalTransport) ExecComposeProjectWithOptions(ctx context.Context, work
 	var outputs []string
 	if pullImages {
 		if out, err := runSub("pull"); err != nil {
-			return out, err
+			return out, fmt.Errorf("compose pull: %w", err)
 		} else if out != "" {
 			outputs = append(outputs, out)
 		}
@@ -542,8 +541,30 @@ func (t *SSHTransport) ensureClient(ctx context.Context) error {
 		}
 		return i18n.NewEngineError(i18n.MsgTransportHandshakeFailed, i18n.DetailOf(err))
 	}
-	t.client = ssh.NewClient(c, chans, reqs)
+	cli := ssh.NewClient(c, chans, reqs)
+	t.client = cli
+	go runSSHKeepalive(cli)
 	return nil
+}
+
+func runSSHKeepalive(cli *ssh.Client) {
+	closed := make(chan struct{})
+	go func() {
+		_ = cli.Wait()
+		close(closed)
+	}()
+	ticker := time.NewTicker(25 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-closed:
+			return
+		case <-ticker.C:
+			if _, _, err := cli.SendRequest("keepalive@openssh.com", true, nil); err != nil {
+				return
+			}
+		}
+	}
 }
 
 // handshakeWithDeadline 在 rawConn 上执行 SSH 握手：握手前设置超时 deadline，ctx 取消时立即中断，握手成功后清除 deadline（审计 M7）。
@@ -840,7 +861,7 @@ func (t *SSHTransport) ExecComposeProjectWithOptions(ctx context.Context, workDi
 	}
 	if pullImages {
 		if out, err := runSub("pull"); err != nil {
-			return out, err
+			return out, fmt.Errorf("compose pull: %w", err)
 		} else if out != "" {
 			outputs = append(outputs, out)
 		}

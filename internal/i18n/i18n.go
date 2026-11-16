@@ -418,11 +418,14 @@ func formatAppSvc(it NotifyItem) string {
 	return it.AppName + "/" + it.ServiceName
 }
 
-// FormatUpdateError 根据更新错误编码生成对应语言的可读错误消息（立项文档 §7.2）。
+// FormatUpdateError 根据更新错误编码生成面向普通用户的可读错误说明（立项文档 §7.2）。
 func FormatUpdateError(lang Lang, code, detail string) string {
-	detail = LocalizeDetail(lang, detail)
+	detail = strings.TrimSpace(LocalizeDetail(lang, detail))
 	if code == "pull_failed" && strings.Contains(detail, "ApplyLayer") && strings.Contains(detail, "archive/tar: invalid tar header") {
-		detail = EngineMessage(lang, MsgDockerPullOldZstd)
+		return EngineMessage(lang, MsgDockerPullOldZstd)
+	}
+	if msg, ok := humanizeUpdateError(lang, code, detail); ok {
+		return msg
 	}
 	if lang == EnUS {
 		switch code {
@@ -440,13 +443,27 @@ func FormatUpdateError(lang Lang, code, detail string) string {
 			if detail != "" {
 				return detail
 			}
-			return "Task was interrupted by a DKStore restart; please verify the container state and retry."
+			return "Task was interrupted by a DKStore restart; please verify the container state."
+		case "connect_failed":
+			if detail != "" {
+				return "Cannot connect to target device: " + detail
+			}
+			return "Cannot connect to target device; please check if the device is online and credentials are valid."
 		case "pull_failed":
-			return "Failed to pull target image: " + detail
+			if detail == "" {
+				return "Failed to download new image"
+			}
+			return "Failed to download new image: " + detail
 		case "recreate_failed":
-			return "Failed to recreate service container: " + detail
+			if detail == "" {
+				return "Failed to recreate and start new container"
+			}
+			return "Failed to recreate and start new container: " + detail
 		case "verify_failed":
-			return "Post-update verification failed (running container image did not switch or failed health check): " + detail
+			if detail == "" {
+				return "New container failed post-start check"
+			}
+			return "New container failed post-start check: " + detail
 		default:
 			if detail != "" {
 				return detail
@@ -469,19 +486,244 @@ func FormatUpdateError(lang Lang, code, detail string) string {
 		if detail != "" {
 			return detail
 		}
-		return "DKStore 重启导致任务中断，请确认容器状态后重试。"
+		return "DKStore 重启导致任务中断，请先确认容器运行状态。"
+	case "connect_failed":
+		if detail != "" {
+			return "无法连接目标设备：" + detail
+		}
+		return "无法连接目标设备：请确认设备在线且连接凭据有效。"
 	case "pull_failed":
-		return "拉取目标镜像失败：" + detail
+		if detail == "" {
+			return "下载新镜像失败"
+		}
+		return "下载新镜像失败：" + detail
 	case "recreate_failed":
-		return "按原配置重建服务失败：" + detail
+		if detail == "" {
+			return "替换并启动新容器失败"
+		}
+		return "替换并启动新容器失败：" + detail
 	case "verify_failed":
-		return "更新后状态校验未通过（运行镜像未切换或健康检查未就绪）：" + detail
+		if detail == "" {
+			return "新容器启动状态异常"
+		}
+		return "新容器启动状态异常：" + detail
 	default:
 		if detail != "" {
 			return detail
 		}
 		return "更新执行失败"
 	}
+}
+
+func isRawEOFDetail(lower string) bool {
+	s := strings.TrimSpace(lower)
+	if s == "eof" || strings.Contains(s, "unexpected eof") || strings.Contains(s, "early eof") {
+		return true
+	}
+	for _, tok := range []string{": eof", "— eof", "- eof", "(eof)", "\"eof\""} {
+		if strings.Contains(s, tok) {
+			return true
+		}
+	}
+	return false
+}
+
+// HumanizeRawNetError 将 Go / 系统底层的英文网络与传输错误转为通俗可读的原因短语。
+func HumanizeRawNetError(lang Lang, raw string) string {
+	s := strings.TrimSpace(raw)
+	lower := strings.ToLower(s)
+	pick := func(zh, en string) string {
+		if lang == EnUS {
+			return en
+		}
+		return zh
+	}
+	switch {
+	case isRawEOFDetail(lower) ||
+		strings.Contains(lower, "connection reset by peer") ||
+		strings.Contains(lower, "wsarecv") ||
+		strings.Contains(lower, "broken pipe") ||
+		strings.Contains(lower, "server sent goaway") ||
+		strings.Contains(lower, "stream error"):
+		return pick("网络连接中途断开", "network connection dropped mid-transfer")
+	case strings.Contains(lower, "i/o timeout") ||
+		strings.Contains(lower, "tls handshake timeout") ||
+		strings.Contains(lower, "client.timeout") ||
+		strings.Contains(lower, "context deadline exceeded"):
+		return pick("连接超时", "connection timed out")
+	case strings.Contains(lower, "no such host") ||
+		strings.Contains(lower, "temporary failure in name resolution") ||
+		strings.Contains(lower, "server misbehaving"):
+		return pick("域名解析失败，请检查 DNS 设置", "DNS lookup failed; check DNS settings")
+	case strings.Contains(lower, "connection refused") ||
+		strings.Contains(lower, "network is unreachable") ||
+		strings.Contains(lower, "no route to host"):
+		return pick("目标地址无法连接，请检查网络或代理设置", "target address unreachable; check network or proxy")
+	case strings.Contains(lower, "x509:") ||
+		strings.Contains(lower, "certificate"):
+		return pick("安全证书校验失败，请检查系统时间或代理配置", "TLS certificate check failed; check system time or proxy")
+	default:
+		return s
+	}
+}
+
+func humanizeUpdateError(lang Lang, code, detail string) (string, bool) {
+	if detail == "" {
+		return "", false
+	}
+	lower := strings.ToLower(detail)
+	pick := func(zh, en string) (string, bool) {
+		if lang == EnUS {
+			return en, true
+		}
+		return zh, true
+	}
+
+	// 已本地化的旧版 Docker zstd 提示直接原样返回，避免重复套前缀
+	if strings.Contains(lower, "zstd") && (strings.Contains(detail, "20.10.10") || strings.Contains(lower, "docker")) {
+		return detail, true
+	}
+
+	// 1. 磁盘与文件系统故障（全阶段通用）
+	if strings.Contains(lower, "no space left on device") ||
+		strings.Contains(lower, "disk quota exceeded") ||
+		strings.Contains(lower, "insufficient space") {
+		return pick(
+			"设备存储空间不足：磁盘已满，请先清理无用镜像或文件",
+			"Insufficient disk space on target device: disk is full; please clean up unused images or files",
+		)
+	}
+	if strings.Contains(lower, "read-only file system") {
+		return pick(
+			"设备存储异常：存储目录处于只读状态，请检查磁盘健康状况或目录权限",
+			"Target storage is read-only; please check disk health or directory permissions",
+		)
+	}
+
+	// 2. 容器重建与启动冲突
+	if strings.Contains(lower, "port is already allocated") ||
+		strings.Contains(lower, "address already in use") {
+		return pick(
+			"新容器启动失败：所需端口已被其他程序占用，请排查端口冲突",
+			"Failed to start new container: required port is already in use by another process",
+		)
+	}
+	if strings.Contains(lower, "no matching manifest for") ||
+		strings.Contains(lower, "exec format error") {
+		return pick(
+			"无法安装该版本：此镜像不支持当前设备的芯片架构（如 ARM / x86 不匹配）",
+			"Cannot install this version: image does not support this device's CPU architecture",
+		)
+	}
+
+	// 3. 镜像仓库权限、限流与版本不存在（主要发生在 pull_failed 或 compose pull 阶段）
+	if code == "pull_failed" || strings.Contains(lower, "compose pull:") || strings.Contains(lower, "error pulling image") {
+		if strings.Contains(lower, "toomanyrequests") ||
+			strings.Contains(lower, "rate limit") ||
+			strings.Contains(lower, "429 too many requests") ||
+			strings.Contains(lower, "http 429") {
+			return pick(
+				"下载受限：镜像仓库请求过于频繁被临时限流，可配置仓库账号或镜像加速",
+				"Download rate-limited: registry request limit reached; configure registry credentials or a mirror",
+			)
+		}
+		if strings.Contains(lower, "repository does not exist") {
+			return pick(
+				"无法下载镜像：仓库中不存在该镜像，或私有仓库尚未配置登录凭据",
+				"Cannot download image: repository does not exist or requires registry credentials",
+			)
+		}
+		if strings.Contains(lower, "unauthorized") ||
+			strings.Contains(lower, "authentication required") ||
+			strings.Contains(lower, "pull access denied") ||
+			strings.Contains(lower, "requested access to the resource is denied") ||
+			strings.Contains(lower, "insufficient_scope") ||
+			strings.Contains(lower, "http 401") ||
+			strings.Contains(lower, "http 403") ||
+			strings.Contains(lower, "status code 401") ||
+			strings.Contains(lower, "status code 403") {
+			return pick(
+				"无法下载镜像：该仓库需要登录或当前账号无访问权限，请检查“仓库凭据”",
+				"Cannot download image: registry authentication required or access denied; check Registry Credentials",
+			)
+		}
+		if isRawEOFDetail(lower) ||
+			strings.Contains(lower, "connection reset by peer") ||
+			strings.Contains(lower, "broken pipe") ||
+			strings.Contains(lower, "server sent goaway") ||
+			strings.Contains(lower, "stream error") ||
+			strings.Contains(lower, "tls: bad record mac") ||
+			strings.Contains(lower, "bad gateway") ||
+			strings.Contains(lower, "service unavailable") ||
+			strings.Contains(lower, "http 502") ||
+			strings.Contains(lower, "http 503") ||
+			strings.Contains(lower, "status code 502") ||
+			strings.Contains(lower, "status code 503") {
+			return pick(
+				"下载新镜像中断：网络连接中途断开，已下载的部分会保留",
+				"Image download interrupted: network connection dropped mid-transfer; downloaded layers are preserved",
+			)
+		}
+		if strings.Contains(lower, "i/o timeout") ||
+			strings.Contains(lower, "tls handshake timeout") ||
+			strings.Contains(lower, "client.timeout") ||
+			strings.Contains(lower, "context deadline exceeded") ||
+			strings.Contains(lower, "gateway timeout") ||
+			strings.Contains(lower, "http 504") ||
+			strings.Contains(lower, "status code 504") {
+			return pick(
+				"下载新镜像超时：连接镜像仓库过慢，请检查网络或镜像加速设置",
+				"Image download timed out: registry connection is too slow; check network or mirror settings",
+			)
+		}
+		if strings.Contains(lower, "manifest unknown") ||
+			strings.Contains(lower, "tag not found") ||
+			strings.Contains(lower, "not found: manifest") ||
+			strings.Contains(lower, "http 404") ||
+			strings.Contains(lower, "status code 404") {
+			return pick(
+				"找不到该版本镜像：可能已被作者移除，或镜像加速源尚未同步",
+				"Target image version not found: it may have been removed or not yet synced to your mirror",
+			)
+		}
+		if strings.Contains(lower, "x509:") ||
+			strings.Contains(lower, "certificate") {
+			return pick(
+				"安全连接校验失败：请检查设备系统时间是否准确，或检查代理证书配置",
+				"TLS certificate check failed: please verify device system time or proxy certificate settings",
+			)
+		}
+		if strings.Contains(lower, "no such host") ||
+			strings.Contains(lower, "temporary failure in name resolution") ||
+			strings.Contains(lower, "server misbehaving") ||
+			strings.Contains(lower, "connection refused") ||
+			strings.Contains(lower, "network is unreachable") ||
+			strings.Contains(lower, "no route to host") {
+			return pick(
+				"连不上镜像仓库：请检查设备的网络连接、DNS 或代理设置",
+				"Cannot reach image registry: please check device network, DNS, or proxy settings",
+			)
+		}
+	}
+
+	// 4. 非拉取阶段的网络断连 / 超时兜底（如 SSH 中途断线）
+	if isRawEOFDetail(lower) ||
+		strings.Contains(lower, "connection reset by peer") ||
+		strings.Contains(lower, "broken pipe") {
+		return pick(
+			"与目标设备的连接中途断开：请确认设备在线且网络稳定",
+			"Connection to target device dropped mid-operation; please check device connectivity",
+		)
+	}
+	if strings.Contains(lower, "i/o timeout") ||
+		strings.Contains(lower, "context deadline exceeded") {
+		return pick(
+			"更新操作超时：目标设备响应过慢或网络连接不稳定",
+			"Update operation timed out: target device responded too slowly or network was unstable",
+		)
+	}
+
+	return "", false
 }
 
 // FormatRollbackReason 根据回退不可用原因码生成对应语言的说明（立项文档 §8.2）。
