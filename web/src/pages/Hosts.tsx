@@ -131,6 +131,7 @@ export default function HostsPage() {
   const [otpModalOpen, setOtpModalOpen] = useState(false)
   const [otpCode, setOtpCode] = useState('')
   const [otpTrigger, setOtpTrigger] = useState<'test' | 'save'>('save')
+  const [refreshingInfo, setRefreshingInfo] = useState(false)
 
   const canAddLocal = Boolean(hostsQuery.data?.canAddLocal)
 
@@ -417,12 +418,20 @@ export default function HostsPage() {
     return map
   }, [liveMetricsQuery.data?.items])
 
-  const handleRefresh = () => {
-    void hostsQuery.refetch()
+  const handleRefresh = async () => {
+    setRefreshingInfo(true)
     void liveMetricsQuery.refetch()
+    try {
+      const fresh = await api.refreshHosts()
+      qc.setQueryData(['hosts', locale], fresh)
+    } catch {
+      void hostsQuery.refetch()
+    } finally {
+      setRefreshingInfo(false)
+    }
   }
 
-  const isRefreshing = hostsQuery.isFetching || liveMetricsQuery.isFetching
+  const isRefreshing = refreshingInfo || hostsQuery.isFetching || liveMetricsQuery.isFetching
 
   const formatCap = (bytes: number): string => {
     if (!bytes || bytes <= 0) return '0 GB'
@@ -507,15 +516,29 @@ export default function HostsPage() {
 
   const formatSystemEnv = (info?: HostInfo) => {
     if (!info) return '—'
-    const osPart = (info.platformVersion || info.os || '').trim()
-    const dk = (info.dockerVersion || '').trim()
-    const dockerPart =
-      dk && !dk.includes('DSM WebAPI')
-        ? /^(docker|container)/i.test(dk)
-          ? dk
-          : `Docker ${dk}`
-        : ''
-    return [osPart, dockerPart].filter(Boolean).join(' · ') || '—'
+    return (info.platformVersion || info.os || '').trim() || '—'
+  }
+
+  const extractCleanDockerVer = (info?: HostInfo) => {
+    const raw = (info?.dockerVersion || '').trim()
+    if (!raw || raw.includes('DSM WebAPI')) return ''
+    return raw.replace(/^docker(\s+version)?\s+/i, '').replace(/^[vV]/, '').trim()
+  }
+
+  const isDockerOutdatedForZstd = (ver: string) => {
+    if (!ver) return false
+    const core = ver.split(/[-+\s]/)[0] || ''
+    const parts = core.split('.')
+    if (parts.length < 2) return false
+    const maj = Number.parseInt(parts[0], 10)
+    const min = Number.parseInt(parts[1], 10)
+    const patch = parts.length >= 3 ? Number.parseInt(parts[2], 10) || 0 : 0
+    if (Number.isNaN(maj) || Number.isNaN(min)) return false
+    if (maj < 20) return true
+    if (maj > 20) return false
+    if (min < 10) return true
+    if (min > 10) return false
+    return patch < 10
   }
 
   const getHostCardMeta = (h: HostItem) => {
@@ -657,8 +680,11 @@ export default function HostsPage() {
                       label: t.hosts.unknown,
                     }
             const cleanDsmAddr = (h.dsmUrl || '').replace(/^https?:\/\//i, '').replace(/\/+$/, '')
-            const sysEnvText = formatSystemEnv(h.info)
             const metric = metricsByHostId.get(h.id)
+            const effInfo = metric?.info ?? h.info
+            const sysEnvText = formatSystemEnv(effInfo)
+            const dockerVer = extractCleanDockerVer(effInfo)
+            const dockerOutdated = isDockerOutdatedForZstd(dockerVer)
             const hasLiveMetrics = Boolean(
               effectiveStatus === 'online' && metric && metric.online && metric.memTotalBytes > 0,
             )
@@ -854,7 +880,7 @@ export default function HostsPage() {
                           strong
                           style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
                         >
-                          {formatCpuArch(h.info)}
+                          {formatCpuArch(effInfo)}
                         </Typography.Text>
                       </Flex>
 
@@ -871,6 +897,56 @@ export default function HostsPage() {
                         >
                           {sysEnvText}
                         </Typography.Text>
+                      </Flex>
+
+                      <Flex justify="space-between" align="center" gap={12}>
+                        <Typography.Text
+                          type="secondary"
+                          style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}
+                        >
+                          {t.hosts.cardDockerVer}
+                        </Typography.Text>
+                        {!dockerVer ? (
+                          <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+                            —
+                          </Typography.Text>
+                        ) : dockerOutdated ? (
+                          <Space size={6} align="center">
+                            <Tooltip title={t.hosts.dockerOutdatedTip}>
+                              <Tag
+                                color="warning"
+                                icon={<WarningOutlined />}
+                                style={{
+                                  margin: 0,
+                                  fontSize: 11,
+                                  lineHeight: '18px',
+                                  paddingInline: 6,
+                                }}
+                              >
+                                {t.hosts.dockerOutdatedBadge}
+                              </Tag>
+                            </Tooltip>
+                            <Tooltip title={t.hosts.dockerOutdatedTip}>
+                              <Typography.Text
+                                strong
+                                style={{
+                                  fontSize: token.fontSizeSM,
+                                  fontFamily: token.fontFamilyCode,
+                                  color: token.colorWarning,
+                                }}
+                              >
+                                {dockerVer}
+                              </Typography.Text>
+                            </Tooltip>
+                          </Space>
+                        ) : (
+                          <Typography.Text
+                            strong
+                            style={{ fontSize: token.fontSizeSM, fontFamily: token.fontFamilyCode }}
+                          >
+                            {dockerVer}
+                          </Typography.Text>
+                        )}
                       </Flex>
                     </div>
 

@@ -482,3 +482,71 @@ func TestDSMProjectCompose_RejectsUnconfirmedServiceRemovalAndCleansWhenConfirme
 		t.Fatalf("expected leftover db container to be stopped & deleted, got stopped=%v deleted=%v", stoppedContainers, deletedContainers)
 	}
 }
+
+func TestExtractDSMDockerVersion(t *testing.T) {
+	cases := map[string]string{
+		"24.0.2-1535":                         "24.0.2",
+		"20.10.23-1437":                       "20.10.23",
+		"20.10.3-1308":                        "20.10.3",
+		"Docker version 24.0.2, build 65301c": "24.0.2",
+		"v20.10.6":                            "20.10.6",
+		"":                                    "",
+		"Container Manager (DSM WebAPI)":      "",
+	}
+	for in, want := range cases {
+		if got := extractDSMDockerVersion(in); got != want {
+			t.Fatalf("extractDSMDockerVersion(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestProbeDSMWebAPI_ExtractsRealDockerVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		apiName := r.FormValue("api")
+		method := r.FormValue("method")
+		write := func(v any) { _ = json.NewEncoder(w).Encode(v) }
+		switch apiName + "." + method {
+		case "SYNO.API.Auth.login":
+			write(map[string]any{"success": true, "data": map[string]any{"sid": "sid-probe"}})
+		case "SYNO.DSM.Info.getinfo":
+			write(map[string]any{
+				"success": true,
+				"data": map[string]any{
+					"model":          "DS920+",
+					"version_string": "DSM 7.2.2-72806",
+					"cpu_vendor":     "INTEL",
+				},
+			})
+		case "SYNO.Docker.Project.list":
+			write(map[string]any{"success": true, "data": map[string]any{}})
+		case "SYNO.Core.Package.list":
+			write(map[string]any{
+				"success": true,
+				"data": map[string]any{
+					"packages": []map[string]any{
+						{"id": "AudioStation", "version": "7.1.0-3905"},
+						{"id": "ContainerManager", "version": "24.0.2-1535"},
+					},
+				},
+			})
+		default:
+			write(map[string]any{"success": true, "data": map[string]any{}})
+		}
+	}))
+	defer srv.Close()
+
+	ad := New("h-nas", nil, DSMConfig{URL: srv.URL, Username: "admin", Secret: "pass"})
+	defer ad.Close()
+
+	info, err := ad.Probe(t.Context())
+	if err != nil {
+		t.Fatalf("Probe failed: %v", err)
+	}
+	if info.DockerVersion != "24.0.2" {
+		t.Fatalf("expected DockerVersion=24.0.2, got %q", info.DockerVersion)
+	}
+	if info.PlatformVersion != "DSM 7.2.2-72806 (DS920+)" {
+		t.Fatalf("unexpected PlatformVersion: %q", info.PlatformVersion)
+	}
+}

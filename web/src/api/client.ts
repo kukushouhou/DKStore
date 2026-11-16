@@ -216,6 +216,7 @@ export interface HostRuntimeStat {
   memUsedBytes: number
   memTotalBytes: number
   disks?: DiskStat[]
+  info?: HostInfo
   sampledAt?: number
 }
 
@@ -742,6 +743,7 @@ export const api = {
     }),
 
   listHosts: () => request<HostsListResponse>('/hosts'),
+  refreshHosts: () => request<HostsListResponse>('/hosts?refresh=1'),
   listHostMetrics: (opts?: { hostId?: string; cached?: boolean }) => {
     const params = new URLSearchParams()
     if (opts?.hostId) params.set('hostId', opts.hostId)

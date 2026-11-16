@@ -496,7 +496,16 @@ func (s *Server) handleDeleteIgnore(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
-	list, err := s.d.Hosts.List(r.Context())
+	refreshParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("refresh")))
+	var (
+		list []host.Host
+		err  error
+	)
+	if refreshParam == "1" || refreshParam == "true" {
+		list, err = s.d.Hosts.RefreshHostsInfo(r.Context())
+	} else {
+		list, err = s.d.Hosts.List(r.Context())
+	}
 	if err != nil {
 		writeError(w, s.langOf(r), http.StatusInternalServerError, "db_error", err.Error())
 		return

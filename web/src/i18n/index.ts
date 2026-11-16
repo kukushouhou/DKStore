@@ -359,6 +359,10 @@ const zhCN = {
     cardConnAddr: '连接地址',
     cardCpuArch: 'CPU 架构',
     cardSysEnv: '系统环境',
+    cardDockerVer: 'Docker 版本',
+    dockerOutdatedBadge: '版本过旧',
+    dockerOutdatedTip:
+      '当前版本低于 20.10.10，不支持解压新版镜像的 zstd 压缩层，建议升级至 20.10.10 及以上',
     metricCpu: 'CPU',
     metricCpuCores: 'CPU ({n} 核)',
     metricCpuTip: 'CPU 实时占用 {pct}%',
@@ -1093,6 +1097,10 @@ const enUS: Dict = {
     cardConnAddr: 'Connection',
     cardCpuArch: 'CPU Arch',
     cardSysEnv: 'Environment',
+    cardDockerVer: 'Docker Version',
+    dockerOutdatedBadge: 'Outdated',
+    dockerOutdatedTip:
+      'Older than 20.10.10; cannot extract zstd-compressed image layers. Upgrade to 20.10.10 or newer is recommended.',
     metricCpu: 'CPU',
     metricCpuCores: 'CPU ({n}c)',
     metricCpuTip: 'Real-time CPU usage: {pct}%',

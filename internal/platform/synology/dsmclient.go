@@ -11,6 +11,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -397,6 +399,140 @@ func (c *dsmClient) GetDSMInfo(ctx context.Context) (*dsmSysInfo, error) {
 		}
 	}
 	return info, nil
+}
+
+// GetDockerVersion 通过 DSM WebAPI（及本机回环时的套件目录兜底）读取群晖上实际的 Docker 引擎版本号（如 "24.0.2"）。
+// 读取不到时返回空串，由上层保持兜底文案。
+func (c *dsmClient) GetDockerVersion(ctx context.Context) string {
+	pCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	// 1. 优先通过 SYNO.Core.Package 读取已安装的 ContainerManager / Docker 套件版本（格式如 "24.0.2-1535"）
+	for _, apiVer := range []string{"1", "2"} {
+		var listResp struct {
+			Packages []struct {
+				ID      string `json:"id"`
+				Version string `json:"version"`
+			} `json:"packages"`
+		}
+		if err := c.call(pCtx, "SYNO.Core.Package", apiVer, "list", nil, &listResp); err == nil && len(listResp.Packages) > 0 {
+			var dockerFallback string
+			for _, pkg := range listResp.Packages {
+				switch pkg.ID {
+				case "ContainerManager":
+					if v := extractDSMDockerVersion(pkg.Version); v != "" {
+						return v
+					}
+				case "Docker":
+					if v := extractDSMDockerVersion(pkg.Version); v != "" {
+						dockerFallback = v
+					}
+				}
+			}
+			if dockerFallback != "" {
+				return dockerFallback
+			}
+			break
+		}
+	}
+
+	for _, pkgID := range []string{"ContainerManager", "Docker"} {
+		var getResp struct {
+			Version string `json:"version"`
+			Package struct {
+				Version string `json:"version"`
+			} `json:"package"`
+		}
+		if err := c.call(pCtx, "SYNO.Core.Package", "1", "get", map[string]string{"id": pkgID}, &getResp); err == nil {
+			if v := extractDSMDockerVersion(firstNonEmptyStr(getResp.Package.Version, getResp.Version)); v != "" {
+				return v
+			}
+		}
+	}
+
+	// 2. 若 DSM 地址指向本机回环（如套件版 DKStore 连接本机 127.0.0.1:5000），尝试读取本机套件 INFO 或二进制版本兜底
+	if isLoopbackURL(c.cfg.URL) {
+		if v := readLocalSynologyDockerVersion(pCtx); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func firstNonEmptyStr(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func isLoopbackURL(rawURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	h := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	return h == "127.0.0.1" || h == "localhost" || h == "::1"
+}
+
+func readLocalSynologyDockerVersion(ctx context.Context) string {
+	for _, infoPath := range []string{"/var/packages/ContainerManager/INFO", "/var/packages/Docker/INFO"} {
+		if b, err := os.ReadFile(infoPath); err == nil && len(b) > 0 {
+			for _, line := range strings.Split(string(b), "\n") {
+				k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
+				if ok && strings.TrimSpace(k) == "version" {
+					if ver := extractDSMDockerVersion(strings.Trim(strings.TrimSpace(v), `"'`)); ver != "" {
+						return ver
+					}
+				}
+			}
+		}
+	}
+	for _, binPath := range []string{
+		"/var/packages/ContainerManager/target/usr/bin/docker",
+		"/var/packages/Docker/target/usr/bin/docker",
+	} {
+		if _, err := os.Stat(binPath); err == nil {
+			out, err := exec.CommandContext(ctx, binPath, "--version").Output()
+			if err == nil {
+				if ver := extractDSMDockerVersion(string(out)); ver != "" {
+					return ver
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// extractDSMDockerVersion 从群晖套件版本号（如 "24.0.2-1535"）或 "Docker version 24.0.2, build ..." 中提取纯净版本号。
+func extractDSMDockerVersion(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	lower := strings.ToLower(s)
+	if idx := strings.Index(lower, "docker version "); idx >= 0 {
+		s = strings.TrimSpace(s[idx+len("docker version "):])
+	}
+	s = strings.TrimPrefix(strings.TrimPrefix(s, "v"), "V")
+	if idx := strings.IndexAny(s, "-+, \t\r\n"); idx >= 0 {
+		s = s[:idx]
+	}
+	parts := strings.Split(s, ".")
+	if len(parts) < 2 {
+		return ""
+	}
+	for _, p := range parts {
+		if p == "" {
+			return ""
+		}
+		if _, err := strconv.Atoi(p); err != nil {
+			return ""
+		}
+	}
+	return s
 }
 
 func anyString(v any) string {

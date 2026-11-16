@@ -119,6 +119,7 @@ type HostRuntimeStat struct {
 	MemUsedBytes  int64      `json:"memUsedBytes"`
 	MemTotalBytes int64      `json:"memTotalBytes"`
 	Disks         []DiskStat `json:"disks,omitempty"`
+	Info          *HostInfo  `json:"info,omitempty"`
 	SampledAt     int64      `json:"sampledAt,omitempty"`
 }
 

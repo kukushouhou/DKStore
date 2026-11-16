@@ -146,6 +146,7 @@ type Registry struct {
 	rtMu          sync.Mutex
 	rtPool        map[string]*pooledRuntimeAdapter
 	rtInflight    map[string]*dialRuntimeCall
+	infoProbeAt   map[string]time.Time
 	bgEnabled     bool
 	bgCtx         context.Context
 	bgCancel      context.CancelFunc
@@ -161,6 +162,7 @@ func NewRegistry(st *store.Store, box *secret.Box) *Registry {
 		tokens:       make(map[string]stashedToken),
 		rtPool:       make(map[string]*pooledRuntimeAdapter),
 		rtInflight:   make(map[string]*dialRuntimeCall),
+		infoProbeAt:  make(map[string]time.Time),
 		bgRefreshing: make(map[string]bool),
 	}
 }
@@ -233,6 +235,7 @@ func (r *Registry) Close() error {
 
 func (r *Registry) evictRuntimeAdapter(hostID string) {
 	r.rtMu.Lock()
+	delete(r.infoProbeAt, hostID)
 	ent := r.rtPool[hostID]
 	var toClose platform.Adapter
 	if ent != nil {
@@ -945,13 +948,37 @@ func (r *Registry) enrichRuntimeTrees(ctx context.Context, targets []Host, trees
 	return trees
 }
 
+func needsImmediateInfoRefresh(info *platform.HostInfo) bool {
+	if info == nil {
+		return true
+	}
+	dk := strings.TrimSpace(info.DockerVersion)
+	return dk == "" || strings.Contains(dk, "DSM WebAPI")
+}
+
 func (r *Registry) querySingleHostMetrics(ctx context.Context, h Host) (*platform.HostRuntimeStat, error) {
+	r.rtMu.Lock()
+	lastProbed := r.infoProbeAt[h.ID]
+	r.rtMu.Unlock()
+	wantProbe := needsImmediateInfoRefresh(h.Info) || time.Since(lastProbed) >= 2*time.Minute
+
 	runOnce := func(ad platform.Adapter) (*platform.HostRuntimeStat, error) {
 		hmAd, ok := ad.(platform.HostMetricsAdapter)
 		if !ok {
 			return nil, errors.New("host metrics unsupported")
 		}
-		return hmAd.CollectHostMetrics(ctx)
+		st, err := hmAd.CollectHostMetrics(ctx)
+		if err != nil || st == nil {
+			return st, err
+		}
+		if wantProbe {
+			pCtx, pCancel := context.WithTimeout(ctx, 5*time.Second)
+			if probed, pErr := ad.Probe(pCtx); pErr == nil && probed != nil {
+				st.Info = probed
+			}
+			pCancel()
+		}
+		return st, nil
 	}
 
 	ad, wasWarm, release, err := r.acquireRuntimeAdapter(ctx, h.ID)
@@ -985,7 +1012,21 @@ func (r *Registry) querySingleHostMetrics(ctx context.Context, h Host) (*platfor
 	}
 
 	now := time.Now().Unix()
-	if h.Status != "online" || now-h.LastSeenAt >= 30 {
+	infoChanged := false
+	if st.Info != nil {
+		r.rtMu.Lock()
+		r.infoProbeAt[h.ID] = time.Now()
+		r.rtMu.Unlock()
+		infoChanged = marshalInfo(st.Info) != marshalInfo(h.Info)
+	} else {
+		st.Info = h.Info
+	}
+
+	if infoChanged && r.st != nil && r.st.DB != nil {
+		wCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		_, _ = r.st.DB.ExecContext(wCtx, `UPDATE host SET info_json=?, status='online', last_seen_at=? WHERE id=?`, marshalInfo(st.Info), now, h.ID)
+		cancel()
+	} else if (h.Status != "online" || now-h.LastSeenAt >= 30) && r.st != nil && r.st.DB != nil {
 		wCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		_, _ = r.st.DB.ExecContext(wCtx, `UPDATE host SET status='online', last_seen_at=? WHERE id=?`, now, h.ID)
 		cancel()
@@ -1061,6 +1102,9 @@ func (r *Registry) ListCachedHostMetrics(ctx context.Context, hostIDFilter strin
 			var st platform.HostRuntimeStat
 			if json.Unmarshal([]byte(snap.raw), &st) == nil && st.Online {
 				st.HostID = h.ID
+				if st.Info == nil {
+					st.Info = h.Info
+				}
 				out = append(out, st)
 				continue
 			}
@@ -1164,6 +1208,62 @@ func (r *Registry) List(ctx context.Context) ([]Host, error) {
 		out = append(out, h)
 	}
 	return out, rows.Err()
+}
+
+// RefreshHostsInfo 并发重新探测所有在线设备的系统与 Docker 版本信息并写回数据库，返回最新设备列表（供设备页手动刷新使用）。
+func (r *Registry) RefreshHostsInfo(ctx context.Context) ([]Host, error) {
+	hosts, err := r.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(hosts) == 0 {
+		return hosts, nil
+	}
+
+	var wg sync.WaitGroup
+	for _, h := range hosts {
+		wg.Add(1)
+		go func(item Host) {
+			defer wg.Done()
+			hCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+			defer cancel()
+
+			ad, wasWarm, release, err := r.acquireRuntimeAdapter(hCtx, item.ID)
+			if err != nil {
+				return
+			}
+			info, pErr := ad.Probe(hCtx)
+			if pErr != nil {
+				release(true)
+				if wasWarm && hCtx.Err() == nil {
+					ad2, _, release2, err2 := r.acquireRuntimeAdapter(hCtx, item.ID)
+					if err2 == nil {
+						info, pErr = ad2.Probe(hCtx)
+						release2(pErr != nil)
+					}
+				}
+				if pErr != nil {
+					return
+				}
+			} else {
+				release(false)
+			}
+			if info == nil {
+				return
+			}
+			r.rtMu.Lock()
+			r.infoProbeAt[item.ID] = time.Now()
+			r.rtMu.Unlock()
+			now := time.Now().Unix()
+			if r.st != nil && r.st.DB != nil {
+				wCtx, wCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+				_, _ = r.st.DB.ExecContext(wCtx, `UPDATE host SET info_json=?, status='online', last_seen_at=? WHERE id=?`, marshalInfo(info), now, item.ID)
+				wCancel()
+			}
+		}(h)
+	}
+	wg.Wait()
+	return r.List(ctx)
 }
 
 // Get 获取单台主机。
@@ -1577,6 +1677,10 @@ func (r *Registry) testConnection(ctx context.Context, in CreateOrUpdateInput, l
 		if arch == "" {
 			arch = tr("架构未知", "arch unknown")
 		}
+		cmMsg := tr("已启用免 SSH 网页接口直连（自动识别 Project、独立容器与套件中心容器）", "Agentless & SSH-free DSM WebAPI active (detects Projects, standalone & Package Center containers)")
+		if dk := strings.TrimSpace(info.DockerVersion); dk != "" && !strings.Contains(dk, "DSM WebAPI") {
+			cmMsg = fmt.Sprintf("Docker %s · %s", dk, cmMsg)
+		}
 		res.Steps = append(res.Steps,
 			StepResult{
 				Step:    tr("群晖 DSM 网页接口登录与权限验证", "Synology DSM WebAPI login & permission check"),
@@ -1586,7 +1690,7 @@ func (r *Registry) testConnection(ctx context.Context, in CreateOrUpdateInput, l
 			StepResult{
 				Step:    tr("群晖 Container Manager 原生项目与容器通道", "Synology Container Manager native project & container channel"),
 				Status:  "ok",
-				Message: tr("已启用免 SSH 网页接口直连（自动识别 Project、独立容器与套件中心容器）", "Agentless & SSH-free DSM WebAPI active (detects Projects, standalone & Package Center containers)"),
+				Message: cmMsg,
 			},
 		)
 		res.OK = true

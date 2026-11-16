@@ -1549,10 +1549,14 @@ func (a *Adapter) Probe(ctx context.Context) (*platform.HostInfo, error) {
 		if _, err := a.dsmCli.ListProjects(ctx); err != nil {
 			return nil, i18n.NewHostError("dsm.no_container_mgr", err)
 		}
+		dkVer := a.dsmCli.GetDockerVersion(ctx)
+		if dkVer == "" {
+			dkVer = "Container Manager (DSM WebAPI)"
+		}
 		return &platform.HostInfo{
 			OS:              "linux",
 			Arch:            arch,
-			DockerVersion:   "Container Manager (DSM WebAPI)",
+			DockerVersion:   dkVer,
 			PlatformVersion: ver,
 			Capabilities: platform.Capabilities{
 				Discover:            true,
