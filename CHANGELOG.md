@@ -6,10 +6,18 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+## [v0.5.1] - 2026-11-16
+
+### 新功能
+- **设备 Docker 版本显示**：设备卡片独立展示具体的 Docker 版本号（补齐群晖管理后台免 SSH 连接模式下的真实 Docker 版本读取，并在页面刷新时自动同步最新设备环境信息），当版本低于 `20.10.10` 时附带「版本过旧」提醒说明不支持解压新版镜像的 `zstd` 压缩层 ([`a559f76`](https://github.com/kukushouhou/DKStore/commit/a559f76))
+
 ### 问题修复
 - **商店更新提醒推送修复**：修复「仅推送提醒」模式在尚未配置通知渠道时提前将新版本标记为已提醒、导致后续补配渠道后漏发推送的问题；保存通知渠道配置后支持即时补推待送达的新版本提醒，并支持自动升级重启后如遇临时网络错误保留通知重试 ([`1348471`](https://github.com/kukushouhou/DKStore/commit/1348471))
 
 ---
+
+### Features
+- **Device Docker Version Display**: Added a dedicated Docker version row on device cards (including real Docker version detection in SSH-free Synology DSM WebAPI mode and automatic host info sync on refresh), showing an `Outdated` warning badge with a `zstd` layer compatibility hint when the version is older than `20.10.10` ([`a559f76`](https://github.com/kukushouhou/DKStore/commit/a559f76))
 
 ### Fixes
 - **Store Update Notification Fix**: Fixed `Notify Only` store update mode prematurely marking a new release as notified before any notification channel was configured; saving a notification channel now immediately delivers pending store update reminders, and post-auto-update notifications retry on transient network errors ([`1348471`](https://github.com/kukushouhou/DKStore/commit/1348471))
