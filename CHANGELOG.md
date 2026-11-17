@@ -6,6 +6,22 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+## [v0.6.0] - 2026-11-17
+
+### 新功能
+- **容器启停管理与未运行更新选择**：在容器运行状态页操作列（双行紧凑纯图标布局）与首页应用卡片下拉菜单中新增单个容器、子容器及整项目的启动、停止、重启操作（均附带气泡二次确认，兼容 SSH、本机直连与群晖管理后台连接）；当对未运行的容器或包含未运行容器的项目发起更新、切换版本或按新配置更新时，弹出无默认倾向的确认框供选择「仅更新不启动 / 保持原状态」或「更新并启动」 ([`e047399`](https://github.com/kukushouhou/DKStore/commit/e047399))
+
+### 问题修复
+- **更新进度条修复**：移除任务刚启动及获取镜像层信息前硬编码的 `5%` / `10%` 假起步进度，未开始下载前真实保持 `0%`；拉取前从目标镜像清单预读全部层的真实压缩体积并区分下载与解压权重计算总进度，修复前几个小层先下完时总进度条提前跳到 `80%` 卡住的问题，同时让历史记录页实时同步阶段提示与层进度 ([`3c9b5e6`](https://github.com/kukushouhou/DKStore/commit/3c9b5e6))
+
+---
+
+### Features
+- **Container Start/Stop/Restart & Stopped-Update Choice**: Added start, stop, and restart actions with popconfirm safeguards for standalone containers, child containers, and whole projects across the Containers list (compact two-line icon actions) and Home card menus (compatible with SSH, local socket, and Synology DSM WebAPI); updating a stopped container or a project with stopped containers now prompts an unbiased choice between `Update Only / Keep Current State` and `Update & Start` ([`e047399`](https://github.com/kukushouhou/DKStore/commit/e047399))
+
+### Fixes
+- **Update Progress Bar Fix**: Removed hardcoded `5%` / `10%` initial progress jumps so jobs stay at `0%` before layer downloads actually start; pre-fetched full compressed layer sizes from the target image manifest and separated download vs. extraction weights to stop the overall progress bar from jumping prematurely to `80%` after small early layers complete, while syncing live localized phase and layer stats on the History page ([`3c9b5e6`](https://github.com/kukushouhou/DKStore/commit/3c9b5e6))
+
 ## [v0.5.3] - 2026-11-17
 
 ### 问题修复
