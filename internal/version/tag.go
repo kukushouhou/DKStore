@@ -29,8 +29,10 @@ type ParsedTag struct {
 	Patch      int    // 第 3 段（向后兼容）
 	Build      int    // 如 linuxserver 的 -ls123
 	Precision  int    // len(Segments)：1="8", 2="8.0", 3="8.0.40", 4="131.0.6778.85"
-	Variant    string // 归一化的变体后缀，如 "alpine"、"alpine3.20"、"bookworm"，不含前置 "-"
+	Variant    string // 归一化的非预发布变体后缀，如 "alpine"、"alpine3.20"、"slim-rootless"，不含前置 "-"
 	Prerelease bool   // 是否包含 alpha/beta/rc 等预发布标记
+	PreStage   int    // 预发布阶段权重：1=dev/nightly/canary/snapshot/test, 2=alpha/preview, 3=beta, 4=rc
+	PreNums    []int  // 预发布序号段，如 beta.1 -> [1], rc2 -> [2], beta.1.2 -> [1,2]
 }
 
 var (
@@ -132,7 +134,7 @@ func ParseTag(tag string) ParsedTag {
 	}
 
 	suffix := strings.ToLower(m[3])
-	prerelease, variant := classifySuffix(suffix)
+	prerelease, preStage, preNums, variant := classifySuffix(suffix)
 
 	pt := ParsedTag{
 		Raw:        raw,
@@ -141,6 +143,8 @@ func ParseTag(tag string) ParsedTag {
 		Segments:   segs,
 		Variant:    variant,
 		Prerelease: prerelease,
+		PreStage:   preStage,
+		PreNums:    preNums,
 	}
 	populateLegacyFields(&pt)
 	if pt.Precision >= 2 && isCalVer(pt.Major, pt.Minor) {
@@ -153,16 +157,113 @@ func isCalVer(major, minor int) bool {
 	return major >= 2015 && major <= 2099 && minor >= 1 && minor <= 12
 }
 
-var rePrereleaseToken = regexp.MustCompile(`(?i)(^|[-._])(alpha|beta|rc|dev|preview|snapshot|nightly|canary|test)\d*($|[-._])`)
+var (
+	rePrereleasePart = regexp.MustCompile(`^(?i)(alpha|beta|rc|dev|preview|snapshot|nightly|canary|test)(?:[.]?(\d+(?:\.\d+)*))?$`)
+	rePureDigits     = regexp.MustCompile(`^\d+(?:\.\d+)*$`)
+	reNightlyChannel = regexp.MustCompile(`^(?i)(alpha|beta|rc|dev|devel|develop|next|preview|snapshot|nightly|canary|edge|testing)\d*$`)
+)
 
-func classifySuffix(suffix string) (prerelease bool, variant string) {
+func prereleaseStageWeight(kw string) int {
+	switch strings.ToLower(kw) {
+	case "rc":
+		return 4
+	case "beta":
+		return 3
+	case "alpha", "preview":
+		return 2
+	default:
+		return 1
+	}
+}
+
+func classifySuffix(suffix string) (prerelease bool, preStage int, preNums []int, variant string) {
 	if suffix == "" {
-		return false, ""
+		return false, 0, nil, ""
 	}
-	if rePrereleaseToken.MatchString(suffix) {
-		return true, suffix
+	parts := strings.FieldsFunc(suffix, func(r rune) bool {
+		return r == '-' || r == '_'
+	})
+	var rem []string
+	for i := 0; i < len(parts); i++ {
+		tok := parts[i]
+		if !prerelease {
+			if pm := rePrereleasePart.FindStringSubmatch(tok); pm != nil {
+				prerelease = true
+				preStage = prereleaseStageWeight(pm[1])
+				numStr := pm[2]
+				if numStr == "" && i+1 < len(parts) && rePureDigits.MatchString(parts[i+1]) {
+					numStr = parts[i+1]
+					i++
+				}
+				if numStr != "" {
+					if nums, ok := parseNumericSegments(numStr); ok {
+						preNums = nums
+					}
+				}
+				continue
+			}
+		}
+		rem = append(rem, tok)
 	}
-	return false, suffix
+	return prerelease, preStage, preNums, strings.Join(rem, "-")
+}
+
+// ExtractPrereleaseChannel 判断非数字版本标签是否属于预发布滚动通道（如 beta、rc、next、nightly、beta-slim），
+// 并拆出基础通道名与剩余变体后缀。
+func ExtractPrereleaseChannel(raw string) (channel, variant string, ok bool) {
+	s := strings.TrimSpace(strings.ToLower(raw))
+	if s == "" || s == "latest" || s == "stable" || s == "release" || s == "prod" || s == "production" || s == "main" || s == "master" {
+		return "", "", false
+	}
+	if ParseTag(s).Scheme != SchemeUnknown {
+		return "", "", false
+	}
+	parts := strings.FieldsFunc(s, func(r rune) bool {
+		return r == '-' || r == '_'
+	})
+	if len(parts) == 0 || !reNightlyChannel.MatchString(parts[0]) {
+		return "", "", false
+	}
+	// 排除带 git commit 短哈希（如 dev-8a3f1c2 / nightly-20261101）的非纯通道标签，保留给别名逻辑
+	for _, p := range parts[1:] {
+		if len(p) >= 6 && containsDigit(p) && !strings.HasPrefix(p, "alpine") && !strings.HasPrefix(p, "debian") && !strings.HasPrefix(p, "ubuntu") && !strings.HasPrefix(p, "openssl") {
+			return "", "", false
+		}
+	}
+	return parts[0], strings.Join(parts[1:], "-"), true
+}
+
+// IsPrereleaseChannelTag 判断标签是否为纯通道式预发布标签（如 beta / rc / next / nightly / beta-slim）。
+func IsPrereleaseChannelTag(raw string) bool {
+	_, _, ok := ExtractPrereleaseChannel(raw)
+	return ok
+}
+
+// IsPrimaryPrereleaseChannel 判断是否为适合在默认预发布列表中置顶展示的主预发布通道（alpha / beta / rc / preview）。
+func IsPrimaryPrereleaseChannel(raw string) (variant string, ok bool) {
+	ch, v, matched := ExtractPrereleaseChannel(raw)
+	if !matched {
+		return "", false
+	}
+	switch ch {
+	case "alpha", "beta", "rc", "preview":
+		return v, true
+	default:
+		return "", false
+	}
+}
+
+// IsPrereleaseAny 判断任意镜像标签（无论是 3.0.0-beta.1 数字预发布还是 :beta / :nightly 通道标签）是否属于预发布属性。
+func IsPrereleaseAny(raw string) bool {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return false
+	}
+	pt := ParseTag(s)
+	if pt.Scheme != SchemeUnknown {
+		return pt.Prerelease
+	}
+	return IsPrereleaseChannelTag(s)
 }
 
 // CoreVersion 返回不带 v 前缀和变体后缀的核心点分数字版本号，用于界面对比展示与前缀匹配。
@@ -179,6 +280,7 @@ func (t ParsedTag) CoreVersion() string {
 }
 
 // Compare 逐段比较两个已解析版本的大小：a < b 返回 -1，a == b 返回 0，a > b 返回 1。
+// 当核心数字段与构建号均相同时，正式版大于同版本预发布版（3.0.0 > 3.0.0-rc.1 > 3.0.0-beta.2 > 3.0.0-beta.1 > 3.0.0-alpha.1）。
 func Compare(a, b ParsedTag) int {
 	sa := segmentsOf(a)
 	sb := segmentsOf(b)
@@ -198,7 +300,37 @@ func Compare(a, b ParsedTag) int {
 			return cmpInt(va, vb)
 		}
 	}
-	return cmpInt(a.Build, b.Build)
+	if a.Build != b.Build {
+		return cmpInt(a.Build, b.Build)
+	}
+	if a.Prerelease != b.Prerelease {
+		if !a.Prerelease {
+			return 1
+		}
+		return -1
+	}
+	if a.Prerelease && b.Prerelease {
+		if a.PreStage != b.PreStage {
+			return cmpInt(a.PreStage, b.PreStage)
+		}
+		pMax := len(a.PreNums)
+		if len(b.PreNums) > pMax {
+			pMax = len(b.PreNums)
+		}
+		for i := 0; i < pMax; i++ {
+			pa, pb := 0, 0
+			if i < len(a.PreNums) {
+				pa = a.PreNums[i]
+			}
+			if i < len(b.PreNums) {
+				pb = b.PreNums[i]
+			}
+			if pa != pb {
+				return cmpInt(pa, pb)
+			}
+		}
+	}
+	return 0
 }
 
 func cmpInt(a, b int) int {
@@ -282,8 +414,11 @@ func SelectBestDisplayTag(currentTag string, matchedTags []string) string {
 	curTrim := strings.TrimSpace(currentTag)
 	cur := ParseTag(curTrim)
 	wantVariant := cur.Variant
+	_, chVariant, isPreChannel := ExtractPrereleaseChannel(curTrim)
 	if rules.Default().IsRollingTag(curTrim) {
 		wantVariant = ""
+	} else if isPreChannel {
+		wantVariant = chVariant
 	}
 
 	var best ParsedTag
@@ -332,11 +467,34 @@ func SelectBestDisplayTag(currentTag string, matchedTags []string) string {
 		}
 	}
 
+	// 若当前标签属于预发布通道/预发布版本（如 :beta / :beta-slim / :nightly），或滚动标签无任何正式版别名时，回退匹配预发布标准版本号（如 3.0.0-beta.1）
+	if isPreChannel || cur.Prerelease || rules.Default().IsRollingTag(curTrim) {
+		for _, raw := range matchedTags {
+			if strings.EqualFold(strings.TrimSpace(raw), curTrim) {
+				continue
+			}
+			pt := ParseTag(raw)
+			if pt.Scheme == SchemeUnknown || !pt.Prerelease || isArchOnlyAlias(pt.Variant) {
+				continue
+			}
+			if pt.Variant != wantVariant && !(wantVariant == "" && pt.Variant == "ls") {
+				continue
+			}
+			if !hasBest || betterDisplayTag(pt, best) {
+				best = pt
+				hasBest = true
+			}
+		}
+		if hasBest {
+			return best.Raw
+		}
+	}
+
 	// 非标准数字版本兜底：挑选最佳非滚动别名标签（如 20261110-3、build-512、sha-8a3f1c2）
 	bestAlias := ""
 	for _, raw := range matchedTags {
 		t := strings.TrimSpace(raw)
-		if t == "" || strings.EqualFold(t, curTrim) || rules.Default().IsRollingTag(t) {
+		if t == "" || strings.EqualFold(t, curTrim) || rules.Default().IsRollingTag(t) || IsPrereleaseChannelTag(t) {
 			continue
 		}
 		if bestAlias == "" || betterAliasTag(t, bestAlias) {

@@ -252,7 +252,7 @@ func TestSearchTagsVersionOrderingAndVariantFiltering(t *testing.T) {
 		"ghcr.io":        srv.URL,
 	}
 
-	// Case 1: mosquitto:2 must NOT surface 1.6.15-openssl at #1; must keep 2, 2.1.2-alpine, 2.1.1-alpine, 2.0.22, 2.0.21
+	// Case 1: mosquitto:2 pins latest at #0, current floating tag 2 at #1, then 2.1.2-alpine, 2.1.1-alpine, 2.0.22
 	refMosq, _ := version.ParseImageRef("eclipse-mosquitto:2")
 	mosqItems, mosqHi, err := cli.SearchTags(ctx, refMosq, "", false)
 	if err != nil {
@@ -261,7 +261,7 @@ func TestSearchTagsVersionOrderingAndVariantFiltering(t *testing.T) {
 	if mosqHi != "2.1.2-alpine" {
 		t.Fatalf("expected mosquitto highestTag=2.1.2-alpine, got %q", mosqHi)
 	}
-	if len(mosqItems) < 5 || mosqItems[0].Name != "2" || mosqItems[1].Name != "2.1.2-alpine" || mosqItems[2].Name != "2.1.1-alpine" || mosqItems[3].Name != "2.0.22" {
+	if len(mosqItems) < 5 || mosqItems[0].Name != "latest" || mosqItems[1].Name != "2" || mosqItems[2].Name != "2.1.2-alpine" || mosqItems[3].Name != "2.1.1-alpine" || mosqItems[4].Name != "2.0.22" {
 		t.Fatalf("unexpected mosquitto order: %+v", mosqItems)
 	}
 	for _, it := range mosqItems {
@@ -360,5 +360,133 @@ func TestFetchImageLayerSizes_HubAndOCIMultiArch(t *testing.T) {
 	ociSizes := cli.FetchImageLayerSizes(ctx, "ghcr.io/org/app:v1.2.0", "linux/amd64")
 	if ociSizes["deadbeefcafe"] != 77000000 {
 		t.Fatalf("unexpected oci multi-arch layer sizes: %+v", ociSizes)
+	}
+}
+
+func TestSearchTagsExPrereleasePrefixSortAndRemoteRefresh(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	box, _ := secret.LoadOrCreate(dir)
+
+	ghcrVersion := 1
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/v2/repositories/louislam/uptime-kuma/tags"):
+			_, _ = w.Write([]byte(`{
+				"next": "",
+				"results": [
+					{"name":"3.0.0-beta.1-slim-rootless","digest":"sha256:b1sr","last_updated":"2026-11-17T16:10:58Z","images":[]},
+					{"name":"3.0.0-beta.1-rootless","digest":"sha256:b1r","last_updated":"2026-11-17T16:10:51Z","images":[]},
+					{"name":"3.0.0-beta.1-slim","digest":"sha256:b1s","last_updated":"2026-11-17T16:10:39Z","images":[]},
+					{"name":"3.0.0-beta.1","digest":"sha256:b1","last_updated":"2026-11-17T15:51:31Z","images":[]},
+					{"name":"beta","digest":"sha256:b1","last_updated":"2026-11-17T15:51:28Z","images":[]},
+					{"name":"latest","digest":"sha256:u2512","last_updated":"2026-11-17T15:23:08Z","images":[]},
+					{"name":"2.5.12","digest":"sha256:u2512","last_updated":"2026-11-17T15:23:08Z","images":[]},
+					{"name":"2.5.12-rootless","digest":"sha256:u2512r","last_updated":"2026-11-17T15:22:20Z","images":[]},
+					{"name":"2.5.11","digest":"sha256:u2511","last_updated":"2026-11-02T10:00:00Z","images":[]},
+					{"name":"2.3.0","digest":"sha256:u230","last_updated":"2026-05-01T03:52:38Z","images":[]},
+					{"name":"1.23.9","digest":"sha256:u1239","last_updated":"2026-11-17T16:20:00Z","images":[]},
+					{"name":"1.23.0","digest":"sha256:u1230","last_updated":"2023-08-17T14:38:00Z","images":[]}
+				]
+			}`))
+		case r.URL.Path == "/v2/louislam/uptime-kuma/tags/list":
+			if ghcrVersion == 1 {
+				_, _ = w.Write([]byte(`{"tags":["latest","2.5.11"]}`))
+			} else {
+				_, _ = w.Write([]byte(`{"tags":["latest","2.5.11","2.5.12","3.0.0-beta.1"]}`))
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	cli := New(st, box)
+	cli.BaseURLOverride = map[string]string{
+		"docker.io":      srv.URL,
+		"hub.docker.com": srv.URL,
+		"ghcr.io":        srv.URL,
+	}
+
+	refStable, _ := version.ParseImageRef("louislam/uptime-kuma:2.5.11")
+
+	// 1. Default list on stable container: latest is #0 (aliasOf=2.5.12), prerelease hidden by default, -rootless filtered
+	resDefault, err := cli.SearchTagsEx(ctx, refStable, SearchOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resDefault.CurrentPrerelease || !resDefault.HasTimestamps || resDefault.HighestTag != "2.5.12" {
+		t.Fatalf("unexpected default meta: %+v", resDefault)
+	}
+	if len(resDefault.Items) < 2 || resDefault.Items[0].Name != "latest" || resDefault.Items[0].AliasOf != "2.5.12" || resDefault.Items[1].Name != "2.5.12" {
+		t.Fatalf("expected latest(2.5.12) at #0 and 2.5.12 at #1, got %+v", resDefault.Items)
+	}
+	for _, it := range resDefault.Items {
+		if it.Prerelease || strings.Contains(it.Name, "rootless") {
+			t.Fatalf("unexpected item in clean stable list: %+v", it)
+		}
+	}
+
+	// 2. Enabling IncludePrerelease reveals beta(3.0.0-beta.1) and 3.0.0-beta.1 without leaking -slim/-rootless
+	incTrue := true
+	resPre, err := cli.SearchTagsEx(ctx, refStable, SearchOptions{IncludePrerelease: &incTrue})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resPre.HighestTag != "3.0.0-beta.1" || resPre.HighestStableTag != "2.5.12" {
+		t.Fatalf("expected highest=3.0.0-beta.1 and highestStable=2.5.12, got %+v", resPre)
+	}
+	if resPre.Items[0].Name != "latest" || resPre.Items[1].Name != "beta" || resPre.Items[1].AliasOf != "3.0.0-beta.1" || resPre.Items[2].Name != "3.0.0-beta.1" {
+		t.Fatalf("unexpected prerelease-enabled order: %+v", resPre.Items)
+	}
+
+	// 3. Searching "3.0" puts 3.0.0-beta.1 at #0 ahead of 2.3.0 and 1.23.0 even when IncludePrerelease is not set
+	resSearch, err := cli.SearchTagsEx(ctx, refStable, SearchOptions{Query: "3.0", Remote: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resSearch.Items) < 5 || resSearch.Items[0].Name != "3.0.0-beta.1" || !resSearch.Items[0].Prerelease {
+		t.Fatalf("expected 3.0.0-beta.1 at #0 when searching 3.0, got %+v", resSearch.Items)
+	}
+
+	// 4. SortBy="time" puts 1.23.9 (newest timestamp 16:20:00Z) at #0
+	resTime, err := cli.SearchTagsEx(ctx, refStable, SearchOptions{SortBy: "time"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resTime.Items) == 0 || resTime.Items[0].Name != "1.23.9" {
+		t.Fatalf("expected newest timestamp 1.23.9 at #0 in time mode, got %+v", resTime.Items)
+	}
+
+	// 5. Container already on :beta defaults CurrentPrerelease=true and includes 3.0.0-beta.1 automatically
+	refBeta, _ := version.ParseImageRef("louislam/uptime-kuma:beta")
+	resOnBeta, err := cli.SearchTagsEx(ctx, refBeta, SearchOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resOnBeta.CurrentPrerelease || resOnBeta.HighestTag != "3.0.0-beta.1" {
+		t.Fatalf("expected :beta container to auto-enable prerelease, got %+v", resOnBeta)
+	}
+
+	// 6. Non-DockerHub OCI registry (ghcr.io) Remote=true bypasses 6h cache and picks up newly pushed tags
+	refGHCR, _ := version.ParseImageRef("ghcr.io/louislam/uptime-kuma:2.5.11")
+	r1, err := cli.SearchTagsEx(ctx, refGHCR, SearchOptions{Remote: false})
+	if err != nil || r1.HighestTag != "2.5.11" || r1.HasTimestamps {
+		t.Fatalf("unexpected initial ghcr result: err=%v res=%+v", err, r1)
+	}
+	ghcrVersion = 2
+	r2Cached, _ := cli.SearchTagsEx(ctx, refGHCR, SearchOptions{Remote: false})
+	if r2Cached.HighestTag != "2.5.11" {
+		t.Fatalf("expected cached ghcr result before remote refresh, got %+v", r2Cached)
+	}
+	r2Fresh, err := cli.SearchTagsEx(ctx, refGHCR, SearchOptions{Query: "3.0", Remote: true})
+	if err != nil || len(r2Fresh.Items) == 0 || r2Fresh.Items[0].Name != "3.0.0-beta.1" || r2Fresh.HighestStableTag != "2.5.12" {
+		t.Fatalf("expected ghcr Remote=true to bypass cache and find 3.0.0-beta.1, got err=%v res=%+v", err, r2Fresh)
 	}
 }

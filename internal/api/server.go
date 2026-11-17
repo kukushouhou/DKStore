@@ -783,29 +783,52 @@ func (s *Server) handleSearchServiceTags(w http.ResponseWriter, r *http.Request)
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	remoteParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("remote")))
 	remote := remoteParam == "1" || remoteParam == "true"
+	sortBy := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort")))
 
-	entries, highestTag, err := s.d.Reg.SearchTags(r.Context(), ref, q, remote)
+	var includePrePtr *bool
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("prerelease"))) {
+	case "1", "true":
+		v := true
+		includePrePtr = &v
+	case "0", "false":
+		v := false
+		includePrePtr = &v
+	}
+
+	res, err := s.d.Reg.SearchTagsEx(r.Context(), ref, registry.SearchOptions{
+		Query:             q,
+		Remote:            remote,
+		IncludePrerelease: includePrePtr,
+		SortBy:            sortBy,
+	})
 	if err != nil {
 		writeError(w, lang, http.StatusBadGateway, "check_failed", i18n.LocalizeError(lang, err))
 		return
 	}
 
 	type tagItem struct {
-		Tag       string `json:"tag"`
-		UpdatedAt int64  `json:"updatedAt,omitempty"`
-		Digest    string `json:"digest,omitempty"`
+		Tag        string `json:"tag"`
+		UpdatedAt  int64  `json:"updatedAt,omitempty"`
+		Digest     string `json:"digest,omitempty"`
+		Prerelease bool   `json:"prerelease,omitempty"`
+		AliasOf    string `json:"aliasOf,omitempty"`
 	}
-	out := make([]tagItem, 0, len(entries))
-	for _, e := range entries {
+	out := make([]tagItem, 0, len(res.Items))
+	for _, e := range res.Items {
 		out = append(out, tagItem{
-			Tag:       e.Name,
-			UpdatedAt: e.UpdatedAt,
-			Digest:    e.RepoDigest,
+			Tag:        e.Name,
+			UpdatedAt:  e.UpdatedAt,
+			Digest:     e.RepoDigest,
+			Prerelease: e.Prerelease,
+			AliasOf:    e.AliasOf,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"items":      out,
-		"highestTag": highestTag,
+		"items":             out,
+		"highestTag":        res.HighestTag,
+		"highestStableTag":  res.HighestStableTag,
+		"currentPrerelease": res.CurrentPrerelease,
+		"hasTimestamps":     res.HasTimestamps,
 	})
 }
 

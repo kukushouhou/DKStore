@@ -75,3 +75,40 @@ func TestSelectBestDisplayTag_PreservesNonSemVerAliases(t *testing.T) {
 		t.Fatalf("expected empty when only rolling tags exist, got %q", gotOnlyRolling)
 	}
 }
+
+func TestPrereleaseParsingCompareAndCompatibility(t *testing.T) {
+	b1 := ParseTag("3.0.0-beta.1")
+	b2 := ParseTag("3.0.0-beta.2")
+	rc1 := ParseTag("3.0.0-rc.1")
+	final3 := ParseTag("3.0.0")
+	b1Slim := ParseTag("3.0.0-beta.1-slim")
+	stable2 := ParseTag("2.5.11")
+
+	if !b1.Prerelease || b1.Variant != "" || b1.PreStage != 3 || len(b1.PreNums) != 1 || b1.PreNums[0] != 1 {
+		t.Fatalf("unexpected b1 parse: %+v", b1)
+	}
+	if !b1Slim.Prerelease || b1Slim.Variant != "slim" {
+		t.Fatalf("expected b1Slim variant=slim, got %+v", b1Slim)
+	}
+	if !(Compare(b1, b2) < 0 && Compare(b2, rc1) < 0 && Compare(rc1, final3) < 0) {
+		t.Fatalf("expected 3.0.0-beta.1 < 3.0.0-beta.2 < 3.0.0-rc.1 < 3.0.0")
+	}
+	if CompatibleCandidate(stable2, b1) {
+		t.Fatalf("stable 2.5.11 must not auto-recommend prerelease 3.0.0-beta.1")
+	}
+	if !CompatibleCandidate(b1, b2) || !CompatibleCandidate(b1, final3) {
+		t.Fatalf("prerelease 3.0.0-beta.1 must accept 3.0.0-beta.2 and 3.0.0 as upgrade candidates")
+	}
+	if CompatibleCandidate(b1, b1Slim) {
+		t.Fatalf("plain 3.0.0-beta.1 must not match -slim variant")
+	}
+	if !IsPrereleaseAny("beta") || !IsPrereleaseAny("3.0.0-beta.1") || IsPrereleaseAny("2.5.12") || IsPrereleaseAny("latest") {
+		t.Fatalf("unexpected IsPrereleaseAny results")
+	}
+	if got := SelectBestDisplayTag("beta", []string{"beta", "3.0.0-beta.1"}); got != "3.0.0-beta.1" {
+		t.Fatalf("expected beta -> 3.0.0-beta.1, got %q", got)
+	}
+	if got := SelectBestDisplayTag("beta-slim", []string{"beta-slim", "3.0.0-beta.1", "3.0.0-beta.1-slim"}); got != "3.0.0-beta.1-slim" {
+		t.Fatalf("expected beta-slim -> 3.0.0-beta.1-slim, got %q", got)
+	}
+}

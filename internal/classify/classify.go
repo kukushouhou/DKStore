@@ -140,7 +140,7 @@ func resolveVersionLabelTag(raw string, candidates []registry.TagDigestEntry) (d
 	for _, c := range candidates {
 		cn := strings.TrimSpace(c.Name)
 		pc := version.ParseTag(cn)
-		if pc.Scheme != version.SchemeUnknown && !pc.Prerelease {
+		if pc.Scheme != version.SchemeUnknown && (!pc.Prerelease || pv.Prerelease) {
 			hasAnyParsedCandidate = true
 			if pv.Scheme == pc.Scheme && pv.Major == pc.Major {
 				matchedSameMajor = true

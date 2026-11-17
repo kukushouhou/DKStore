@@ -389,15 +389,29 @@ export interface OverviewResponse {
   progress: CheckProgress
 }
 
+export type TagSortMode = 'version' | 'time'
+
 export interface ServiceTagItem {
   tag: string
   updatedAt?: number
   digest?: string
+  prerelease?: boolean
+  aliasOf?: string
 }
 
 export interface ServiceTagsResponse {
   items: ServiceTagItem[]
   highestTag?: string
+  highestStableTag?: string
+  currentPrerelease?: boolean
+  hasTimestamps?: boolean
+}
+
+export interface SearchServiceTagsOpts {
+  q?: string
+  remote?: boolean
+  prerelease?: boolean
+  sort?: TagSortMode
 }
 
 export interface SetIgnorePayload {
@@ -723,10 +737,25 @@ export const api = {
   removeIgnoreByApp: (appKey: string) =>
     request<{ ok: boolean }>(`/ignore?appKey=${encodeURIComponent(appKey)}`, { method: 'DELETE' }),
 
-  searchServiceTags: (serviceKey: string, q = '', remote = false) =>
-    request<ServiceTagsResponse>(
-      `/services/tags?serviceKey=${encodeURIComponent(serviceKey)}&q=${encodeURIComponent(q)}&remote=${remote ? 1 : 0}`,
-    ),
+  searchServiceTags: (
+    serviceKey: string,
+    qOrOpts: string | SearchServiceTagsOpts = '',
+    remote = false,
+  ) => {
+    const opts: SearchServiceTagsOpts =
+      typeof qOrOpts === 'string' ? { q: qOrOpts, remote } : qOrOpts
+    const params = new URLSearchParams()
+    params.set('serviceKey', serviceKey)
+    if (opts.q) params.set('q', opts.q)
+    params.set('remote', opts.remote ? '1' : '0')
+    if (opts.prerelease !== undefined) {
+      params.set('prerelease', opts.prerelease ? '1' : '0')
+    }
+    if (opts.sort) {
+      params.set('sort', opts.sort)
+    }
+    return request<ServiceTagsResponse>(`/services/tags?${params.toString()}`)
+  },
 
   getAppCompose: (appKey: string) =>
     request<AppComposeResponse>(`/apps/compose?key=${encodeURIComponent(appKey)}`),

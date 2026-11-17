@@ -531,15 +531,75 @@ func mergeUniqueTagEntries(groups ...[]TagDigestEntry) []TagDigestEntry {
 	return out
 }
 
-// SearchTags 支持弹窗内版本展示（query=""）与按需检索（query!=""），
-// 默认按「当前标签系列优先 + 语义化版本号从高到低 + 同变体过滤」输出最多 20 条干净版本，并返回作用域内最高版本标签 highestTag。
-func (c *Client) SearchTags(ctx context.Context, ref version.ParsedRef, query string, remote bool) ([]TagDigestEntry, string, error) {
-	q := strings.TrimSpace(query)
-	qLower := strings.ToLower(q)
+const maxTagSearchItems = 50
 
-	recent, err := c.FetchRecentTags(ctx, ref, 5, false)
-	if err != nil && (!remote || q == "" || ref.Registry != "docker.io") {
+// SearchOptions 控制版本弹窗的标签列表查询、预发布过滤与排序方式。
+type SearchOptions struct {
+	Query             string
+	Remote            bool
+	IncludePrerelease *bool  // nil 时自动按容器当前标签是否为预发布版本决定
+	SortBy            string // "version"（默认）| "time"
+}
+
+// TaggedSearchItem 是携带预发布标记与通道实际指向版本的标签项。
+type TaggedSearchItem struct {
+	TagDigestEntry
+	Prerelease bool
+	AliasOf    string
+}
+
+// SearchResult 是 SearchTagsEx 的完整返回结果。
+type SearchResult struct {
+	Items             []TaggedSearchItem
+	HighestTag        string
+	HighestStableTag  string
+	CurrentPrerelease bool
+	HasTimestamps     bool
+}
+
+// SearchTags 兼容简化调用签名，返回标签列表与作用域内最高版本标签 highestTag。
+func (c *Client) SearchTags(ctx context.Context, ref version.ParsedRef, query string, remote bool) ([]TagDigestEntry, string, error) {
+	res, err := c.SearchTagsEx(ctx, ref, SearchOptions{
+		Query:  query,
+		Remote: remote,
+	})
+	if err != nil {
 		return nil, "", err
+	}
+	out := make([]TagDigestEntry, len(res.Items))
+	for i, it := range res.Items {
+		out[i] = it.TagDigestEntry
+	}
+	return out, res.HighestTag, nil
+}
+
+// SearchTagsEx 支持弹窗版本浏览与按需检索：
+// - remote=true 时对所有仓库（含 Docker Hub / GHCR / LSCR / Quay / 私有仓库）一律绕过缓存直连云端实时拉取；
+// - 支持按预发布开关控制默认列表，主动搜索（query!=""）始终包含预发布并按「精确匹配 > 前缀匹配 > 版本号/时间」排序；
+// - 支持按版本号（latest 置顶并解析实际指向版本）与按更新时间双模式排序，返回最多 50 条。
+func (c *Client) SearchTagsEx(ctx context.Context, ref version.ParsedRef, opts SearchOptions) (*SearchResult, error) {
+	q := strings.TrimSpace(opts.Query)
+	qLower := strings.ToLower(q)
+	curPrerelease := version.IsPrereleaseAny(ref.Tag)
+	includePre := curPrerelease
+	if opts.IncludePrerelease != nil {
+		includePre = *opts.IncludePrerelease
+	}
+	sortBy := strings.ToLower(strings.TrimSpace(opts.SortBy))
+	if sortBy != "time" {
+		sortBy = "version"
+	}
+
+	recent, err := c.FetchRecentTags(ctx, ref, 5, opts.Remote)
+	if err != nil && opts.Remote {
+		// 若远端刷新偶发网络波动但本地尚有缓存且非强制搜词，尝试降级读取缓存；搜词场景在 Docker Hub 下继续走按名检索
+		if fallback, fbErr := c.FetchRecentTags(ctx, ref, 5, false); fbErr == nil && len(fallback) > 0 && q == "" {
+			recent = fallback
+			err = nil
+		}
+	}
+	if err != nil && (!opts.Remote || q == "" || ref.Registry != "docker.io") {
+		return nil, err
 	}
 
 	combined := recent
@@ -547,16 +607,27 @@ func (c *Client) SearchTags(ctx context.Context, ref version.ParsedRef, query st
 	scopePrefix := computeServiceScopePrefix(ref)
 
 	if ref.Registry == "docker.io" {
-		if remote && q != "" {
-			remoteHits, rErr := c.searchDockerHubTagsByNameWithSize(ctx, ref.Repository, q, 50)
-			if rErr != nil && len(recent) == 0 {
-				return nil, "", rErr
+		if q != "" {
+			hubQKey := fmt.Sprintf("hub_q:%s:%s:%d", ref.Repository, qLower, 100)
+			if opts.Remote {
+				remoteHits, rErr := c.searchDockerHubTagsByNameWithSize(ctx, ref.Repository, q, 100)
+				if rErr != nil && len(recent) == 0 {
+					return nil, rErr
+				}
+				if len(remoteHits) > 0 {
+					if b, mErr := json.Marshal(remoteHits); mErr == nil {
+						c.putCache(ctx, hubQKey, b, 2*time.Hour)
+					}
+					combined = mergeUniqueTagEntries(remoteHits, combined)
+				}
+			} else if b, ok := c.getCache(ctx, hubQKey); ok {
+				var cachedHits []TagDigestEntry
+				if json.Unmarshal(b, &cachedHits) == nil && len(cachedHits) > 0 {
+					combined = mergeUniqueTagEntries(cachedHits, combined)
+				}
 			}
-			if len(remoteHits) > 0 {
-				combined = mergeUniqueTagEntries(remoteHits, combined)
-			}
-		} else if q == "" && curTag.Scheme != version.SchemeUnknown {
-			// 对 mysql:8.4 / postgres:17 / registry:2 等多变体或长周期大仓库，补充拉取本系列标签缓存，防止正式版本被海量变体挤出前几页
+		} else if curTag.Scheme != version.SchemeUnknown {
+			// 对 mysql:8.4 / postgres:17 / registry:2 等多变体或长周期大仓库，补充拉取本系列标签，防止正式版本被海量变体挤出前几页
 			seriesQuery := scopePrefix
 			if seriesQuery == "" {
 				seriesQuery = strconv.Itoa(curTag.Major)
@@ -565,7 +636,21 @@ func (c *Client) SearchTags(ctx context.Context, ref version.ParsedRef, query st
 				seriesQuery = curTag.CoreVersion() + "."
 			}
 			if seriesQuery != "" {
-				if seriesHits, sErr := c.fetchCachedHubTagsByName(ctx, ref.Repository, seriesQuery, 100); sErr == nil && len(seriesHits) > 0 {
+				var (
+					seriesHits []TagDigestEntry
+					sErr       error
+				)
+				if opts.Remote {
+					seriesHits, sErr = c.searchDockerHubTagsByNameWithSize(ctx, ref.Repository, seriesQuery, 100)
+					if sErr == nil && len(seriesHits) > 0 {
+						if b, mErr := json.Marshal(seriesHits); mErr == nil {
+							c.putCache(ctx, fmt.Sprintf("hub_q:%s:%s:%d", ref.Repository, seriesQuery, 100), b, 2*time.Hour)
+						}
+					}
+				} else {
+					seriesHits, sErr = c.fetchCachedHubTagsByName(ctx, ref.Repository, seriesQuery, 100)
+				}
+				if sErr == nil && len(seriesHits) > 0 {
 					combined = mergeUniqueTagEntries(combined, seriesHits)
 				}
 			}
@@ -575,17 +660,32 @@ func (c *Client) SearchTags(ctx context.Context, ref version.ParsedRef, query st
 				}
 			}
 		}
-	} else if remote && q != "" && len(combined) == 0 {
-		list, lErr := c.fetchOCITagsList(ctx, ref.Registry, ref.Repository, 5)
-		if lErr != nil {
-			return nil, "", lErr
-		}
-		combined = list
 	}
 
-	cleanedDefault := buildCleanDefaultTags(combined, ref, scopePrefix)
-	highest := pickScopedHighestTag(cleanedDefault, combined, ref, scopePrefix)
+	hasTimestamps := false
+	for _, e := range combined {
+		if e.UpdatedAt > 0 {
+			hasTimestamps = true
+			break
+		}
+	}
+	effectiveSort := sortBy
+	if !hasTimestamps {
+		effectiveSort = "version"
+	}
 
+	cleanedDefault := buildCleanDefaultTags(combined, ref, scopePrefix, includePre, effectiveSort)
+	highestStable := pickScopedHighestTag(cleanedDefault, combined, ref, scopePrefix, false)
+	highest := highestStable
+	if includePre || curPrerelease {
+		if hp := pickScopedHighestTag(cleanedDefault, combined, ref, scopePrefix, true); hp != "" {
+			highest = hp
+		}
+	}
+
+	curFlavor := resolveCurrentFlavor(ref.Tag)
+
+	var chosen []TagDigestEntry
 	if qLower != "" {
 		matched := make([]TagDigestEntry, 0, len(combined))
 		for _, e := range combined {
@@ -593,17 +693,88 @@ func (c *Client) SearchTags(ctx context.Context, ref version.ParsedRef, query st
 				matched = append(matched, e)
 			}
 		}
-		sortSearchedTags(matched, qLower)
-		if len(matched) > 20 {
-			matched = matched[:20]
+		sortSearchedTags(matched, qLower, curFlavor, effectiveSort)
+		if len(matched) > maxTagSearchItems {
+			matched = matched[:maxTagSearchItems]
 		}
-		return matched, highest, nil
+		chosen = matched
+	} else {
+		if len(cleanedDefault) > maxTagSearchItems {
+			cleanedDefault = cleanedDefault[:maxTagSearchItems]
+		}
+		chosen = cleanedDefault
 	}
 
-	if len(cleanedDefault) > 20 {
-		cleanedDefault = cleanedDefault[:20]
+	items := make([]TaggedSearchItem, 0, len(chosen))
+	for _, e := range chosen {
+		alias := resolveEntryAliasOf(e, combined)
+		isPre := version.IsPrereleaseAny(e.Name)
+		if isPre && alias != "" && version.ParseTag(e.Name).Scheme == version.SchemeUnknown && !version.IsPrereleaseAny(alias) {
+			isPre = false
+		}
+		items = append(items, TaggedSearchItem{
+			TagDigestEntry: e,
+			Prerelease:     isPre,
+			AliasOf:        alias,
+		})
 	}
-	return cleanedDefault, highest, nil
+
+	return &SearchResult{
+		Items:             items,
+		HighestTag:        highest,
+		HighestStableTag:  highestStable,
+		CurrentPrerelease: curPrerelease,
+		HasTimestamps:     hasTimestamps,
+	}, nil
+}
+
+func resolveCurrentFlavor(curTagName string) string {
+	curTrim := strings.TrimSpace(curTagName)
+	curParsed := version.ParseTag(curTrim)
+	if curParsed.Scheme != version.SchemeUnknown {
+		fl, _ := classifyTagVariant(curParsed.Variant)
+		return fl
+	}
+	if _, chVar, ok := version.ExtractPrereleaseChannel(curTrim); ok {
+		fl, _ := classifyTagVariant(chVar)
+		return fl
+	}
+	fl, _ := classifyTagVariant(curTrim)
+	return fl
+}
+
+func resolveEntryAliasOf(entry TagDigestEntry, pool []TagDigestEntry) string {
+	if entry.RepoDigest == "" || entry.Name == "" {
+		return ""
+	}
+	pt := version.ParseTag(entry.Name)
+	if pt.Scheme != version.SchemeUnknown && pt.Precision > 2 {
+		return ""
+	}
+	var sameDigest []string
+	for _, other := range pool {
+		if other.Name != "" && other.RepoDigest == entry.RepoDigest {
+			sameDigest = append(sameDigest, other.Name)
+		}
+	}
+	if len(sameDigest) <= 1 {
+		return ""
+	}
+	best := version.SelectBestDisplayTag(entry.Name, sameDigest)
+	if best == "" || strings.EqualFold(best, entry.Name) {
+		return ""
+	}
+	bp := version.ParseTag(best)
+	// 仅当反查到多段具体版本号（如 2.5.12 / 3.0.0-beta.1 / 17.12）时才标注括号别名，避免单数字浮动主版本（如 "1"）造成误解
+	if bp.Scheme != version.SchemeUnknown && bp.Precision < 2 {
+		return ""
+	}
+	if pt.Scheme != version.SchemeUnknown {
+		if bp.Scheme == version.SchemeUnknown || bp.Precision <= pt.Precision {
+			return ""
+		}
+	}
+	return best
 }
 
 func containsTagEntry(entries []TagDigestEntry, name string) bool {
@@ -657,6 +828,8 @@ func classifyTagVariant(variant string) (flavor string, isArchOrWin bool) {
 			flavorSet["alpine"] = true
 		case strings.HasPrefix(tok, "slim"):
 			flavorSet["slim"] = true
+		case tok == "rootless":
+			flavorSet["rootless"] = true
 		case tok == "bookworm" || tok == "bullseye" || tok == "buster" || tok == "trixie" || tok == "stretch" || tok == "jessie" || strings.HasPrefix(tok, "debian"):
 			flavorSet["debian"] = true
 		case tok == "noble" || tok == "jammy" || tok == "focal" || tok == "bionic" || strings.HasPrefix(tok, "ubuntu"):
@@ -690,16 +863,13 @@ func classifyTagVariant(variant string) (flavor string, isArchOrWin bool) {
 	return strings.Join(flavors, "+"), isArchOrWin
 }
 
-func buildCleanDefaultTags(entries []TagDigestEntry, ref version.ParsedRef, scopePrefix string) []TagDigestEntry {
+func buildCleanDefaultTags(entries []TagDigestEntry, ref version.ParsedRef, scopePrefix string, includePrerelease bool, sortBy string) []TagDigestEntry {
 	if len(entries) == 0 {
 		return nil
 	}
 	curTagName := strings.TrimSpace(ref.Tag)
 	curParsed := version.ParseTag(curTagName)
-	curFlavor, _ := classifyTagVariant(curParsed.Variant)
-	if curParsed.Scheme == version.SchemeUnknown {
-		curFlavor, _ = classifyTagVariant(curTagName)
-	}
+	curFlavor := resolveCurrentFlavor(curTagName)
 	allowedFlavors := map[string]bool{curFlavor: true}
 
 	// 若当前标签（或 latest）指向的镜像 Digest 没有无后缀标准版本，而是官方将某个变体（如 mosquitto:2 -> 2.1.2-alpine）作为默认主线，则自动纳入该同 Digest 变体
@@ -726,7 +896,7 @@ func buildCleanDefaultTags(entries []TagDigestEntry, ref version.ParsedRef, scop
 				continue
 			}
 			pt := version.ParseTag(e.Name)
-			if pt.Scheme == version.SchemeUnknown || pt.Prerelease || pt.Precision < 2 {
+			if pt.Scheme == version.SchemeUnknown || pt.Precision < 2 {
 				continue
 			}
 			fl, isArch := classifyTagVariant(pt.Variant)
@@ -749,7 +919,7 @@ func buildCleanDefaultTags(entries []TagDigestEntry, ref version.ParsedRef, scop
 	anyRepoSemVer := false
 	for _, e := range entries {
 		pt := version.ParseTag(e.Name)
-		if pt.Scheme != version.SchemeUnknown && !pt.Prerelease {
+		if pt.Scheme != version.SchemeUnknown && (!pt.Prerelease || includePrerelease) {
 			if _, isArch := classifyTagVariant(pt.Variant); !isArch {
 				anyRepoSemVer = true
 				break
@@ -757,31 +927,59 @@ func buildCleanDefaultTags(entries []TagDigestEntry, ref version.ParsedRef, scop
 		}
 	}
 
-	// 非语义版本仓库（如 gcli2api:master-ecc207f / gewechat:latest）：保持原仓库顺序，仅将当前运行标签置顶、剔除异构单架构后缀
+	// 非语义版本仓库（如 gcli2api:master-ecc207f / gewechat:latest）：剔除异构单架构后缀并置顶 latest 与当前运行标签
 	if !anyRepoSemVer {
 		out := make([]TagDigestEntry, 0, len(entries))
-		for _, e := range entries {
-			if e.Name == curTagName && curTagName != "" {
+		seen := make(map[string]bool, len(entries))
+		appendUnique := func(e TagDigestEntry) {
+			if e.Name != "" && !seen[e.Name] {
+				seen[e.Name] = true
 				out = append(out, e)
-				break
+			}
+		}
+		if sortBy != "time" {
+			for _, e := range entries {
+				if e.Name == "latest" && curTagName == "latest" {
+					appendUnique(e)
+					break
+				}
+			}
+			for _, e := range entries {
+				if e.Name == curTagName && curTagName != "" {
+					appendUnique(e)
+					break
+				}
+			}
+			for _, e := range entries {
+				if e.Name == "latest" {
+					appendUnique(e)
+					break
+				}
 			}
 		}
 		for _, e := range entries {
-			if e.Name == "" || e.Name == curTagName {
+			if e.Name == "" {
 				continue
 			}
 			if _, isArch := classifyTagVariant(e.Name); isArch {
 				continue
 			}
-			out = append(out, e)
+			if !includePrerelease && e.Name != curTagName && version.IsPrereleaseChannelTag(e.Name) {
+				continue
+			}
+			appendUnique(e)
+		}
+		if sortBy == "time" {
+			sortTagsByUpdatedTime(out)
 		}
 		return out
 	}
 
-	filterSemVer := func(strictFlavor bool) ([]TagDigestEntry, *TagDigestEntry, *TagDigestEntry) {
+	filterSemVer := func(strictFlavor bool) ([]TagDigestEntry, *TagDigestEntry, *TagDigestEntry, []TagDigestEntry) {
 		var semverItems []TagDigestEntry
 		var curEntry *TagDigestEntry
 		var latestEntry *TagDigestEntry
+		var preChannels []TagDigestEntry
 		for i := range entries {
 			e := entries[i]
 			if e.Name == "" {
@@ -795,11 +993,19 @@ func buildCleanDefaultTags(entries []TagDigestEntry, ref version.ParsedRef, scop
 				cp := e
 				latestEntry = &cp
 			}
+			if includePrerelease && e.Name != "latest" {
+				if chVar, ok := version.IsPrimaryPrereleaseChannel(e.Name); ok {
+					fl, isArch := classifyTagVariant(chVar)
+					if !isArch && (!strictFlavor || allowedFlavors[fl]) {
+						preChannels = append(preChannels, e)
+					}
+				}
+			}
 			pt := version.ParseTag(e.Name)
 			if pt.Scheme == version.SchemeUnknown {
 				continue
 			}
-			if pt.Prerelease && !curParsed.Prerelease {
+			if pt.Prerelease && !includePrerelease && e.Name != curTagName {
 				continue
 			}
 			fl, isArch := classifyTagVariant(pt.Variant)
@@ -811,12 +1017,12 @@ func buildCleanDefaultTags(entries []TagDigestEntry, ref version.ParsedRef, scop
 			}
 			semverItems = append(semverItems, e)
 		}
-		return semverItems, curEntry, latestEntry
+		return semverItems, curEntry, latestEntry, preChannels
 	}
 
-	semverItems, curEntry, latestEntry := filterSemVer(true)
+	semverItems, curEntry, latestEntry, preChannels := filterSemVer(true)
 	if len(semverItems) == 0 {
-		semverItems, curEntry, latestEntry = filterSemVer(false)
+		semverItems, curEntry, latestEntry, preChannels = filterSemVer(false)
 	}
 
 	// 计算每个主版本系列的具体版本号精度（如 mysql 为 3 段 8.4.13，postgres 为 2 段 17.11），剔除同系列内冗余的浮动短别名（始终保留当前标签本身）
@@ -895,19 +1101,62 @@ func buildCleanDefaultTags(entries []TagDigestEntry, ref version.ParsedRef, scop
 		return ni > nj
 	})
 
-	out := make([]TagDigestEntry, 0, len(deduped)+2)
-	if isCurFloating && curEntry != nil && !containsTagEntry(deduped, curTagName) {
-		out = append(out, *curEntry)
+	sort.SliceStable(preChannels, func(i, j int) bool {
+		if preChannels[i].UpdatedAt != preChannels[j].UpdatedAt {
+			return preChannels[i].UpdatedAt > preChannels[j].UpdatedAt
+		}
+		return preChannels[i].Name < preChannels[j].Name
+	})
+	if len(preChannels) > 2 {
+		preChannels = preChannels[:2]
 	}
-	out = append(out, deduped...)
-	if latestEntry != nil && !containsTagEntry(out, "latest") {
-		if len(out) >= 20 {
-			out = append(out[:19], *latestEntry)
-		} else {
-			out = append(out, *latestEntry)
+
+	out := make([]TagDigestEntry, 0, len(deduped)+len(preChannels)+3)
+	seenOut := make(map[string]bool, len(deduped)+4)
+	pushOut := func(e TagDigestEntry) {
+		if e.Name != "" && !seenOut[e.Name] {
+			seenOut[e.Name] = true
+			out = append(out, e)
 		}
 	}
+
+	// latest 始终置顶在第 1 行（不再沉底），随后是当前浮动标签与预发布主通道（如 beta），再跟语义化版本号从高到低
+	if latestEntry != nil {
+		pushOut(*latestEntry)
+	}
+	if isCurFloating && curEntry != nil {
+		pushOut(*curEntry)
+	}
+	for _, ch := range preChannels {
+		pushOut(ch)
+	}
+	for _, d := range deduped {
+		pushOut(d)
+	}
+
+	if sortBy == "time" {
+		sortTagsByUpdatedTime(out)
+	}
 	return out
+}
+
+func sortTagsByUpdatedTime(items []TagDigestEntry) {
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].UpdatedAt != items[j].UpdatedAt {
+			return items[i].UpdatedAt > items[j].UpdatedAt
+		}
+		if (items[i].Name == "latest") != (items[j].Name == "latest") {
+			return items[i].Name == "latest"
+		}
+		pi := version.ParseTag(items[i].Name)
+		pj := version.ParseTag(items[j].Name)
+		if pi.Scheme != version.SchemeUnknown && pj.Scheme != version.SchemeUnknown {
+			if cmp := version.Compare(pi, pj); cmp != 0 {
+				return cmp > 0
+			}
+		}
+		return items[i].Name > items[j].Name
+	})
 }
 
 func minInt(a, b int) int {
@@ -917,13 +1166,16 @@ func minInt(a, b int) int {
 	return b
 }
 
-func pickScopedHighestTag(cleaned []TagDigestEntry, raw []TagDigestEntry, ref version.ParsedRef, scopePrefix string) string {
+func pickScopedHighestTag(cleaned []TagDigestEntry, raw []TagDigestEntry, ref version.ParsedRef, scopePrefix string, includePrerelease bool) string {
 	pickFrom := func(pool []TagDigestEntry, prefix string) string {
 		var best version.ParsedTag
 		hasBest := false
 		for _, e := range pool {
 			pt := version.ParseTag(e.Name)
-			if pt.Scheme == version.SchemeUnknown || pt.Prerelease {
+			if pt.Scheme == version.SchemeUnknown {
+				continue
+			}
+			if pt.Prerelease && !includePrerelease {
 				continue
 			}
 			if _, isArch := classifyTagVariant(pt.Variant); isArch {
@@ -954,7 +1206,7 @@ func pickScopedHighestTag(cleaned []TagDigestEntry, raw []TagDigestEntry, ref ve
 	if h := pickFrom(cleaned, ""); h != "" {
 		return h
 	}
-	if h := pickHighestRepoTag(raw); h != "" {
+	if h := pickHighestRepoTag(raw, includePrerelease); h != "" {
 		pt := version.ParseTag(h)
 		if pt.Scheme != version.SchemeUnknown {
 			return h
@@ -970,29 +1222,67 @@ func pickScopedHighestTag(cleaned []TagDigestEntry, raw []TagDigestEntry, ref ve
 	return ""
 }
 
-func sortSearchedTags(entries []TagDigestEntry, qLower string) {
+func hasSearchQueryPrefix(tagNameLower, qLower string) bool {
+	if strings.HasPrefix(tagNameLower, qLower) {
+		return true
+	}
+	trimTag := strings.TrimPrefix(tagNameLower, "v")
+	trimQ := strings.TrimPrefix(qLower, "v")
+	return trimQ != "" && strings.HasPrefix(trimTag, trimQ)
+}
+
+func isExactSearchMatch(tagNameLower, qLower string) bool {
+	if tagNameLower == qLower {
+		return true
+	}
+	return strings.TrimPrefix(tagNameLower, "v") == strings.TrimPrefix(qLower, "v")
+}
+
+func sortSearchedTags(entries []TagDigestEntry, qLower, curFlavor, sortBy string) {
 	sort.SliceStable(entries, func(i, j int) bool {
 		li := strings.ToLower(entries[i].Name)
 		lj := strings.ToLower(entries[j].Name)
-		if (li == qLower) != (lj == qLower) {
-			return li == qLower
+		iExact := isExactSearchMatch(li, qLower)
+		jExact := isExactSearchMatch(lj, qLower)
+		if iExact != jExact {
+			return iExact
 		}
+		iPref := hasSearchQueryPrefix(li, qLower)
+		jPref := hasSearchQueryPrefix(lj, qLower)
+		if iPref != jPref {
+			return iPref
+		}
+
+		if sortBy == "time" && entries[i].UpdatedAt != entries[j].UpdatedAt {
+			return entries[i].UpdatedAt > entries[j].UpdatedAt
+		}
+
 		pi := version.ParseTag(entries[i].Name)
 		pj := version.ParseTag(entries[j].Name)
-		iStd := pi.Scheme != version.SchemeUnknown && !pi.Prerelease
-		jStd := pj.Scheme != version.SchemeUnknown && !pj.Prerelease
-		if iStd != jStd {
-			return iStd
+		iSem := pi.Scheme != version.SchemeUnknown
+		jSem := pj.Scheme != version.SchemeUnknown
+		if iSem != jSem {
+			return iSem
 		}
-		if iStd && jStd {
+		if iSem && jSem {
+			flI, archI := classifyTagVariant(pi.Variant)
+			flJ, archJ := classifyTagVariant(pj.Variant)
+			if archI != archJ {
+				return !archI
+			}
 			if cmp := version.Compare(pi, pj); cmp != 0 {
 				return cmp > 0
 			}
 			if pi.Precision != pj.Precision {
 				return pi.Precision > pj.Precision
 			}
-			if (pi.Variant == "") != (pj.Variant == "") {
-				return pi.Variant == ""
+			iMatchFlavor := flI == curFlavor
+			jMatchFlavor := flJ == curFlavor
+			if iMatchFlavor != jMatchFlavor {
+				return iMatchFlavor
+			}
+			if (flI == "") != (flJ == "") {
+				return flI == ""
 			}
 		}
 		if entries[i].UpdatedAt != entries[j].UpdatedAt {
@@ -1002,12 +1292,12 @@ func sortSearchedTags(entries []TagDigestEntry, qLower string) {
 	})
 }
 
-func pickHighestRepoTag(entries []TagDigestEntry) string {
+func pickHighestRepoTag(entries []TagDigestEntry, includePrerelease bool) string {
 	var best version.ParsedTag
 	hasBest := false
 	for _, e := range entries {
 		pt := version.ParseTag(e.Name)
-		if pt.Scheme == version.SchemeUnknown || pt.Prerelease {
+		if pt.Scheme == version.SchemeUnknown || (pt.Prerelease && !includePrerelease) {
 			continue
 		}
 		if fl, isArch := classifyTagVariant(pt.Variant); isArch || fl != "" {
@@ -1023,7 +1313,7 @@ func pickHighestRepoTag(entries []TagDigestEntry) string {
 	}
 	for _, e := range entries {
 		pt := version.ParseTag(e.Name)
-		if pt.Scheme != version.SchemeUnknown && !pt.Prerelease {
+		if pt.Scheme != version.SchemeUnknown && (!pt.Prerelease || includePrerelease) {
 			if _, isArch := classifyTagVariant(pt.Variant); !isArch {
 				if !hasBest || version.Compare(pt, best) > 0 {
 					best = pt
@@ -1153,34 +1443,50 @@ func (c *Client) LookupTagsByDigestOrConfig(
 
 func pickCandidateTagsForLookup(entries []TagDigestEntry, limit int) []string {
 	var parsed []version.ParsedTag
+	var preParsed []version.ParsedTag
 	var aliases []string
 	for _, e := range entries {
 		name := strings.TrimSpace(e.Name)
-		if name == "" || rules.Default().IsRollingTag(name) {
+		if name == "" || rules.Default().IsRollingTag(name) || version.IsPrereleaseChannelTag(name) {
 			continue
 		}
 		pt := version.ParseTag(name)
 		if pt.Scheme != version.SchemeUnknown && !pt.Prerelease {
 			parsed = append(parsed, pt)
+		} else if pt.Scheme != version.SchemeUnknown && pt.Prerelease {
+			preParsed = append(preParsed, pt)
 		} else if pt.Scheme == version.SchemeUnknown {
 			aliases = append(aliases, name)
 		}
 	}
-	sort.SliceStable(parsed, func(i, j int) bool {
-		iMulti := parsed[i].Precision >= 2
-		jMulti := parsed[j].Precision >= 2
-		if iMulti != jMulti {
-			return iMulti
-		}
-		if cmp := version.Compare(parsed[i], parsed[j]); cmp != 0 {
-			return cmp > 0
-		}
-		return parsed[i].Precision > parsed[j].Precision
-	})
+	sortSem := func(list []version.ParsedTag) {
+		sort.SliceStable(list, func(i, j int) bool {
+			iMulti := list[i].Precision >= 2
+			jMulti := list[j].Precision >= 2
+			if iMulti != jMulti {
+				return iMulti
+			}
+			if cmp := version.Compare(list[i], list[j]); cmp != 0 {
+				return cmp > 0
+			}
+			return list[i].Precision > list[j].Precision
+		})
+	}
+	sortSem(parsed)
+	sortSem(preParsed)
 
 	seen := make(map[string]bool, limit)
 	out := make([]string, 0, limit)
 	for _, pt := range parsed {
+		if len(out) >= limit {
+			break
+		}
+		if !seen[pt.Raw] {
+			seen[pt.Raw] = true
+			out = append(out, pt.Raw)
+		}
+	}
+	for _, pt := range preParsed {
 		if len(out) >= limit {
 			break
 		}

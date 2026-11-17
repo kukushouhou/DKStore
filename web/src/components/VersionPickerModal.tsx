@@ -15,6 +15,7 @@ import {
   Select,
   Space,
   Spin,
+  Switch,
   Tag,
   Tooltip,
   Typography,
@@ -37,6 +38,7 @@ import {
   type ServicePortItem,
   type ServiceTagItem,
   type ServiceVolumeItem,
+  type TagSortMode,
   type UpdatePolicyMode,
 } from '../api/client'
 import { useI18n } from '../i18n'
@@ -45,7 +47,7 @@ import { detectComposeOverwriteRisks, replaceComposeImageTag } from './composeGu
 import DeleteAppModal from './DeleteAppModal'
 import LockableVersionBar from './LockableVersionBar'
 import StoppedUpdateModal from './StoppedUpdateModal'
-import { compareNumericSegs, parseNumericSegs } from './versionUtils'
+import { compareNumericSegs, isPrereleaseTagStr, parseNumericSegs } from './versionUtils'
 
 export interface VersionPickSelection {
   targetTag: string
@@ -143,13 +145,52 @@ function compareAnyNumericSegs(tagA?: string, tagB?: string): number | null {
   const a = parseAnyNumericSegs(tagA)
   const b = parseAnyNumericSegs(tagB)
   if (a.length === 0 || b.length === 0) return null
+  if (a.length >= 2 && b.length >= 2) {
+    return compareNumericSegs(tagA, tagB)
+  }
   const len = Math.max(a.length, b.length)
   for (let i = 0; i < len; i++) {
     const va = a[i] ?? 0
     const vb = b[i] ?? 0
     if (va !== vb) return va - vb
   }
+  const preA = isPrereleaseTagStr(tagA)
+  const preB = isPrereleaseTagStr(tagB)
+  if (preA !== preB) return preA ? -1 : 1
   return 0
+}
+
+function sortMatchedTagsClient(
+  items: ServiceTagItem[],
+  rawQuery: string,
+  sortMode: TagSortMode,
+  hasTimestamps: boolean,
+): ServiceTagItem[] {
+  const qLow = rawQuery.trim().toLowerCase()
+  const trimV = (s: string) => s.replace(/^v/i, '')
+  const qNoV = trimV(qLow)
+  return [...items].sort((a, b) => {
+    const la = a.tag.toLowerCase()
+    const lb = b.tag.toLowerCase()
+    const exactA = la === qLow || trimV(la) === qNoV
+    const exactB = lb === qLow || trimV(lb) === qNoV
+    if (exactA !== exactB) return exactA ? -1 : 1
+    const prefA = la.startsWith(qLow) || (qNoV !== '' && trimV(la).startsWith(qNoV))
+    const prefB = lb.startsWith(qLow) || (qNoV !== '' && trimV(lb).startsWith(qNoV))
+    if (prefA !== prefB) return prefA ? -1 : 1
+    if (sortMode === 'time' && hasTimestamps && (a.updatedAt ?? 0) !== (b.updatedAt ?? 0)) {
+      return (b.updatedAt ?? 0) - (a.updatedAt ?? 0)
+    }
+    const cmp = compareAnyNumericSegs(b.tag, a.tag)
+    if (cmp !== null) {
+      if (cmp !== 0) return cmp
+      if (a.tag.length !== b.tag.length) return a.tag.length - b.tag.length
+    }
+    if ((a.updatedAt ?? 0) !== (b.updatedAt ?? 0)) {
+      return (b.updatedAt ?? 0) - (a.updatedAt ?? 0)
+    }
+    return b.tag.localeCompare(a.tag)
+  })
 }
 
 function isValidPortStr(val: string): boolean {
@@ -205,12 +246,23 @@ function VersionPickerModalBody({
     canShowConfigTab ? initialTab : 'version',
   )
 
+  const initialPrereleaseOn = useMemo(
+    () =>
+      isPrereleaseTagStr(extractTagFromRef(service.imageRef)) ||
+      isPrereleaseTagStr(service.currentVersion) ||
+      isPrereleaseTagStr(initialSelectedTag),
+    [initialSelectedTag, service.currentVersion, service.imageRef],
+  )
+
   const [localTags, setLocalTags] = useState<ServiceTagItem[]>([])
   const [remoteTags, setRemoteTags] = useState<ServiceTagItem[]>([])
   const [highestApiTag, setHighestApiTag] = useState<string>('')
   const [loading, setLoading] = useState(true)
   const [searchingRemote, setSearchingRemote] = useState(false)
   const [remoteSearched, setRemoteSearched] = useState(false)
+  const [showPrerelease, setShowPrerelease] = useState<boolean>(initialPrereleaseOn)
+  const [sortMode, setSortMode] = useState<TagSortMode>('version')
+  const [hasTimestamps, setHasTimestamps] = useState<boolean>(true)
   const [query, setQuery] = useState('')
   const [selectedTag, setSelectedTag] = useState(() =>
     cleanInitialTag(service, initialSelectedTag),
@@ -218,6 +270,12 @@ function VersionPickerModalBody({
   const [policy, setPolicy] = useState<UpdatePolicyMode>('all')
   const [lockDepth, setLockDepth] = useState(1)
   const [submitting, setSubmitting] = useState(false)
+
+  const showPrereleaseRef = useRef(showPrerelease)
+  showPrereleaseRef.current = showPrerelease
+  const sortModeRef = useRef(sortMode)
+  sortModeRef.current = sortMode
+  const userToggledPreRef = useRef(false)
 
   // 按新版配置更新 —— 分支 A：单容器 YAML 项目编辑状态
   const isStandaloneConfigMode = Boolean(
@@ -293,6 +351,7 @@ function VersionPickerModalBody({
     pool: ServiceTagItem[],
   ): boolean => {
     if (!knownHighest || tag === knownHighest || tag === 'latest') return true
+    if (isPrereleaseTagStr(tag) && parseAnyNumericSegs(tag).length === 0) return true
     if (
       tag === defaultTrackTag &&
       (service.kind === 'digest_update' || service.kind === 'none')
@@ -318,6 +377,38 @@ function VersionPickerModalBody({
     setPolicy(atLatest ? 'all' : 'skip_latest')
   }
 
+  const refreshLocalPool = async (nextPrerelease: boolean, nextSort: TagSortMode) => {
+    try {
+      const res = await api.searchServiceTags(service.key, {
+        q: '',
+        remote: false,
+        prerelease: nextPrerelease,
+        sort: nextSort,
+      })
+      setLocalTags(res.items ?? [])
+      if (res.hasTimestamps !== undefined) {
+        setHasTimestamps(res.hasTimestamps)
+      }
+      if (res.highestTag) {
+        setHighestApiTag(res.highestTag)
+      }
+    } catch (e) {
+      showApiError(e)
+    }
+  }
+
+  const handleTogglePrerelease = (checked: boolean) => {
+    userToggledPreRef.current = true
+    setShowPrerelease(checked)
+    void refreshLocalPool(checked, sortMode)
+  }
+
+  const handleChangeSortMode = (nextSort: TagSortMode) => {
+    if (nextSort === 'time' && !hasTimestamps) return
+    setSortMode(nextSort)
+    void refreshLocalPool(showPrerelease, nextSort)
+  }
+
   const tagsLoadedForKeyRef = useRef<string>('')
   useEffect(() => {
     if (tab !== 'version' && !isStandaloneConfigMode) {
@@ -334,12 +425,30 @@ function VersionPickerModalBody({
     const initTag = cleanInitialTag(service, initialSelectedTag)
 
     ;(async () => {
+      let alreadyFetchedRemote = false
       try {
-        let res = await api.searchServiceTags(service.key, '', false)
+        let res = await api.searchServiceTags(service.key, {
+          q: '',
+          remote: false,
+          prerelease: showPrereleaseRef.current,
+          sort: sortModeRef.current,
+        })
         if (!cancelled && (!res.items || res.items.length === 0)) {
-          res = await api.searchServiceTags(service.key, '', true)
+          alreadyFetchedRemote = true
+          res = await api.searchServiceTags(service.key, {
+            q: '',
+            remote: true,
+            prerelease: showPrereleaseRef.current,
+            sort: sortModeRef.current,
+          })
         }
         if (cancelled) return
+        if (res.currentPrerelease && !userToggledPreRef.current && !showPrereleaseRef.current) {
+          setShowPrerelease(true)
+        }
+        if (res.hasTimestamps !== undefined) {
+          setHasTimestamps(res.hasTimestamps)
+        }
         const items = res.items ?? []
         setLocalTags(items)
         const hi =
@@ -361,6 +470,30 @@ function VersionPickerModalBody({
         }
       } finally {
         if (!cancelled) setLoading(false)
+      }
+
+      // 秒开本地缓存后，立即在后台静默同步云端最新标签并无缝更新列表
+      if (!cancelled && !alreadyFetchedRemote) {
+        try {
+          const fresh = await api.searchServiceTags(service.key, {
+            q: '',
+            remote: true,
+            prerelease: showPrereleaseRef.current,
+            sort: sortModeRef.current,
+          })
+          if (cancelled) return
+          if (fresh.hasTimestamps !== undefined) {
+            setHasTimestamps(fresh.hasTimestamps)
+          }
+          if (fresh.items && fresh.items.length > 0) {
+            setLocalTags(fresh.items)
+          }
+          if (fresh.highestTag) {
+            setHighestApiTag(fresh.highestTag)
+          }
+        } catch {
+          // 后台静默同步偶发失败不弹错误打断用户操作
+        }
       }
     })()
 
@@ -455,12 +588,37 @@ function VersionPickerModalBody({
     const q = query.trim()
     setSearchingRemote(true)
     try {
-      const res = await api.searchServiceTags(service.key, q, true)
-      setRemoteTags(res.items ?? [])
-      if (res.highestTag) {
-        setHighestApiTag(res.highestTag)
+      if (!q) {
+        const res = await api.searchServiceTags(service.key, {
+          q: '',
+          remote: true,
+          prerelease: showPrerelease,
+          sort: sortMode,
+        })
+        setLocalTags(res.items ?? [])
+        if (res.hasTimestamps !== undefined) {
+          setHasTimestamps(res.hasTimestamps)
+        }
+        if (res.highestTag) {
+          setHighestApiTag(res.highestTag)
+        }
+        setRemoteSearched(false)
+      } else {
+        const res = await api.searchServiceTags(service.key, {
+          q,
+          remote: true,
+          prerelease: true,
+          sort: sortMode,
+        })
+        setRemoteTags(res.items ?? [])
+        if (res.hasTimestamps !== undefined) {
+          setHasTimestamps(res.hasTimestamps)
+        }
+        if (res.highestTag) {
+          setHighestApiTag(res.highestTag)
+        }
+        setRemoteSearched(true)
       }
-      setRemoteSearched(true)
     } catch (e) {
       showApiError(e)
     } finally {
@@ -470,19 +628,40 @@ function VersionPickerModalBody({
 
   const trimmedQuery = query.trim()
   const activePool = remoteSearched ? remoteTags : localTags
+  const effectiveSortMode: TagSortMode = hasTimestamps ? sortMode : 'version'
   const displayedTags = useMemo(() => {
     if (trimmedQuery) {
-      return activePool
-        .filter((item) => item.tag.toLowerCase().includes(trimmedQuery.toLowerCase()))
-        .slice(0, 20)
+      const matched = activePool.filter((item) =>
+        item.tag.toLowerCase().includes(trimmedQuery.toLowerCase()),
+      )
+      return sortMatchedTagsClient(matched, trimmedQuery, effectiveSortMode, hasTimestamps).slice(
+        0,
+        50,
+      )
     }
-    const base = localTags.slice(0, 20)
+    const base = localTags.slice(0, 50)
     const initTag = cleanInitialTag(service, initialSelectedTag)
     if (initTag && !base.some((item) => item.tag === initTag)) {
-      return [{ tag: initTag, updatedAt: service.targetUpdatedAt || service.currentUpdatedAt }, ...base].slice(0, 20)
+      const extraItem: ServiceTagItem = {
+        tag: initTag,
+        updatedAt: service.targetUpdatedAt || service.currentUpdatedAt,
+        prerelease: isPrereleaseTagStr(initTag),
+      }
+      if (effectiveSortMode === 'version' && base[0]?.tag === 'latest') {
+        return [base[0], extraItem, ...base.slice(1)].slice(0, 50)
+      }
+      return [extraItem, ...base].slice(0, 50)
     }
     return base
-  }, [activePool, initialSelectedTag, localTags, service, trimmedQuery])
+  }, [
+    activePool,
+    effectiveSortMode,
+    hasTimestamps,
+    initialSelectedTag,
+    localTags,
+    service,
+    trimmedQuery,
+  ])
 
   const allCombinedTags = useMemo(() => {
     const seen = new Set<string>()
@@ -496,6 +675,7 @@ function VersionPickerModalBody({
     return merged
   }, [localTags, remoteTags])
 
+  const isSelectedPrerelease = useMemo(() => isPrereleaseTagStr(selectedTag), [selectedTag])
   const isLatest = checkIsAtOrAboveLatest(selectedTag, highestTag, allCombinedTags)
   const numericSegs = useMemo(() => parseNumericSegs(selectedTag), [selectedTag])
   const safeLockDepth = Math.min(Math.max(1, lockDepth), Math.max(1, numericSegs.length - 1))
@@ -510,6 +690,7 @@ function VersionPickerModalBody({
     if (policy === 'prefix' && lockedPrefix) {
       const hit = allCombinedTags.find((r) => {
         if (r.tag === selectedTag) return false
+        if (!isSelectedPrerelease && (r.prerelease || isPrereleaseTagStr(r.tag))) return false
         const clean = r.tag.replace(/^v/i, '')
         const matchesPrefix = clean === lockedPrefix || clean.startsWith(`${lockedPrefix}.`)
         if (!matchesPrefix) return false
@@ -518,7 +699,7 @@ function VersionPickerModalBody({
       if (hit) return hit.tag
     }
     return ''
-  }, [allCombinedTags, highestTag, isLatest, lockedPrefix, policy, selectedTag])
+  }, [allCombinedTags, highestTag, isLatest, isSelectedPrerelease, lockedPrefix, policy, selectedTag])
 
   const syncedOrigYaml = useMemo(
     () => replaceComposeImageTag(origYaml, service.imageRef, selectedTag),
@@ -891,9 +1072,9 @@ function VersionPickerModalBody({
 
       {tab === 'version' ? (
         <>
-          {/* 双栏主体：桌面左右 10:14，移动端上下叠放（100% 完整保留） */}
+          {/* 双栏主体：桌面左右 11:13，移动端上下叠放 */}
           <Row gutter={[20, 16]} align="stretch">
-            <Col xs={24} md={10} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <Col xs={24} md={11} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {/* 组合式搜索框（输入仅过滤本地列表，回车/点搜索请求远端） */}
               <Space.Compact style={{ width: '100%' }}>
                 <Input
@@ -920,14 +1101,59 @@ function VersionPickerModalBody({
                 </Button>
               </Space.Compact>
 
-              <Typography.Text
-                type="secondary"
-                style={{ fontSize: token.fontSizeSM, paddingInline: 2 }}
-              >
-                {trimmedQuery
-                  ? t.versionPicker.matchedCaption.replace('{q}', trimmedQuery)
-                  : t.versionPicker.recentCaption}
-              </Typography.Text>
+              {/* 排序方式切换 + 预发布版本开关 */}
+              <Flex align="center" justify="space-between" gap={8} wrap="wrap">
+                <Segmented
+                  size="small"
+                  value={effectiveSortMode}
+                  onChange={(val) => handleChangeSortMode(val as TagSortMode)}
+                  options={[
+                    { label: t.versionPicker.sortByVersion, value: 'version' },
+                    {
+                      label: hasTimestamps ? (
+                        t.versionPicker.sortByTime
+                      ) : (
+                        <Tooltip title={t.versionPicker.sortByTimeDisabledTip}>
+                          <span>{t.versionPicker.sortByTime}</span>
+                        </Tooltip>
+                      ),
+                      value: 'time',
+                      disabled: !hasTimestamps,
+                    },
+                  ]}
+                />
+                <Tooltip title={t.versionPicker.prereleaseSwitchTip}>
+                  <Space
+                    size={6}
+                    style={{ cursor: 'pointer', paddingInline: 2 }}
+                    onClick={() => handleTogglePrerelease(!showPrerelease)}
+                  >
+                    <Typography.Text
+                      type="secondary"
+                      style={{ fontSize: token.fontSizeSM, userSelect: 'none' }}
+                    >
+                      {t.versionPicker.prereleaseSwitch}
+                    </Typography.Text>
+                    <Switch
+                      size="small"
+                      checked={showPrerelease}
+                      onChange={(checked, e) => {
+                        e.stopPropagation()
+                        handleTogglePrerelease(checked)
+                      }}
+                    />
+                  </Space>
+                </Tooltip>
+              </Flex>
+
+              {trimmedQuery && (
+                <Typography.Text
+                  type="secondary"
+                  style={{ fontSize: token.fontSizeSM, paddingInline: 2 }}
+                >
+                  {t.versionPicker.matchedCaption.replace('{q}', trimmedQuery)}
+                </Typography.Text>
+              )}
 
               {/* 标签列表 */}
               <div
@@ -954,6 +1180,7 @@ function VersionPickerModalBody({
                     {displayedTags.map((item, idx) => {
                       const active = item.tag === selectedTag
                       const timeStr = formatTagTime(item.updatedAt)
+                      const isPre = Boolean(item.prerelease || isPrereleaseTagStr(item.tag))
                       return (
                         <Flex
                           key={item.tag}
@@ -981,7 +1208,7 @@ function VersionPickerModalBody({
                             transition: 'background-color 0.15s ease',
                           }}
                         >
-                          <Flex align="center" gap={8} style={{ minWidth: 0, flex: 1 }}>
+                          <Flex align="center" gap={6} style={{ minWidth: 0, flex: 1 }}>
                             <CheckOutlined
                               style={{
                                 fontSize: 12,
@@ -990,17 +1217,47 @@ function VersionPickerModalBody({
                                 flexShrink: 0,
                               }}
                             />
-                            <Typography.Text
-                              strong={active}
-                              ellipsis
+                            <span
+                              title={item.aliasOf ? `${item.tag} (${item.aliasOf})` : item.tag}
                               style={{
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                                minWidth: 0,
                                 fontFamily: token.fontFamilyCode,
                                 fontSize: token.fontSizeSM,
+                                fontWeight: active ? 600 : 400,
                                 color: active ? token.colorPrimary : token.colorText,
                               }}
                             >
                               {item.tag}
-                            </Typography.Text>
+                              {item.aliasOf && (
+                                <span
+                                  style={{
+                                    marginLeft: 5,
+                                    fontSize: 11,
+                                    fontWeight: 400,
+                                    color: token.colorTextSecondary,
+                                  }}
+                                >
+                                  ({item.aliasOf})
+                                </span>
+                              )}
+                            </span>
+                            {isPre && (
+                              <Tag
+                                color="warning"
+                                style={{
+                                  margin: 0,
+                                  fontSize: 11,
+                                  lineHeight: '16px',
+                                  paddingInline: 5,
+                                  flexShrink: 0,
+                                }}
+                              >
+                                {t.versionPicker.prereleaseBadge}
+                              </Tag>
+                            )}
                           </Flex>
                           {timeStr && (
                             <Typography.Text
@@ -1083,7 +1340,7 @@ function VersionPickerModalBody({
             {/* 右栏：更新完成后的提醒设置 */}
             <Col
               xs={24}
-              md={14}
+              md={13}
               style={{
                 borderLeft: screens.md ? `1px solid ${token.colorSplit}` : 'none',
                 paddingLeft: screens.md ? 20 : 10,
@@ -1102,7 +1359,9 @@ function VersionPickerModalBody({
                 {renderRadioCard(
                   'all',
                   t.versionPicker.policyAllTitle,
-                  t.versionPicker.policyAllDesc,
+                  isSelectedPrerelease
+                    ? t.versionPicker.policyAllPrereleaseDesc
+                    : t.versionPicker.policyAllDesc,
                 )}
 
                 {/* 2. 仅跳过当前最新版（选非最高版本时默认选中） */}
