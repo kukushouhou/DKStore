@@ -344,6 +344,26 @@ func (a *Adapter) recreateContainerViaEngineWithState(
 	overrideEnv *[]platform.EnvVar,
 	overridePorts *[]platform.PortBinding,
 ) (newID string, err error) {
+	var ov *standaloneOverrides
+	if overrideEnv != nil || overridePorts != nil {
+		ov = &standaloneOverrides{
+			env:   overrideEnv,
+			ports: overridePorts,
+		}
+	}
+	return a.recreateContainerViaEngineWithFullOverrides(ctx, execTr, oldID, rawInspect, targetImageRef, wasRunning, wantRunning, ov)
+}
+
+func (a *Adapter) recreateContainerViaEngineWithFullOverrides(
+	ctx context.Context,
+	execTr transport.ExecutableTransport,
+	oldID string,
+	rawInspect map[string]any,
+	targetImageRef string,
+	wasRunning bool,
+	wantRunning bool,
+	ov *standaloneOverrides,
+) (newID string, err error) {
 	rawName, _ := rawInspect["Name"].(string)
 	origName := strings.TrimPrefix(rawName, "/")
 	if origName == "" {
@@ -366,8 +386,12 @@ func (a *Adapter) recreateContainerViaEngineWithState(
 			}
 		}
 	}
+	origNetMode := extractDockerNetworkMode(
+		func() map[string]any { h, _ := rawInspect["HostConfig"].(map[string]any); return h }(),
+		rawInspect["NetworkSettings"],
+	)
 	createPayload := buildCreatePayload(oldID, rawInspect, imageCfg, targetImageRef)
-	applyPayloadOverrides(createPayload, overrideEnv, overridePorts)
+	applyStandaloneOverrides(createPayload, rawInspect["Mounts"], ov)
 
 	// 提取原容器连接的全部网络（首个网络放入 NetworkingConfig.EndpointsConfig，其余在 create 后 connect）
 	type extraNet struct {
@@ -375,8 +399,29 @@ func (a *Adapter) recreateContainerViaEngineWithState(
 		cfg  map[string]any
 	}
 	var extraNetworks []extraNet
-	if netSettings, ok := rawInspect["NetworkSettings"].(map[string]any); ok {
-		if nets, ok := netSettings["Networks"].(map[string]any); ok && len(nets) > 0 {
+	newNetMode := origNetMode
+	if ov != nil && ov.networkMode != nil {
+		nm := strings.TrimSpace(*ov.networkMode)
+		if nm == "" || nm == "default" {
+			nm = "bridge"
+		}
+		newNetMode = nm
+	}
+
+	if newNetMode != origNetMode {
+		// 用户显式切换了网络模式：host / none / bridge / container:* 不传 EndpointsConfig，自定义网络仅挂载目标网络
+		if newNetMode != "host" && newNetMode != "none" && newNetMode != "bridge" && !strings.HasPrefix(newNetMode, "container:") {
+			createPayload["NetworkingConfig"] = map[string]any{
+				"EndpointsConfig": map[string]any{
+					newNetMode: map[string]any{},
+				},
+			}
+		} else {
+			delete(createPayload, "NetworkingConfig")
+		}
+	} else if netSettings, ok := rawInspect["NetworkSettings"].(map[string]any); ok {
+		if nets, ok := netSettings["Networks"].(map[string]any); ok && len(nets) > 0 &&
+			newNetMode != "host" && newNetMode != "none" && !strings.HasPrefix(newNetMode, "container:") {
 			firstPlaced := false
 			for netName, netVal := range nets {
 				epCfg, _ := netVal.(map[string]any)

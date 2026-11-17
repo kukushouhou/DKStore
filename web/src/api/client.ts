@@ -274,9 +274,40 @@ export interface HostTestResult {
   info?: HostInfo
 }
 
+export async function copyTextSafe(text: string): Promise<boolean> {
+  if (!text) return false
+  try {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    // 内网 HTTP 非安全上下文回退到隐藏 textarea 复制
+  }
+  if (typeof document === 'undefined') return false
+  try {
+    const el = document.createElement('textarea')
+    el.value = text
+    el.setAttribute('readonly', 'true')
+    el.style.position = 'fixed'
+    el.style.top = '-9999px'
+    el.style.opacity = '0'
+    document.body.appendChild(el)
+    el.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(el)
+    return ok
+  } catch {
+    return false
+  }
+}
+
 export interface RepoLink {
   repo?: string
   releases?: string
+  website?: string
+  docs?: string
+  registryUrl?: string
 }
 
 export type IgnoreMode = 'this_version' | 'prefix' | 'forever'
@@ -526,18 +557,34 @@ export interface ServiceVolumeItem {
   mode?: string
 }
 
+export interface ServiceDeviceItem {
+  hostPath: string
+  containerPath: string
+  permissions?: string
+}
+
 export interface ServiceConfigResponse {
   editable: boolean
   reason?: string
+  containerName?: string
   imageRef: string
+  networkMode?: string
+  restartPolicy?: string
+  user?: string
+  privileged?: boolean
+  capAdd?: string[]
+  hostname?: string
+  extraHosts?: string[]
   env: ServiceEnvItem[]
   ports: ServicePortItem[]
   volumes?: ServiceVolumeItem[]
+  devices?: ServiceDeviceItem[]
 }
 
 export interface UpdateServiceConfigPayload {
   serviceKey: string
   targetTag?: string
+  targetImageRef?: string
   policyMode?: string
   policyPrefix?: string
   skipTargetTag?: string
@@ -545,6 +592,14 @@ export interface UpdateServiceConfigPayload {
   env: ServiceEnvItem[]
   ports: ServicePortItem[]
   volumes?: ServiceVolumeItem[]
+  devices?: ServiceDeviceItem[]
+  networkMode?: string
+  restartPolicy?: string
+  user?: string
+  privileged?: boolean
+  capAdd?: string[]
+  hostname?: string
+  extraHosts?: string[]
 }
 
 export interface CheckRunItem {

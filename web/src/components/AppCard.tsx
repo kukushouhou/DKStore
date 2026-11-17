@@ -1275,6 +1275,7 @@ export default function AppCard({
       <DetailDrawer
         open={detailOpen}
         app={app}
+        updatingNow={updatingNow}
         onClose={() => setDetailOpen(false)}
         onOpenVersionPicker={(svc) => {
           setDetailOpen(false)
@@ -1284,6 +1285,19 @@ export default function AppCard({
         onOpenComposeYaml={() => {
           setDetailOpen(false)
           handleUpdateByConfigClick()
+        }}
+        onUpdateNow={(targetSvc) => {
+          setDetailOpen(false)
+          if (isMultiContainer) {
+            setProjectInitialTab('direct')
+            setProjectModalOpen(true)
+            return
+          }
+          if (isCaution || app.isDatabase || targetSvc.category === 'caution') {
+            setCautionTargetSvc(targetSvc)
+            return
+          }
+          requestSingleServiceUpdate(targetSvc)
         }}
         onOpenDelete={
           app.source !== 'vendor_managed'

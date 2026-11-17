@@ -4,6 +4,7 @@ import {
   Button,
   Card,
   Collapse,
+  ConfigProvider,
   Descriptions,
   Drawer,
   Flex,
@@ -16,15 +17,17 @@ import {
   theme,
 } from 'antd'
 import { CopyOutlined } from '@ant-design/icons'
-import type { AppCardItem, ServiceItem } from '../api/client'
+import { copyTextSafe, type AppCardItem, type ServiceItem } from '../api/client'
 import { useI18n } from '../i18n'
 
 interface DetailDrawerProps {
   open: boolean
   app: AppCardItem
+  updatingNow?: boolean
   onClose: () => void
   onOpenVersionPicker: (svc: ServiceItem) => void
   onOpenComposeYaml: () => void
+  onUpdateNow?: (svc: ServiceItem) => void
   onOpenDelete?: () => void
 }
 
@@ -65,9 +68,11 @@ function detectAutoScopeTag(
 export default function DetailDrawer({
   open,
   app,
+  updatingNow = false,
   onClose,
   onOpenVersionPicker,
   onOpenComposeYaml,
+  onUpdateNow,
   onOpenDelete,
 }: DetailDrawerProps) {
   const { token } = theme.useToken()
@@ -147,6 +152,72 @@ export default function DetailDrawer({
   const tgtVer = svc?.targetVersion || app.summaryTarget || t.home.newImageDetected
   const tgtTime = formatDateTime(svc?.targetUpdatedAt)
   const isCaution = app.group === 'caution' || svc?.category === 'caution'
+  const showPrimaryUpdateBtn = Boolean(svc && onUpdateNow && (hasUpdate || updatingNow))
+
+  const cautionBtnTheme = useMemo(
+    () =>
+      isCaution
+        ? {
+            token: { colorPrimary: token.colorWarning },
+            components: { Button: { primaryShadow: 'none' } },
+          }
+        : undefined,
+    [isCaution, token.colorWarning],
+  )
+
+  const linkEntries = useMemo(() => {
+    const lk = svc?.links ?? app.links
+    if (!lk) return []
+    const norm = (u?: string) =>
+      (u ?? '')
+        .trim()
+        .toLowerCase()
+        .replace(/\/+$/, '')
+        .replace(/^https?:\/\/(www\.)?/, '')
+    const isRegPage = (u?: string) => /(hub\.docker\.com|quay\.io)/i.test(u ?? '')
+    const seen = new Set<string>()
+    const items: { key: string; label: string; url: string }[] = []
+
+    const addIfNew = (key: string, label: string, url?: string) => {
+      const clean = (url ?? '').trim()
+      if (!clean) return
+      const n = norm(clean)
+      if (!n || seen.has(n)) return
+      seen.add(n)
+      items.push({ key, label, url: clean })
+    }
+
+    addIfNew('releases', t.detail.linkReleases, lk.releases)
+
+    if (
+      lk.repo &&
+      !isRegPage(lk.repo) &&
+      norm(lk.repo) !== norm(lk.registryUrl) &&
+      norm(lk.repo) !== norm(lk.website)
+    ) {
+      addIfNew(
+        'repo',
+        /github\.com/i.test(lk.repo) ? t.detail.linkGithub : t.detail.linkSourceRepo,
+        lk.repo,
+      )
+    }
+
+    addIfNew('website', t.detail.linkWebsite, lk.website)
+    addIfNew('docs', t.detail.linkDocs, lk.docs)
+
+    const regUrl = lk.registryUrl || (isRegPage(lk.repo) ? lk.repo : '')
+    addIfNew('registry', t.detail.linkRegistry, regUrl)
+
+    if (lk.repo && !isRegPage(lk.repo)) {
+      addIfNew(
+        'repo-fallback',
+        /github\.com/i.test(lk.repo) ? t.detail.linkGithub : t.detail.linkSourceRepo,
+        lk.repo,
+      )
+    }
+
+    return items
+  }, [app.links, svc?.links, t.detail])
 
   const cliCmd = svc
     ? app.source === 'compose' || app.source === 'dsm_project'
@@ -191,6 +262,33 @@ export default function DetailDrawer({
             </Typography.Text>
           ),
         },
+        ...(linkEntries.length > 0
+          ? [
+              {
+                key: 'links',
+                label: t.detail.linksLabel,
+                children: (
+                  <Space
+                    size={[6, 4]}
+                    wrap
+                    separator={<Typography.Text type="secondary">·</Typography.Text>}
+                  >
+                    {linkEntries.map((item) => (
+                      <Typography.Link
+                        key={item.key}
+                        href={item.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        style={{ fontSize: token.fontSizeSM, whiteSpace: 'nowrap' }}
+                      >
+                        {item.label}
+                      </Typography.Link>
+                    ))}
+                  </Space>
+                ),
+              },
+            ]
+          : []),
         {
           key: 'rule',
           label: t.detail.ruleLabel,
@@ -280,15 +378,27 @@ export default function DetailDrawer({
                   {t.detail.updateByConfigBtn}
                 </Button>
               )}
-              {svc && (
+              {svc && svc.kind !== 'uncomparable' && (
                 <Button
                   size="small"
-                  type="primary"
-                  ghost
+                  type={showPrimaryUpdateBtn ? 'default' : 'primary'}
+                  ghost={!showPrimaryUpdateBtn}
                   onClick={() => onOpenVersionPicker(svc)}
                 >
                   {t.detail.specifyVersionBtn}
                 </Button>
+              )}
+              {showPrimaryUpdateBtn && svc && onUpdateNow && (
+                <ConfigProvider theme={cautionBtnTheme}>
+                  <Button
+                    size="small"
+                    type="primary"
+                    loading={updatingNow}
+                    onClick={() => onUpdateNow(svc)}
+                  >
+                    {t.detail.updateNowBtn}
+                  </Button>
+                </ConfigProvider>
               )}
             </Space>
           )}
@@ -411,8 +521,8 @@ export default function DetailDrawer({
                               size="small"
                               type="text"
                               icon={<CopyOutlined />}
-                              onClick={() => {
-                                navigator.clipboard.writeText(cliCmd)
+                              onClick={async () => {
+                                await copyTextSafe(cliCmd)
                                 message.success(t.detail.copied)
                               }}
                             >

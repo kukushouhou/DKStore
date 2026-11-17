@@ -10,7 +10,7 @@ import '@xterm/xterm/css/xterm.css'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { useQueryClient } from '@tanstack/react-query'
-import { api, type UpdateJobItem } from '../api/client'
+import { api, copyTextSafe, type UpdateJobItem } from '../api/client'
 import { useI18n } from '../i18n'
 import { subscribeJobLog, useUIStore } from '../store/ui'
 
@@ -297,18 +297,8 @@ function UpdateLogModalBody({ jobId, onClose }: { jobId: string; onClose: () => 
       message.info(t.logModal.emptyCopyMsg)
       return
     }
-    try {
-      await navigator.clipboard.writeText(text)
-      message.success(t.logModal.copiedMsg)
-    } catch {
-      const ta = document.createElement('textarea')
-      ta.value = text
-      document.body.appendChild(ta)
-      ta.select()
-      document.execCommand('copy')
-      document.body.removeChild(ta)
-      message.success(t.logModal.copiedMsg)
-    }
+    await copyTextSafe(text)
+    message.success(t.logModal.copiedMsg)
   }
 
   const displayName =

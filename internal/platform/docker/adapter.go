@@ -333,6 +333,9 @@ func isVendorManagedContainer(labels map[string]string, env []string, mountSourc
 type imageInspect struct {
 	ID          string   `json:"Id"`
 	RepoDigests []string `json:"RepoDigests"`
+	Config      struct {
+		Labels map[string]string `json:"Labels"`
+	} `json:"Config"`
 }
 
 // ListApps 列出主机上的全部 Compose 项目与独立容器。
@@ -374,6 +377,16 @@ func (a *Adapter) ListApps(ctx context.Context) ([]platform.App, error) {
 		var repoDigests []string
 		if img != nil {
 			repoDigests = img.RepoDigests
+			if len(img.Config.Labels) > 0 {
+				merged := make(map[string]string, len(img.Config.Labels)+len(labels))
+				for k, v := range img.Config.Labels {
+					merged[k] = v
+				}
+				for k, v := range labels {
+					merged[k] = v
+				}
+				labels = merged
+			}
 		}
 
 		var mountSources []string

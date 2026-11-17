@@ -6,7 +6,7 @@ import {
   Checkbox,
   ConfigProvider,
   Flex,
-  Input,
+  Grid,
   Modal,
   Segmented,
   Space,
@@ -22,6 +22,8 @@ import { ApiError, api, showApiError, type AppCardItem, type ServiceItem } from 
 import { useI18n } from '../i18n'
 import { useUIStore } from '../store/ui'
 import { detectComposeOverwriteRisks } from './composeGuard'
+import ConfigVisualEditor from './ConfigVisualEditor'
+import { parseComposeServices, patchComposeServiceInYaml } from './configSync'
 import DeleteAppModal from './DeleteAppModal'
 import StoppedUpdateModal from './StoppedUpdateModal'
 import VersionPickerModal, { type VersionPickSelection } from './VersionPickerModal'
@@ -50,12 +52,14 @@ function isServiceCaution(svc: ServiceItem): boolean {
 }
 
 export default function ProjectUpdateModal(props: ProjectUpdateModalProps) {
+  const screens = Grid.useBreakpoint()
   return (
     <Modal
       open={props.open}
       onCancel={props.onClose}
       footer={null}
-      width={680}
+      width={screens.md ? 860 : '95vw'}
+      style={{ maxWidth: '94vw' }}
       destroyOnHidden
       closable={false}
       title={null}
@@ -242,6 +246,9 @@ function ProjectUpdateModalBody({
       partial: !allSelStopped,
     })
   }
+
+  const origYamlConfigs = useMemo(() => parseComposeServices(origYaml), [origYaml])
+  const curYamlConfigs = useMemo(() => parseComposeServices(yamlText), [yamlText])
 
   const overwriteRisks = useMemo(
     () =>
@@ -631,8 +638,8 @@ function ProjectUpdateModalBody({
             </Flex>
           </Flex>
         ) : (
-          /* 按官方新版配置更新模式 */
-          <Flex vertical gap={14}>
+          /* 按配置更新模式（上方 compose.yaml 与下方多容器表单实时双向同步） */
+          <Flex vertical gap={12}>
             {loadingYaml ? (
               <Flex align="center" justify="center" gap={8} style={{ height: 200 }}>
                 <Spin size="small" />
@@ -648,39 +655,25 @@ function ProjectUpdateModalBody({
               />
             ) : (
               <>
-                <Alert
-                  type="info"
-                  showIcon
-                  title={
-                    <Typography.Text style={{ fontSize: token.fontSizeSM }}>
-                      {t.projectUpdate.yamlGuide}
-                    </Typography.Text>
-                  }
-                />
-
-                <Flex wrap="wrap" align="center" justify="space-between" gap={8}>
-                  <Typography.Text strong style={{ fontSize: token.fontSizeSM }}>
-                    {t.projectUpdate.yamlContentLabel}
-                  </Typography.Text>
-                  <Button
-                    size="small"
-                    onClick={() => setYamlText(origYaml)}
-                    disabled={yamlText === origYaml}
-                  >
-                    {t.projectUpdate.restoreOrigBtn}
-                  </Button>
-                </Flex>
-
-                <Input.TextArea
-                  rows={10}
-                  spellCheck={false}
-                  value={yamlText}
-                  onChange={(e) => setYamlText(e.target.value)}
-                  style={{
-                    fontFamily: token.fontFamilyCode,
-                    fontSize: token.fontSizeSM,
-                    lineHeight: 1.55,
+                <ConfigVisualEditor
+                  mode="yaml"
+                  textValue={yamlText}
+                  origTextValue={origYaml}
+                  origConfigs={origYamlConfigs}
+                  curConfigs={curYamlConfigs}
+                  onChangeText={(nextText) => setYamlText(nextText)}
+                  onChangeService={(svcName, nextSvc) => {
+                    setYamlText((prev) => patchComposeServiceInYaml(prev, svcName, nextSvc))
                   }}
+                  onRestoreAllChangedValues={(restoredServices) => {
+                    setYamlText((prev) =>
+                      restoredServices.reduce(
+                        (acc, s) => patchComposeServiceInYaml(acc, s.name, s),
+                        prev,
+                      ),
+                    )
+                  }}
+                  onResetAll={() => setYamlText(origYaml)}
                 />
 
                 {overwriteRisks.missingServices.length > 0 && (
@@ -722,43 +715,6 @@ function ProjectUpdateModalBody({
                     }
                   />
                 )}
-
-                {overwriteRisks.missingServices.length === 0 &&
-                  overwriteRisks.missingPaths.length > 0 && (
-                    <Alert
-                      type="warning"
-                      showIcon
-                      title={
-                        <Typography.Text style={{ fontSize: token.fontSizeSM }}>
-                          <strong>{t.projectUpdate.warnTitle}</strong>
-                          {t.projectUpdate.warnMissingPathsBefore}
-                          <Typography.Text code>
-                            {overwriteRisks.missingPaths.join(', ')}
-                          </Typography.Text>
-                          {t.projectUpdate.warnMissingPathsAfter}
-                        </Typography.Text>
-                      }
-                    />
-                  )}
-
-                {overwriteRisks.missingServices.length === 0 &&
-                  overwriteRisks.missingPaths.length === 0 &&
-                  overwriteRisks.overwrittenSecrets.length > 0 && (
-                    <Alert
-                      type="warning"
-                      showIcon
-                      title={
-                        <Typography.Text style={{ fontSize: token.fontSizeSM }}>
-                          <strong>{t.projectUpdate.warnTitle}</strong>
-                          {t.projectUpdate.warnSecretOverwriteBefore}
-                          <Typography.Text code>
-                            {overwriteRisks.overwrittenSecrets.join(', ')}
-                          </Typography.Text>
-                          {t.projectUpdate.warnSecretOverwriteAfter}
-                        </Typography.Text>
-                      }
-                    />
-                  )}
               </>
             )}
 

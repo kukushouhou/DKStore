@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   Button,
-  Card,
   Col,
   Empty,
   Flex,
@@ -12,7 +11,6 @@ import {
   Radio,
   Row,
   Segmented,
-  Select,
   Space,
   Spin,
   Switch,
@@ -23,9 +21,7 @@ import {
   theme,
 } from 'antd'
 import {
-  ArrowRightOutlined,
   CheckOutlined,
-  DeleteOutlined,
   PlusOutlined,
 } from '@ant-design/icons'
 import {
@@ -33,6 +29,7 @@ import {
   api,
   showApiError,
   type AppCardItem,
+  type ServiceDeviceItem,
   type ServiceEnvItem,
   type ServiceItem,
   type ServicePortItem,
@@ -40,10 +37,23 @@ import {
   type ServiceVolumeItem,
   type TagSortMode,
   type UpdatePolicyMode,
+  type UpdateServiceConfigPayload,
 } from '../api/client'
 import { useI18n } from '../i18n'
 import { useUIStore } from '../store/ui'
 import { detectComposeOverwriteRisks, replaceComposeImageTag } from './composeGuard'
+import ConfigVisualEditor from './ConfigVisualEditor'
+import {
+  buildDockerRunCommand,
+  cloneEditableConfig,
+  editableConfigFromApi,
+  normalizeNetMode,
+  normalizeRestart,
+  parseComposeServices,
+  parseDockerRunCommand,
+  patchComposeServiceInYaml,
+  type EditableServiceConfig,
+} from './configSync'
 import DeleteAppModal from './DeleteAppModal'
 import LockableVersionBar from './LockableVersionBar'
 import StoppedUpdateModal from './StoppedUpdateModal'
@@ -69,12 +79,12 @@ interface VersionPickerModalProps {
   onUpdated?: () => void
 }
 
-interface EditableEnvRow extends ServiceEnvItem {
-  _id: number
-}
-
-interface EditablePortRow extends ServicePortItem {
-  _id: number
+function replaceImageTagInRef(imageRef: string, newTag: string): string {
+  const cleanRef = imageRef.trim().split('@')[0]
+  const lastSlash = cleanRef.lastIndexOf('/')
+  const colonIdx = cleanRef.indexOf(':', lastSlash + 1)
+  const base = colonIdx >= 0 ? cleanRef.slice(0, colonIdx) : cleanRef
+  return newTag ? `${base}:${newTag}` : base
 }
 
 function extractShortRepo(imageRef: string): string {
@@ -240,7 +250,7 @@ function VersionPickerModalBody({
   const { t } = useI18n()
   const screens = Grid.useBreakpoint()
   const upsertUpdateJob = useUIStore((s) => s.upsertUpdateJob)
-  const nextRowIdRef = useRef<number>(1)
+  const userPickedVersionRef = useRef<boolean>(false)
 
   const canShowConfigTab = Boolean(!onPickOnly && app && app.source !== 'vendor_managed')
   const [tab, setTab] = useState<'version' | 'config'>(
@@ -278,7 +288,7 @@ function VersionPickerModalBody({
   sortModeRef.current = sortMode
   const userToggledPreRef = useRef(false)
 
-  // 按新版配置更新 —— 分支 A：单容器 YAML 项目编辑状态
+  // 按配置更新 —— 分支 A：单容器 YAML 项目编辑状态
   const isStandaloneConfigMode = Boolean(
     app && !app.composeEditable && app.source === 'standalone',
   )
@@ -293,15 +303,15 @@ function VersionPickerModalBody({
     removedServices: string[]
     addedServices: string[]
   } | null>(null)
-  const lastSyncedYamlTagRef = useRef<string>('')
 
-  // 按新版配置更新 —— 分支 B：无 YAML 纯独立容器（环境变量 + 端口映射）编辑状态
+  // 按配置更新 —— 分支 B：独立容器命令模式（docker run <-> 可视化表单实时双向同步）
   const [standaloneLoaded, setStandaloneLoaded] = useState(false)
   const [standaloneEditable, setStandaloneEditable] = useState(true)
   const [standaloneReason, setStandaloneReason] = useState('')
-  const [envRows, setEnvRows] = useState<EditableEnvRow[]>([])
-  const [portRows, setPortRows] = useState<EditablePortRow[]>([])
-  const [origVolumes, setOrigVolumes] = useState<ServiceVolumeItem[] | undefined>(undefined)
+  const [origCmdCfg, setOrigCmdCfg] = useState<EditableServiceConfig | null>(null)
+  const [origCmdText, setOrigCmdText] = useState('')
+  const [cmdCfg, setCmdCfg] = useState<EditableServiceConfig | null>(null)
+  const [cmdText, setCmdText] = useState('')
 
   const [submittingConfig, setSubmittingConfig] = useState(false)
   const [stoppedPending, setStoppedPending] = useState<
@@ -316,8 +326,7 @@ function VersionPickerModalBody({
       }
     | {
         kind: 'standalone'
-        env: ServiceEnvItem[]
-        ports: ServicePortItem[]
+        payload: Omit<UpdateServiceConfigPayload, 'startAfter'>
       }
     | null
   >(null)
@@ -372,10 +381,21 @@ function VersionPickerModalBody({
   }
 
   const applyTagSelection = (tag: string, knownHighest: string) => {
+    userPickedVersionRef.current = true
     setSelectedTag(tag)
     setLockDepth(1)
     const atLatest = checkIsAtOrAboveLatest(tag, knownHighest, allCombinedTags)
     setPolicy(atLatest ? 'all' : 'skip_latest')
+
+    if (yamlLoaded && yamlEditable) {
+      setYamlText((prev) => replaceComposeImageTag(prev, service.imageRef, tag))
+    }
+    if (standaloneLoaded && standaloneEditable && cmdCfg) {
+      const nextCfg = cloneEditableConfig(cmdCfg)
+      nextCfg.image = replaceImageTagInRef(nextCfg.image || service.imageRef, tag)
+      setCmdCfg(nextCfg)
+      setCmdText(buildDockerRunCommand(nextCfg))
+    }
   }
 
   const refreshLocalPool = async (nextPrerelease: boolean, nextSort: TagSortMode) => {
@@ -412,7 +432,7 @@ function VersionPickerModalBody({
 
   const tagsLoadedForKeyRef = useRef<string>('')
   useEffect(() => {
-    if (tab !== 'version' && !isStandaloneConfigMode) {
+    if (tab !== 'version') {
       setLoading(false)
       return
     }
@@ -454,14 +474,20 @@ function VersionPickerModalBody({
         setLocalTags(items)
         const hi =
           res.highestTag ||
+          (service.rawTargetVersion && !service.rawTargetVersion.includes(' ')) ||
+          items.find((i) => i.tag !== 'latest')?.tag ||
+          ''
+        setHighestApiTag(typeof hi === 'string' ? hi : '')
+        const hiStr =
+          res.highestTag ||
           (service.rawTargetVersion && !service.rawTargetVersion.includes(' ')
             ? service.rawTargetVersion
             : '') ||
           items.find((i) => i.tag !== 'latest')?.tag ||
           ''
-        setHighestApiTag(hi)
+        setHighestApiTag(hiStr)
         // 严格保持当前推荐/配置的目标标签 initTag，绝不自动跌落到 items[0] 造成跨版本误降级
-        const atLatest = checkIsAtOrAboveLatest(initTag, hi, items)
+        const atLatest = checkIsAtOrAboveLatest(initTag, hiStr, items)
         setSelectedTag(initTag)
         setPolicy(atLatest ? 'all' : 'skip_latest')
       } catch (e) {
@@ -502,7 +528,7 @@ function VersionPickerModalBody({
       cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [service, initialSelectedTag, tab, isStandaloneConfigMode])
+  }, [service, initialSelectedTag, tab])
 
   // 加载单容器 YAML 配置（Case A）
   useEffect(() => {
@@ -518,9 +544,10 @@ function VersionPickerModalBody({
         setOrigYaml(raw)
         setEffectiveOrigServices(res.effectiveServices ?? [])
         setExtraFileServices(res.extraFileServices ?? [])
-        const synced = replaceComposeImageTag(raw, service.imageRef, selectedTag)
-        setYamlText(synced)
-        lastSyncedYamlTagRef.current = selectedTag
+        const initialYaml = userPickedVersionRef.current
+          ? replaceComposeImageTag(raw, service.imageRef, selectedTag)
+          : raw
+        setYamlText(initialYaml)
         setYamlLoaded(true)
       } catch (e) {
         if (!cancelled) {
@@ -535,15 +562,7 @@ function VersionPickerModalBody({
     }
   }, [tab, app, isStandaloneConfigMode, yamlLoaded, service.imageRef, selectedTag])
 
-  // 当用户在左页签切换了 selectedTag 时，自动同步更新 YAML 预览中的 image: 标签
-  useEffect(() => {
-    if (!yamlLoaded || !yamlEditable || !selectedTag) return
-    if (lastSyncedYamlTagRef.current === selectedTag) return
-    lastSyncedYamlTagRef.current = selectedTag
-    setYamlText((prev) => replaceComposeImageTag(prev, service.imageRef, selectedTag))
-  }, [yamlLoaded, yamlEditable, selectedTag, service.imageRef])
-
-  // 加载纯独立容器配置（Case B）
+  // 加载独立容器命令配置（Case B）
   useEffect(() => {
     if (tab !== 'config' || !isStandaloneConfigMode || standaloneLoaded) return
     let cancelled = false
@@ -553,23 +572,24 @@ function VersionPickerModalBody({
         if (cancelled) return
         setStandaloneEditable(res.editable)
         setStandaloneReason(res.reason || '')
-        setEnvRows(
-          (res.env ?? []).map((item) => ({
-            _id: nextRowIdRef.current++,
-            key: item.key,
-            value: item.value,
-          })),
+        const baseOrigCfg = editableConfigFromApi(
+          res,
+          service.name && service.name !== 'main' ? service.name : appName,
+          res.imageRef || service.imageRef,
         )
-        setPortRows(
-          (res.ports ?? []).map((item) => ({
-            _id: nextRowIdRef.current++,
-            hostIp: item.hostIp,
-            hostPort: item.hostPort,
-            containerPort: item.containerPort,
-            protocol: (item.protocol || 'tcp').toLowerCase(),
-          })),
-        )
-        setOrigVolumes(res.volumes)
+        const baseOrigCmd = buildDockerRunCommand(baseOrigCfg)
+        setOrigCmdCfg(baseOrigCfg)
+        setOrigCmdText(baseOrigCmd)
+
+        if (userPickedVersionRef.current && selectedTag) {
+          const pickedCfg = cloneEditableConfig(baseOrigCfg)
+          pickedCfg.image = replaceImageTagInRef(baseOrigCfg.image, selectedTag)
+          setCmdCfg(pickedCfg)
+          setCmdText(buildDockerRunCommand(pickedCfg))
+        } else {
+          setCmdCfg(cloneEditableConfig(baseOrigCfg))
+          setCmdText(baseOrigCmd)
+        }
         setStandaloneLoaded(true)
       } catch (e) {
         if (!cancelled) {
@@ -582,7 +602,7 @@ function VersionPickerModalBody({
     return () => {
       cancelled = true
     }
-  }, [tab, isStandaloneConfigMode, standaloneLoaded, service.key])
+  }, [tab, isStandaloneConfigMode, standaloneLoaded, service.key, service.name, service.imageRef, appName, selectedTag])
 
   const handleRemoteSearch = async () => {
     if (!service) return
@@ -702,10 +722,8 @@ function VersionPickerModalBody({
     return ''
   }, [allCombinedTags, highestTag, isLatest, isSelectedPrerelease, lockedPrefix, policy, selectedTag])
 
-  const syncedOrigYaml = useMemo(
-    () => replaceComposeImageTag(origYaml, service.imageRef, selectedTag),
-    [origYaml, service.imageRef, selectedTag],
-  )
+  const origYamlConfigs = useMemo(() => parseComposeServices(origYaml), [origYaml])
+  const curYamlConfigs = useMemo(() => parseComposeServices(yamlText), [yamlText])
 
   const overwriteRisks = useMemo(
     () =>
@@ -839,27 +857,17 @@ function VersionPickerModalBody({
   }
 
   const doStandaloneSubmit = async (
-    cleanedEnv: ServiceEnvItem[],
-    cleanedPorts: ServicePortItem[],
+    basePayload: Omit<UpdateServiceConfigPayload, 'startAfter'>,
     startAfter?: boolean,
   ) => {
-    const policyPrefixVal = policy === 'prefix' ? lockedPrefix : undefined
-    const skipTargetVal = policy === 'skip_latest' ? highestTag : undefined
     setSubmittingConfig(true)
     if (startAfter !== undefined) {
       setStoppedChoiceLoading(startAfter ? 'start' : 'keep')
     }
     try {
       const res = await api.updateServiceConfig({
-        serviceKey: service.key,
-        targetTag: selectedTag,
-        policyMode: policy,
-        policyPrefix: policyPrefixVal,
-        skipTargetTag: skipTargetVal,
+        ...basePayload,
         startAfter,
-        env: cleanedEnv,
-        ports: cleanedPorts,
-        volumes: origVolumes,
       })
       if (res.job) {
         upsertUpdateJob(res.job)
@@ -895,9 +903,11 @@ function VersionPickerModalBody({
       return
     }
 
-    // 分支 B：无 YAML 纯独立容器配置提交
+    // 分支 B：独立容器命令模式提交
+    if (!cmdCfg) return
+
     const cleanedEnv: ServiceEnvItem[] = []
-    for (const row of envRows) {
+    for (const row of cmdCfg.envs) {
       const k = row.key.trim()
       const v = row.value
       if (!k && !v.trim()) continue
@@ -909,7 +919,7 @@ function VersionPickerModalBody({
     }
 
     const cleanedPorts: ServicePortItem[] = []
-    for (const row of portRows) {
+    for (const row of cmdCfg.ports) {
       const hp = row.hostPort.trim()
       const cp = row.containerPort.trim()
       if (!hp && !cp) continue
@@ -925,11 +935,64 @@ function VersionPickerModalBody({
       })
     }
 
+    const cleanedVolumes: ServiceVolumeItem[] = []
+    for (const row of cmdCfg.volumes) {
+      const hp = row.hostPath.trim()
+      const cp = row.containerPath.trim()
+      if (!hp && !cp) continue
+      if (!cp || !cp.startsWith('/')) {
+        message.warning(t.configEditor.volInvalidMsg)
+        return
+      }
+      cleanedVolumes.push({
+        hostPath: hp,
+        containerPath: cp,
+        mode: row.mode || 'rw',
+      })
+    }
+
+    const cleanedDevices: ServiceDeviceItem[] = []
+    for (const row of cmdCfg.devices) {
+      const hp = row.hostPath.trim()
+      const cp = (row.containerPath || row.hostPath).trim()
+      if (!hp && !cp) continue
+      cleanedDevices.push({
+        hostPath: hp || cp,
+        containerPath: cp || hp,
+        ...(row.permissions ? { permissions: row.permissions } : {}),
+      })
+    }
+
+    const targetImg = cmdCfg.image.trim() || origCmdCfg?.image || service.imageRef
+    const targetTagVal = extractTagFromRef(targetImg) || selectedTag
+    const policyPrefixVal = policy === 'prefix' ? lockedPrefix : undefined
+    const skipTargetVal = policy === 'skip_latest' ? highestTag : undefined
+
+    const basePayload: Omit<UpdateServiceConfigPayload, 'startAfter'> = {
+      serviceKey: service.key,
+      targetTag: targetTagVal,
+      targetImageRef: targetImg,
+      policyMode: policy,
+      policyPrefix: policyPrefixVal,
+      skipTargetTag: skipTargetVal,
+      env: cleanedEnv,
+      ports: cleanedPorts,
+      volumes: cleanedVolumes,
+      devices: cleanedDevices,
+      networkMode: normalizeNetMode(cmdCfg.networkMode),
+      restartPolicy: normalizeRestart(cmdCfg.restartPolicy) || 'no',
+      user: cmdCfg.user.trim(),
+      privileged: Boolean(cmdCfg.privileged),
+      capAdd: cmdCfg.capAdd,
+      hostname: cmdCfg.hostname.trim(),
+      extraHosts: cmdCfg.extraHosts,
+    }
+
     if (isSvcStopped) {
-      setStoppedPending({ kind: 'standalone', env: cleanedEnv, ports: cleanedPorts })
+      setStoppedPending({ kind: 'standalone', payload: basePayload })
       return
     }
-    await doStandaloneSubmit(cleanedEnv, cleanedPorts)
+    await doStandaloneSubmit(basePayload)
   }
 
   const shortRepo = extractShortRepo(service.imageRef)
@@ -1018,7 +1081,7 @@ function VersionPickerModalBody({
             </Typography.Text>
           </div>
 
-          {/* 右上角双页签切换：选择版本更新 | 按新版配置更新 */}
+          {/* 右上角双页签切换：选择版本 | 按配置更新 */}
           {canShowConfigTab && (
             <Segmented
               value={tab}
@@ -1031,46 +1094,40 @@ function VersionPickerModalBody({
           )}
         </Flex>
 
-        {/* 目标镜像胶囊（在配置页签上支持一键点回选版页签重选版本） */}
-        <div style={{ marginTop: 10 }}>
-          <Tag
-            variant="filled"
-            color="processing"
-            style={{
-              margin: 0,
-              padding: '3px 10px',
-              display: 'inline-flex',
-              flexWrap: 'wrap',
-              alignItems: 'baseline',
-              gap: 6,
-              maxWidth: '100%',
-              whiteSpace: 'normal',
-            }}
-          >
-            <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}>
-              {t.versionPicker.targetImage}
-            </Typography.Text>
-            <span
+        {/* 目标镜像胶囊（仅在选择版本页签展示；按配置更新页签直接在命令/YAML中编辑） */}
+        {tab === 'version' && (
+          <div style={{ marginTop: 10 }}>
+            <Tag
+              variant="filled"
+              color="processing"
               style={{
-                fontFamily: token.fontFamilyCode,
-                fontSize: token.fontSizeSM,
-                fontWeight: 600,
-                color: token.colorPrimary,
-                wordBreak: 'break-all',
+                margin: 0,
+                padding: '3px 10px',
+                display: 'inline-flex',
+                flexWrap: 'wrap',
+                alignItems: 'baseline',
+                gap: 6,
+                maxWidth: '100%',
+                whiteSpace: 'normal',
               }}
             >
-              {shortRepo}:{selectedTag}
-            </span>
-            {tab === 'config' && (
-              <Typography.Link
-                onClick={() => setTab('version')}
-                style={{ fontSize: token.fontSizeSM, marginLeft: 2, flexShrink: 0 }}
+              <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}>
+                {t.versionPicker.targetImage}
+              </Typography.Text>
+              <span
+                style={{
+                  fontFamily: token.fontFamilyCode,
+                  fontSize: token.fontSizeSM,
+                  fontWeight: 600,
+                  color: token.colorPrimary,
+                  wordBreak: 'break-all',
+                }}
               >
-                {t.versionPicker.changeVerLink}
-              </Typography.Link>
-            )}
-          </Tag>
-        </div>
+                {shortRepo}:{selectedTag}
+              </span>
+            </Tag>
+          </div>
+        )}
       </div>
 
       {tab === 'version' ? (
@@ -1454,8 +1511,8 @@ function VersionPickerModalBody({
           </Flex>
         </>
       ) : (
-        /* 右页签：按新版配置更新（自动同步 selectedTag） */
-        <Flex vertical gap={14}>
+        /* 右页签：按配置更新（支持单容器 YAML 与独立容器 docker run 双向可视化编辑） */
+        <Flex vertical gap={12}>
           {loadingConfig ? (
             <Flex align="center" justify="center" gap={8} style={{ height: 220 }}>
               <Spin size="small" />
@@ -1477,41 +1534,27 @@ function VersionPickerModalBody({
               }
             />
           ) : !isStandaloneConfigMode ? (
-            /* Case A：单容器 YAML 项目（精简操作说明 + 恢复原配置 + 防误覆盖保护） */
+            /* Case A：单容器 YAML 项目（上方 compose.yaml 与下方表单实时双向同步） */
             <>
-              <Alert
-                type="info"
-                showIcon
-                title={
-                  <Typography.Text style={{ fontSize: token.fontSizeSM }}>
-                    {t.projectUpdate.yamlGuide}
-                  </Typography.Text>
-                }
-              />
-
-              <Flex wrap="wrap" align="center" justify="space-between" gap={8}>
-                <Typography.Text strong style={{ fontSize: token.fontSizeSM }}>
-                  {t.projectUpdate.yamlContentLabel}
-                </Typography.Text>
-                <Button
-                  size="small"
-                  onClick={() => setYamlText(syncedOrigYaml)}
-                  disabled={yamlText === syncedOrigYaml}
-                >
-                  {t.projectUpdate.restoreOrigBtn}
-                </Button>
-              </Flex>
-
-              <Input.TextArea
-                rows={10}
-                spellCheck={false}
-                value={yamlText}
-                onChange={(e) => setYamlText(e.target.value)}
-                style={{
-                  fontFamily: token.fontFamilyCode,
-                  fontSize: token.fontSizeSM,
-                  lineHeight: 1.55,
+              <ConfigVisualEditor
+                mode="yaml"
+                textValue={yamlText}
+                origTextValue={origYaml}
+                origConfigs={origYamlConfigs}
+                curConfigs={curYamlConfigs}
+                onChangeText={(nextText) => setYamlText(nextText)}
+                onChangeService={(svcName, nextSvc) => {
+                  setYamlText((prev) => patchComposeServiceInYaml(prev, svcName, nextSvc))
                 }}
+                onRestoreAllChangedValues={(restoredServices) => {
+                  setYamlText((prev) =>
+                    restoredServices.reduce(
+                      (acc, s) => patchComposeServiceInYaml(acc, s.name, s),
+                      prev,
+                    ),
+                  )
+                }}
+                onResetAll={() => setYamlText(origYaml)}
               />
 
               {overwriteRisks.missingServices.length > 0 && (
@@ -1553,226 +1596,37 @@ function VersionPickerModalBody({
                   }
                 />
               )}
-
-              {overwriteRisks.missingServices.length === 0 &&
-                overwriteRisks.missingPaths.length > 0 && (
-                  <Alert
-                    type="warning"
-                    showIcon
-                    title={
-                      <Typography.Text style={{ fontSize: token.fontSizeSM }}>
-                        <strong>{t.projectUpdate.warnTitle}</strong>
-                        {t.projectUpdate.warnMissingPathsBefore}
-                        <Typography.Text code>
-                          {overwriteRisks.missingPaths.join(', ')}
-                        </Typography.Text>
-                        {t.projectUpdate.warnMissingPathsAfter}
-                      </Typography.Text>
-                    }
-                  />
-                )}
-
-              {overwriteRisks.missingServices.length === 0 &&
-                overwriteRisks.missingPaths.length === 0 &&
-                overwriteRisks.overwrittenSecrets.length > 0 && (
-                  <Alert
-                    type="warning"
-                    showIcon
-                    title={
-                      <Typography.Text style={{ fontSize: token.fontSizeSM }}>
-                        <strong>{t.projectUpdate.warnTitle}</strong>
-                        {t.projectUpdate.warnSecretOverwriteBefore}
-                        <Typography.Text code>
-                          {overwriteRisks.overwrittenSecrets.join(', ')}
-                        </Typography.Text>
-                        {t.projectUpdate.warnSecretOverwriteAfter}
-                      </Typography.Text>
-                    }
-                  />
-                )}
             </>
           ) : (
-            /* Case B：无 YAML 纯独立容器（环境变量 + 端口映射表单） */
-            <>
-              <Alert
-                type="info"
-                showIcon
-                title={
-                  <Typography.Text style={{ fontSize: token.fontSizeSM }}>
-                    {t.versionPicker.standaloneGuide}
-                  </Typography.Text>
-                }
+            /* Case B：独立容器命令模式（上方 docker run 与下方表单实时双向同步） */
+            origCmdCfg &&
+            cmdCfg && (
+              <ConfigVisualEditor
+                mode="cmd"
+                textValue={cmdText}
+                origTextValue={origCmdText}
+                origConfigs={[origCmdCfg]}
+                curConfigs={[cmdCfg]}
+                onChangeText={(nextText) => {
+                  setCmdText(nextText)
+                  setCmdCfg(parseDockerRunCommand(nextText, origCmdCfg.name))
+                }}
+                onChangeService={(_svcName, nextSvc) => {
+                  setCmdCfg(nextSvc)
+                  setCmdText(buildDockerRunCommand(nextSvc))
+                }}
+                onRestoreAllChangedValues={(restoredServices) => {
+                  const first = restoredServices[0]
+                  if (!first) return
+                  setCmdCfg(first)
+                  setCmdText(buildDockerRunCommand(first))
+                }}
+                onResetAll={() => {
+                  setCmdCfg(cloneEditableConfig(origCmdCfg))
+                  setCmdText(origCmdText)
+                }}
               />
-
-              {/* 环境变量区块 */}
-              <Card
-                size="small"
-                title={t.versionPicker.envSectionTitle}
-                extra={
-                  <Button
-                    size="small"
-                    type="primary"
-                    ghost
-                    icon={<PlusOutlined />}
-                    onClick={() =>
-                      setEnvRows((prev) => [
-                        ...prev,
-                        { _id: nextRowIdRef.current++, key: '', value: '' },
-                      ])
-                    }
-                  >
-                    {t.versionPicker.addEnvBtn}
-                  </Button>
-                }
-                styles={{ body: { padding: '10px 12px' } }}
-              >
-                {envRows.length === 0 ? (
-                  <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-                    {t.versionPicker.envEmpty}
-                  </Typography.Text>
-                ) : (
-                  <Flex vertical gap={6} style={{ maxHeight: 168, overflowY: 'auto' }}>
-                    {envRows.map((row) => (
-                      <Flex key={row._id} align="center" gap={6}>
-                        <Input
-                          size="small"
-                          value={row.key}
-                          placeholder={t.versionPicker.envKeyPlaceholder}
-                          style={{ flex: '0 1 38%', fontFamily: token.fontFamilyCode }}
-                          onChange={(e) => {
-                            const val = e.target.value
-                            setEnvRows((prev) =>
-                              prev.map((r) => (r._id === row._id ? { ...r, key: val } : r)),
-                            )
-                          }}
-                        />
-                        <Typography.Text type="secondary">=</Typography.Text>
-                        <Input
-                          size="small"
-                          value={row.value}
-                          placeholder={t.versionPicker.envValPlaceholder}
-                          style={{ flex: 1, fontFamily: token.fontFamilyCode }}
-                          onChange={(e) => {
-                            const val = e.target.value
-                            setEnvRows((prev) =>
-                              prev.map((r) => (r._id === row._id ? { ...r, value: val } : r)),
-                            )
-                          }}
-                        />
-                        <Tooltip title={t.versionPicker.removeRowTip}>
-                          <Button
-                            size="small"
-                            type="text"
-                            danger
-                            icon={<DeleteOutlined />}
-                            aria-label={t.versionPicker.removeRowTip}
-                            onClick={() =>
-                              setEnvRows((prev) => prev.filter((r) => r._id !== row._id))
-                            }
-                          />
-                        </Tooltip>
-                      </Flex>
-                    ))}
-                  </Flex>
-                )}
-              </Card>
-
-              {/* 端口映射区块 */}
-              <Card
-                size="small"
-                title={t.versionPicker.portsSectionTitle}
-                extra={
-                  <Button
-                    size="small"
-                    type="primary"
-                    ghost
-                    icon={<PlusOutlined />}
-                    onClick={() =>
-                      setPortRows((prev) => [
-                        ...prev,
-                        {
-                          _id: nextRowIdRef.current++,
-                          hostPort: '',
-                          containerPort: '',
-                          protocol: 'tcp',
-                        },
-                      ])
-                    }
-                  >
-                    {t.versionPicker.addPortBtn}
-                  </Button>
-                }
-                styles={{ body: { padding: '10px 12px' } }}
-              >
-                {portRows.length === 0 ? (
-                  <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-                    {t.versionPicker.portsEmpty}
-                  </Typography.Text>
-                ) : (
-                  <Flex vertical gap={6} style={{ maxHeight: 148, overflowY: 'auto' }}>
-                    {portRows.map((row) => (
-                      <Flex key={row._id} align="center" gap={6}>
-                        <Input
-                          size="small"
-                          value={row.hostPort}
-                          placeholder={t.versionPicker.hostPortPlaceholder}
-                          style={{ flex: 1, fontFamily: token.fontFamilyCode }}
-                          onChange={(e) => {
-                            const val = e.target.value
-                            setPortRows((prev) =>
-                              prev.map((r) => (r._id === row._id ? { ...r, hostPort: val } : r)),
-                            )
-                          }}
-                        />
-                        <ArrowRightOutlined
-                          style={{ fontSize: 11, color: token.colorTextTertiary }}
-                        />
-                        <Input
-                          size="small"
-                          value={row.containerPort}
-                          placeholder={t.versionPicker.containerPortPlaceholder}
-                          style={{ flex: 1, fontFamily: token.fontFamilyCode }}
-                          onChange={(e) => {
-                            const val = e.target.value
-                            setPortRows((prev) =>
-                              prev.map((r) =>
-                                r._id === row._id ? { ...r, containerPort: val } : r,
-                              ),
-                            )
-                          }}
-                        />
-                        <Select
-                          size="small"
-                          value={(row.protocol || 'tcp').toLowerCase()}
-                          style={{ width: 82 }}
-                          options={[
-                            { label: 'TCP', value: 'tcp' },
-                            { label: 'UDP', value: 'udp' },
-                          ]}
-                          onChange={(val) =>
-                            setPortRows((prev) =>
-                              prev.map((r) => (r._id === row._id ? { ...r, protocol: val } : r)),
-                            )
-                          }
-                        />
-                        <Tooltip title={t.versionPicker.removeRowTip}>
-                          <Button
-                            size="small"
-                            type="text"
-                            danger
-                            icon={<DeleteOutlined />}
-                            aria-label={t.versionPicker.removeRowTip}
-                            onClick={() =>
-                              setPortRows((prev) => prev.filter((r) => r._id !== row._id))
-                            }
-                          />
-                        </Tooltip>
-                      </Flex>
-                    ))}
-                  </Flex>
-                )}
-              </Card>
-            </>
+            )
           )}
 
           {/* 配置页签底栏 */}
@@ -1796,7 +1650,8 @@ function VersionPickerModalBody({
                 disabled={
                   !configEditable ||
                   loadingConfig ||
-                  (!isStandaloneConfigMode && !yamlText.trim())
+                  (!isStandaloneConfigMode && !yamlText.trim()) ||
+                  (isStandaloneConfigMode && !cmdText.trim())
                 }
                 loading={submittingConfig}
                 onClick={handleSubmitConfig}
@@ -1850,7 +1705,7 @@ function VersionPickerModalBody({
             return
           }
           if (stoppedPending.kind === 'standalone') {
-            await doStandaloneSubmit(stoppedPending.env, stoppedPending.ports, startAfter)
+            await doStandaloneSubmit(stoppedPending.payload, startAfter)
             return
           }
           setStoppedChoiceLoading(startAfter ? 'start' : 'keep')

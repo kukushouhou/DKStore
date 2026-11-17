@@ -35,7 +35,8 @@ type Input struct {
 	ServiceName        string
 	LocalRepoDigest    string
 	LocalImageID       string
-	LocalVersionLabel  string // 本地容器/镜像 OCI 版本标签（org.opencontainers.image.version / org.label-schema.version）
+	Labels             map[string]string // 容器/镜像及远端 Manifest 合并后的 OCI 标签（用于解析 GitHub/官网/文档/发行说明链接）
+	LocalVersionLabel  string            // 本地容器/镜像 OCI 版本标签（org.opencontainers.image.version / org.label-schema.version）
 	RemoteVersionLabel string // 远端 Manifest/镜像 OCI 版本标签
 	RemoteManifest     *registry.ManifestResult
 	CurrentMatchedTags []string
@@ -246,7 +247,7 @@ func Evaluate(in Input) Output {
 
 	// 1. 固定摘要 image@sha256:...
 	if in.Ref.IsPinnedDigest() {
-		out.Links = resolveLinks(ruleSet, in.Ref, dbRule, "")
+		out.Links = resolveLinks(ruleSet, in.Ref, dbRule, in.Labels, "")
 		out.CurrentVersion = shortDigest(in.Ref.Digest)
 		if in.RemoteManifest != nil && in.Ref.Tag != "" &&
 			in.RemoteManifest.RepoDigest != "" && in.RemoteManifest.RepoDigest != in.Ref.Digest {
@@ -295,7 +296,7 @@ func Evaluate(in Input) Output {
 	canCompareImageID := in.AllowImageIDCompare && localImageID != "" && remoteConfigDigest != ""
 	if localRepoDigest == "" && !canCompareImageID {
 		out.Kind = KindUncomparable
-		out.Links = resolveLinks(ruleSet, in.Ref, dbRule, "")
+		out.Links = resolveLinks(ruleSet, in.Ref, dbRule, in.Labels, "")
 		return out
 	}
 
@@ -426,7 +427,7 @@ func Evaluate(in Input) Output {
 				out.Hint = "db_new_series:" + latestOverall.Raw
 			}
 			out.ReasonText = i18n.FormatReasonWithRole(lang, out.Reason, out.DatabaseName, out.RoleKind, out.CurrentVersion, out.TargetVersion)
-			out.Links = resolveLinks(ruleSet, in.Ref, dbRule, out.TargetVersion)
+			out.Links = resolveLinks(ruleSet, in.Ref, dbRule, in.Labels, out.TargetVersion)
 			return out
 		}
 		if digestChanged {
@@ -447,14 +448,14 @@ func Evaluate(in Input) Output {
 				}
 			}
 			out.ReasonText = i18n.FormatReasonWithRole(lang, out.Reason, out.DatabaseName, out.RoleKind, out.CurrentVersion, out.TargetVersion)
-			out.Links = resolveLinks(ruleSet, in.Ref, dbRule, remoteBest)
+			out.Links = resolveLinks(ruleSet, in.Ref, dbRule, in.Labels, remoteBest)
 			return out
 		}
 		if latestOverall != nil {
 			out.Kind = KindNone
 			out.Hint = "db_only_new_series:" + latestOverall.Raw
 		}
-		out.Links = resolveLinks(ruleSet, in.Ref, dbRule, "")
+		out.Links = resolveLinks(ruleSet, in.Ref, dbRule, in.Labels, "")
 		return out
 	}
 
@@ -478,7 +479,7 @@ func Evaluate(in Input) Output {
 		} else {
 			out.Category = CategoryNormal
 		}
-		out.Links = resolveLinks(ruleSet, in.Ref, nil, out.TargetVersion)
+		out.Links = resolveLinks(ruleSet, in.Ref, nil, in.Labels, out.TargetVersion)
 		return out
 	}
 
@@ -498,7 +499,7 @@ func Evaluate(in Input) Output {
 		if latestOverall != nil && latestOverall.Raw != in.Ref.Tag {
 			out.Hint = "higher_tag:" + latestOverall.Raw
 		}
-		out.Links = resolveLinks(ruleSet, in.Ref, nil, remoteBest)
+		out.Links = resolveLinks(ruleSet, in.Ref, nil, in.Labels, remoteBest)
 		return out
 	}
 
@@ -519,11 +520,11 @@ func Evaluate(in Input) Output {
 		} else {
 			out.Category = CategoryNormal
 		}
-		out.Links = resolveLinks(ruleSet, in.Ref, nil, out.TargetVersion)
+		out.Links = resolveLinks(ruleSet, in.Ref, nil, in.Labels, out.TargetVersion)
 		return out
 	}
 
-	out.Links = resolveLinks(ruleSet, in.Ref, nil, "")
+	out.Links = resolveLinks(ruleSet, in.Ref, nil, in.Labels, "")
 	return out
 }
 
@@ -537,10 +538,14 @@ func isMajorBump(cur, target version.ParsedTag) bool {
 	return target.Major > cur.Major
 }
 
-func resolveLinks(rs *rules.Set, ref version.ParsedRef, dbRule *rules.DatabaseRule, targetVer string) rules.RepoLink {
-	link := rs.ResolveLinks(ref.Registry, ref.Repository, targetVer)
-	if dbRule != nil && dbRule.Docs != "" && link.Releases == "" {
-		link.Releases = dbRule.Docs
+func resolveLinks(rs *rules.Set, ref version.ParsedRef, dbRule *rules.DatabaseRule, labels map[string]string, targetVer string) rules.RepoLink {
+	link := rs.ResolveContainerLinks(ref.Registry, ref.Repository, labels, targetVer)
+	if dbRule != nil && dbRule.Docs != "" {
+		if link.Releases == "" {
+			link.Releases = dbRule.Docs
+		} else if link.Docs == "" && link.Releases != dbRule.Docs {
+			link.Docs = dbRule.Docs
+		}
 	}
 	return link
 }

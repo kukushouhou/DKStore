@@ -47,10 +47,11 @@ func (e *RegistryError) Error() string { return i18n.LocalizeDetail(i18n.ZhCN, e
 
 // ManifestResult 是对远端 tag 的 Manifest/Index 检查结果。
 type ManifestResult struct {
-	RepoDigest     string `json:"repoDigest,omitempty"`     // 顶层 Docker-Content-Digest（Index 或单架构 Manifest）
-	PlatformDigest string `json:"platformDigest,omitempty"` // 对应主机 os/arch/variant 的具体 Manifest Digest（若顶层是 Index）
-	ConfigDigest   string `json:"configDigest,omitempty"`   // 对应主机架构的镜像 Config Digest（可与本地 ImageInspect.Id 比对）
-	VersionLabel   string `json:"versionLabel,omitempty"`   // OCI Manifest/Index annotations 中的版本号
+	RepoDigest     string            `json:"repoDigest,omitempty"`     // 顶层 Docker-Content-Digest（Index 或单架构 Manifest）
+	PlatformDigest string            `json:"platformDigest,omitempty"` // 对应主机 os/arch/variant 的具体 Manifest Digest（若顶层是 Index）
+	ConfigDigest   string            `json:"configDigest,omitempty"`   // 对应主机架构的镜像 Config Digest（可与本地 ImageInspect.Id 比对）
+	VersionLabel   string            `json:"versionLabel,omitempty"`   // OCI Manifest/Index annotations 中的版本号
+	Annotations    map[string]string `json:"annotations,omitempty"`    // OCI 链接相关注解（source/url/documentation/changelog）
 }
 
 // ManifestCheckOptions 控制 CheckManifestEx 的按需请求行为（避免消耗不必要的拉取配额）。
@@ -207,6 +208,7 @@ func (c *Client) CheckManifestEx(ctx context.Context, ref version.ParsedRef, opt
 	res := &ManifestResult{
 		RepoDigest:   NormalizeDigest(resp.Header.Get("Docker-Content-Digest")),
 		VersionLabel: parseAnnotationVersion(body),
+		Annotations:  parseLinkAnnotations(body),
 	}
 	ct := strings.ToLower(resp.Header.Get("Content-Type"))
 
@@ -233,6 +235,7 @@ func (c *Client) CheckManifestEx(ctx context.Context, ref version.ParsedRef, opt
 				if res.VersionLabel == "" {
 					res.VersionLabel = pickAnnotationVersion(idx.Manifests[i].Annotations)
 				}
+				res.Annotations = mergeLinkAnnotations(res.Annotations, idx.Manifests[i].Annotations)
 			}
 		}
 		// 多架构 Index：仅在平台摘要与本地摘要不同或明确需要 ConfigDigest 时拉取平台子 Manifest
@@ -244,6 +247,7 @@ func (c *Client) CheckManifestEx(ctx context.Context, ref version.ParsedRef, opt
 				if res.VersionLabel == "" {
 					res.VersionLabel = parseAnnotationVersion(pBody)
 				}
+				res.Annotations = mergeLinkAnnotations(res.Annotations, parseLinkAnnotations(pBody))
 			}
 		}
 	} else {
@@ -2250,6 +2254,52 @@ func pickAnnotationVersion(ann map[string]string) string {
 		return v
 	}
 	return strings.TrimSpace(ann["org.label-schema.version"])
+}
+
+var ociLinkAnnotationKeys = []string{
+	"org.opencontainers.image.source",
+	"org.opencontainers.image.url",
+	"org.opencontainers.image.documentation",
+	"org.opencontainers.image.changelog",
+	"org.label-schema.vcs-url",
+	"org.label-schema.url",
+	"org.label-schema.usage",
+}
+
+func parseLinkAnnotations(body []byte) map[string]string {
+	var mf struct {
+		Annotations map[string]string `json:"annotations"`
+	}
+	if json.Unmarshal(body, &mf) != nil || len(mf.Annotations) == 0 {
+		return nil
+	}
+	return mergeLinkAnnotations(nil, mf.Annotations)
+}
+
+func mergeLinkAnnotations(base, extra map[string]string) map[string]string {
+	if len(extra) == 0 {
+		return base
+	}
+	var out map[string]string
+	if len(base) > 0 {
+		out = make(map[string]string, len(base))
+		for k, v := range base {
+			out[k] = v
+		}
+	}
+	for _, k := range ociLinkAnnotationKeys {
+		v := strings.TrimSpace(extra[k])
+		if v == "" {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string, 4)
+		}
+		if out[k] == "" {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 type platformParts struct{ os, arch, variant string }

@@ -877,12 +877,29 @@ func (a *Adapter) GetStandaloneConfig(ctx context.Context, appName, serviceName 
 			Volumes:  []platform.VolumeBinding{},
 		}, nil
 	}
+	dsmNet := strings.TrimSpace(anyString(prof["network_mode"]))
+	if dsmNet == "" || dsmNet == "default" {
+		if b, _ := prof["is_host_network"].(bool); b {
+			dsmNet = "host"
+		} else {
+			dsmNet = "bridge"
+		}
+	}
+	dsmRestart := ""
+	if b, _ := prof["enable_restart_policy"].(bool); b {
+		dsmRestart = "always"
+	}
+	dsmPriv, _ := prof["is_privilege"].(bool)
 	return &platform.StandaloneConfig{
-		Editable: true,
-		ImageRef: anyString(prof["image"]),
-		Env:      extractDSMEnv(prof),
-		Ports:    extractDSMPorts(prof),
-		Volumes:  extractDSMVolumes(prof),
+		Editable:      true,
+		ContainerName: cName,
+		ImageRef:      anyString(prof["image"]),
+		NetworkMode:   dsmNet,
+		RestartPolicy: dsmRestart,
+		Privileged:    dsmPriv,
+		Env:           extractDSMEnv(prof),
+		Ports:         extractDSMPorts(prof),
+		Volumes:       extractDSMVolumes(prof),
 	}, nil
 }
 

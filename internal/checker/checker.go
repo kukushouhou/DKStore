@@ -500,7 +500,7 @@ func (s *Service) checkSingleService(ctx context.Context, svc svcRow, bypassCach
 		return classify.Output{
 			Kind:           classify.KindCheckFailed,
 			CurrentVersion: curVer,
-			Links:          rules.Default().ResolveLinks(ref.Registry, ref.Repository, ""),
+			Links:          rules.Default().ResolveContainerLinks(ref.Registry, ref.Repository, labels, ""),
 		}, errKind, errMsg, nil
 	}
 
@@ -514,8 +514,18 @@ func (s *Service) checkSingleService(ctx context.Context, svc svcRow, bypassCach
 		curMatched = s.reg.LookupTagsByDigestOrConfig(ctx, ref, svc.RepoDigest, "", localCfgForLookup, svc.Platform, recentTags)
 	}
 	var remMatched []string
+	mergedLabels := labels
 	if mf != nil {
 		remMatched = s.reg.LookupTagsByDigestOrConfig(ctx, ref, mf.RepoDigest, mf.PlatformDigest, mf.ConfigDigest, svc.Platform, recentTags)
+		if len(mf.Annotations) > 0 {
+			mergedLabels = make(map[string]string, len(labels)+len(mf.Annotations))
+			for k, v := range mf.Annotations {
+				mergedLabels[k] = v
+			}
+			for k, v := range labels {
+				mergedLabels[k] = v
+			}
+		}
 	}
 
 	out = classify.Evaluate(classify.Input{
@@ -523,6 +533,7 @@ func (s *Service) checkSingleService(ctx context.Context, svc svcRow, bypassCach
 		ServiceName:         svc.Name,
 		LocalRepoDigest:     svc.RepoDigest,
 		LocalImageID:        svc.ImageID,
+		Labels:              mergedLabels,
 		LocalVersionLabel:   localVerLabel,
 		RemoteVersionLabel:  mf.VersionLabel,
 		RemoteManifest:      mf,

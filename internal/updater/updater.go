@@ -112,16 +112,26 @@ type ComposeUpdateRequest struct {
 	StartAfter            *bool    `json:"startAfter,omitempty"`
 }
 
-// StandaloneConfigUpdateRequest 是无 YAML 独立容器按新版配置（环境变量 + 端口映射）更新的异步任务请求（附录 E.4）。
+// StandaloneConfigUpdateRequest 是无 YAML 独立容器按配置（启动参数 + 环境变量 + 端口 + 挂载 + 设备）更新的异步任务请求（附录 E.4）。
 type StandaloneConfigUpdateRequest struct {
-	ServiceKey    string                 `json:"serviceKey"`
-	TargetTag     string                 `json:"targetTag,omitempty"`
-	PolicyMode    string                 `json:"policyMode,omitempty"`
-	PolicyPrefix  string                 `json:"policyPrefix,omitempty"`
-	SkipTargetTag string                 `json:"skipTargetTag,omitempty"`
-	StartAfter    *bool                  `json:"startAfter,omitempty"`
-	Env           []platform.EnvVar      `json:"env"`
-	Ports         []platform.PortBinding `json:"ports"`
+	ServiceKey     string                    `json:"serviceKey"`
+	TargetTag      string                    `json:"targetTag,omitempty"`
+	TargetImageRef string                    `json:"targetImageRef,omitempty"`
+	PolicyMode     string                    `json:"policyMode,omitempty"`
+	PolicyPrefix   string                    `json:"policyPrefix,omitempty"`
+	SkipTargetTag  string                    `json:"skipTargetTag,omitempty"`
+	StartAfter     *bool                     `json:"startAfter,omitempty"`
+	Env            []platform.EnvVar         `json:"env"`
+	Ports          []platform.PortBinding    `json:"ports"`
+	Volumes        *[]platform.VolumeBinding `json:"volumes,omitempty"`
+	Devices        *[]platform.DeviceBinding `json:"devices,omitempty"`
+	NetworkMode    *string                   `json:"networkMode,omitempty"`
+	RestartPolicy  *string                   `json:"restartPolicy,omitempty"`
+	User           *string                   `json:"user,omitempty"`
+	Privileged     *bool                     `json:"privileged,omitempty"`
+	CapAdd         *[]string                 `json:"capAdd,omitempty"`
+	Hostname       *string                   `json:"hostname,omitempty"`
+	ExtraHosts     *[]string                 `json:"extraHosts,omitempty"`
 }
 
 // ComposeInfo 是 GET /api/v1/apps/compose 的返回体（附录 D.4）。
@@ -994,9 +1004,18 @@ func (s *Service) StartStandaloneConfigUpdate(ctx context.Context, req Standalon
 		return nil, i18n.NewEngineError(i18n.MsgComposeNotEditable)
 	}
 
+	targetTag := strings.TrimSpace(req.TargetTag)
+	customImgRef := strings.TrimSpace(req.TargetImageRef)
+	if targetTag == "" && customImgRef != "" {
+		_, extractedTag := splitRefAndTag(customImgRef)
+		if extractedTag != "" {
+			targetTag = extractedTag
+		}
+	}
+
 	item := UpdateItemRequest{
 		ServiceKey:    svcKey,
-		TargetTag:     strings.TrimSpace(req.TargetTag),
+		TargetTag:     targetTag,
 		PolicyMode:    strings.TrimSpace(req.PolicyMode),
 		PolicyPrefix:  strings.TrimSpace(req.PolicyPrefix),
 		SkipTargetTag: strings.TrimSpace(req.SkipTargetTag),
@@ -1006,13 +1025,15 @@ func (s *Service) StartStandaloneConfigUpdate(ctx context.Context, req Standalon
 	if err != nil {
 		return nil, err
 	}
+	if customImgRef != "" && customImgRef != j.TargetImageRef {
+		j.TargetImageRef = customImgRef
+	}
 	if err := s.applyPostUpdatePolicy(ctx, item, prevFindingVer); err != nil {
 		return nil, err
 	}
 	if !alreadyRunning {
-		envCopy := append([]platform.EnvVar(nil), req.Env...)
-		portsCopy := append([]platform.PortBinding(nil), req.Ports...)
-		go s.executeStandaloneConfigJob(j, envCopy, portsCopy)
+		reqCopy := cloneStandaloneConfigReq(req)
+		go s.executeStandaloneConfigJob(j, reqCopy)
 	}
 	return &j, nil
 }
@@ -1451,7 +1472,50 @@ func (s *Service) executeComposeJob(j Job, proj platform.ProjectInfo, newYAML st
 	}
 }
 
-func (s *Service) executeStandaloneConfigJob(j Job, env []platform.EnvVar, ports []platform.PortBinding) {
+func cloneStandaloneConfigReq(in StandaloneConfigUpdateRequest) StandaloneConfigUpdateRequest {
+	out := in
+	out.Env = append([]platform.EnvVar(nil), in.Env...)
+	out.Ports = append([]platform.PortBinding(nil), in.Ports...)
+	if in.Volumes != nil {
+		cp := append([]platform.VolumeBinding(nil), (*in.Volumes)...)
+		out.Volumes = &cp
+	}
+	if in.Devices != nil {
+		cp := append([]platform.DeviceBinding(nil), (*in.Devices)...)
+		out.Devices = &cp
+	}
+	if in.NetworkMode != nil {
+		v := *in.NetworkMode
+		out.NetworkMode = &v
+	}
+	if in.RestartPolicy != nil {
+		v := *in.RestartPolicy
+		out.RestartPolicy = &v
+	}
+	if in.User != nil {
+		v := *in.User
+		out.User = &v
+	}
+	if in.Privileged != nil {
+		v := *in.Privileged
+		out.Privileged = &v
+	}
+	if in.CapAdd != nil {
+		cp := append([]string(nil), (*in.CapAdd)...)
+		out.CapAdd = &cp
+	}
+	if in.Hostname != nil {
+		v := *in.Hostname
+		out.Hostname = &v
+	}
+	if in.ExtraHosts != nil {
+		cp := append([]string(nil), (*in.ExtraHosts)...)
+		out.ExtraHosts = &cp
+	}
+	return out
+}
+
+func (s *Service) executeStandaloneConfigJob(j Job, cfgReq StandaloneConfigUpdateRequest) {
 	tracker := newJobProgressTracker(s, &j)
 	defer func() {
 		if r := recover(); r != nil {
@@ -1498,8 +1562,17 @@ func (s *Service) executeStandaloneConfigJob(j Job, env []platform.EnvVar, ports
 		RegistryAuthB64: regAuth,
 		LayerSizes:      layerSizes,
 		StartAfter:      j.startAfter,
-		Env:             env,
-		Ports:           ports,
+		Env:             cfgReq.Env,
+		Ports:           cfgReq.Ports,
+		Volumes:         cfgReq.Volumes,
+		Devices:         cfgReq.Devices,
+		NetworkMode:     cfgReq.NetworkMode,
+		RestartPolicy:   cfgReq.RestartPolicy,
+		User:            cfgReq.User,
+		Privileged:      cfgReq.Privileged,
+		CapAdd:          cfgReq.CapAdd,
+		Hostname:        cfgReq.Hostname,
+		ExtraHosts:      cfgReq.ExtraHosts,
 	}, func(p platform.PullProgress) {
 		tracker.handleProgress(ctx, &j, p)
 	})

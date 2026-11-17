@@ -206,24 +206,40 @@ func decodeFlexPort(raw json.RawMessage) string {
 	return strings.Trim(string(raw), `" `)
 }
 
-// VolumeBinding 表示独立容器的挂载目录映射（只读展示）。
+// VolumeBinding 表示独立容器的挂载目录映射。
 type VolumeBinding struct {
 	HostPath      string `json:"hostPath"`
 	ContainerPath string `json:"containerPath"`
-	Mode          string `json:"mode"` // rw | ro
+	Mode          string `json:"mode,omitempty"` // rw | ro
+}
+
+// DeviceBinding 表示容器的硬件设备直通映射（如 /dev/dri:/dev/dri）。
+type DeviceBinding struct {
+	HostPath      string `json:"hostPath"`
+	ContainerPath string `json:"containerPath"`
+	Permissions   string `json:"permissions,omitempty"` // 缺省为 rwm
 }
 
 // StandaloneConfig 描述非 YAML 独立容器的当前运行参数（附录 E.4）。
 type StandaloneConfig struct {
-	Editable bool            `json:"editable"`
-	Reason   string          `json:"reason,omitempty"`
-	ImageRef string          `json:"imageRef"`
-	Env      []EnvVar        `json:"env"`
-	Ports    []PortBinding   `json:"ports"`
-	Volumes  []VolumeBinding `json:"volumes"`
+	Editable      bool            `json:"editable"`
+	Reason        string          `json:"reason,omitempty"`
+	ContainerName string          `json:"containerName,omitempty"`
+	ImageRef      string          `json:"imageRef"`
+	NetworkMode   string          `json:"networkMode,omitempty"`
+	RestartPolicy string          `json:"restartPolicy,omitempty"`
+	User          string          `json:"user,omitempty"`
+	Privileged    bool            `json:"privileged,omitempty"`
+	CapAdd        []string        `json:"capAdd,omitempty"`
+	Hostname      string          `json:"hostname,omitempty"`
+	ExtraHosts    []string        `json:"extraHosts,omitempty"`
+	Env           []EnvVar        `json:"env"`
+	Ports         []PortBinding   `json:"ports"`
+	Volumes       []VolumeBinding `json:"volumes"`
+	Devices       []DeviceBinding `json:"devices,omitempty"`
 }
 
-// StandaloneUpdateRequest 是对独立容器执行镜像切换并同步更新环境变量/端口映射的输入参数（附录 E.4）。
+// StandaloneUpdateRequest 是对独立容器执行镜像切换并同步更新运行配置的输入参数（附录 E.4）。
 type StandaloneUpdateRequest struct {
 	AppName         string
 	ServiceName     string
@@ -235,6 +251,15 @@ type StandaloneUpdateRequest struct {
 	StartAfter      *bool
 	Env             []EnvVar
 	Ports           []PortBinding
+	Volumes         *[]VolumeBinding
+	Devices         *[]DeviceBinding
+	NetworkMode     *string
+	RestartPolicy   *string
+	User            *string
+	Privileged      *bool
+	CapAdd          *[]string
+	Hostname        *string
+	ExtraHosts      *[]string
 }
 
 // StandaloneConfigAdapter 扩展 Adapter，提供无 YAML 独立容器的配置读取与带配置回滚保护的重建能力（附录 E.4）。

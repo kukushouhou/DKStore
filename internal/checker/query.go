@@ -292,7 +292,7 @@ func fallbackCurrentResolvedTag(imageRef string, curTags []string, labelsJSON st
 	return ""
 }
 
-func resolveServiceRoleAndLinks(svcName, imageRef, storedReason string, storedLinks rules.RepoLink) (reasonCode, dbName, roleKind string, links rules.RepoLink) {
+func resolveServiceRoleAndLinks(svcName, imageRef, labelsJSON, storedReason string, storedLinks rules.RepoLink) (reasonCode, dbName, roleKind string, links rules.RepoLink) {
 	parts := strings.Split(storedReason, "|")
 	if len(parts) > 0 {
 		reasonCode = parts[0]
@@ -305,9 +305,14 @@ func resolveServiceRoleAndLinks(svcName, imageRef, storedReason string, storedLi
 	}
 	links = storedLinks
 
+	var labels map[string]string
+	if labelsJSON != "" {
+		_ = json.Unmarshal([]byte(labelsJSON), &labels)
+	}
+
+	rs := rules.Default()
 	pr, err := version.ParseImageRef(imageRef)
 	if err == nil {
-		rs := rules.Default()
 		if dbRule, _ := rs.MatchDatabase(pr.Registry, pr.Repository); dbRule != nil {
 			if dbName == "" {
 				dbName = dbRule.Name
@@ -319,12 +324,35 @@ func resolveServiceRoleAndLinks(svcName, imageRef, storedReason string, storedLi
 				links.Releases = dbRule.Docs
 			}
 		}
-		if links.Repo == "" && links.Releases == "" {
-			resolved := rs.ResolveLinks(pr.Registry, pr.Repository, "")
-			links.Repo = resolved.Repo
-			if links.Releases == "" {
-				links.Releases = resolved.Releases
-			}
+		fresh := rs.ResolveContainerLinks(pr.Registry, pr.Repository, labels, "")
+		if fresh.Repo != "" && (links.Repo == "" || isRegistryOnlyURL(links.Repo)) {
+			links.Repo = fresh.Repo
+		}
+		if links.Releases == "" && fresh.Releases != "" {
+			links.Releases = fresh.Releases
+		}
+		if links.Website == "" && fresh.Website != "" {
+			links.Website = fresh.Website
+		}
+		if links.Docs == "" && fresh.Docs != "" {
+			links.Docs = fresh.Docs
+		}
+		if links.RegistryURL == "" && fresh.RegistryURL != "" {
+			links.RegistryURL = fresh.RegistryURL
+		}
+	} else if len(labels) > 0 {
+		fresh := rs.ResolveContainerLinks("", "", labels, "")
+		if links.Repo == "" {
+			links.Repo = fresh.Repo
+		}
+		if links.Releases == "" {
+			links.Releases = fresh.Releases
+		}
+		if links.Website == "" {
+			links.Website = fresh.Website
+		}
+		if links.Docs == "" {
+			links.Docs = fresh.Docs
 		}
 	}
 	if dbName == "" {
@@ -337,6 +365,15 @@ func resolveServiceRoleAndLinks(svcName, imageRef, storedReason string, storedLi
 		roleKind = "database"
 	}
 	return
+}
+
+func isRegistryOnlyURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	h := strings.ToLower(u.Hostname())
+	return h == "hub.docker.com" || h == "quay.io" || h == "ghcr.io" || h == "lscr.io"
 }
 
 func isComposeEditable(appSource, hostTransport, projJSON string) bool {
@@ -568,7 +605,7 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 			curVer = fallbackCurrentVersion(imageRef, curTags, labelsJSON)
 		}
 		curVer, tgtVer = normalizeStoredVersions(imageRef, fKind, curVer, tgtVer, repoDigest, tgtDigest, curTags, tgtTags)
-		reasonCode, dbName, roleKind, links := resolveServiceRoleAndLinks(svcName, imageRef, fReason, storedLinks)
+		reasonCode, dbName, roleKind, links := resolveServiceRoleAndLinks(svcName, imageRef, labelsJSON, fReason, storedLinks)
 		isUpd := fKind == string(classify.KindDigestUpdate) || fKind == string(classify.KindVersionUpdate)
 		displayTarget := ""
 		if isUpd {
@@ -765,7 +802,7 @@ func (s *Service) GetApp(ctx context.Context, appKey string, lang i18n.Lang) (*A
 			curVer = fallbackCurrentVersion(imageRef, curTags, labelsJSON)
 		}
 		curVer, tgtVer = normalizeStoredVersions(imageRef, fKind, curVer, tgtVer, repoDigest, tgtDigest, curTags, tgtTags)
-		reasonCode, dbName, roleKind, links := resolveServiceRoleAndLinks(svcName, imageRef, fReason, storedLinks)
+		reasonCode, dbName, roleKind, links := resolveServiceRoleAndLinks(svcName, imageRef, labelsJSON, fReason, storedLinks)
 		isUpd := fKind == string(classify.KindDigestUpdate) || fKind == string(classify.KindVersionUpdate)
 		displayTarget := ""
 		if isUpd {

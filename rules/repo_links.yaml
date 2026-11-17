@@ -57,3 +57,35 @@ links:
   gitea/gitea:
     repo: https://github.com/go-gitea/gitea
     releases: https://github.com/go-gitea/gitea/releases
+  louislam/uptime-kuma:
+    repo: https://github.com/louislam/uptime-kuma
+    releases: https://github.com/louislam/uptime-kuma/releases
+    website: https://uptime.kuma.pet
+  prom/prometheus:
+    repo: https://github.com/prometheus/prometheus
+    releases: https://github.com/prometheus/prometheus/releases
+    website: https://prometheus.io
+    docs: https://prometheus.io/docs/introduction/overview/
+  grafana/grafana:
+    repo: https://github.com/grafana/grafana
+    releases: https://github.com/grafana/grafana/releases
+    website: https://grafana.com
+  eclipse-mosquitto:
+    repo: https://github.com/eclipse-mosquitto/mosquitto
+    releases: https://github.com/eclipse-mosquitto/mosquitto/releases
+    website: https://mosquitto.org
+  library/eclipse-mosquitto:
+    repo: https://github.com/eclipse-mosquitto/mosquitto
+    releases: https://github.com/eclipse-mosquitto/mosquitto/releases
+    website: https://mosquitto.org
+  syncthing/syncthing:
+    repo: https://github.com/syncthing/syncthing
+    releases: https://github.com/syncthing/syncthing/releases
+    website: https://syncthing.net
+  jc21/nginx-proxy-manager:
+    repo: https://github.com/NginxProxyManager/nginx-proxy-manager
+    releases: https://github.com/NginxProxyManager/nginx-proxy-manager/releases
+    website: https://nginxproxymanager.com
+  cloudflare/cloudflared:
+    repo: https://github.com/cloudflare/cloudflared
+    releases: https://github.com/cloudflare/cloudflared/releases
