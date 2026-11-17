@@ -6,6 +6,16 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+## [v0.6.1] - 2026-11-17
+
+### 问题修复
+- **镜像异常挂载兼容与错误提示显示修复**：当上游镜像自带非绝对路径的异常匿名卷（如 `--net=host`）导致重建容器报错时，在确认项目配置自身无误的前提下自动先移除旧容器实例再重新构建，完整保留宿主机挂载目录数据；群晖相关错误提示改为按当前界面语言单语显示（同时兼容已有历史记录），并将应用卡片报错框调整为全宽上下布局（超长内容支持展开与收起），修复单张卡片展开进度或报错时将同行其他卡片等高拉长留白的问题 ([`da34e9e`](https://github.com/kukushouhou/DKStore/commit/da34e9e))
+
+---
+
+### Fixes
+- **Invalid Image Volume Mount Compatibility & Error Display Fix**: Automatically removes the old container instance before a clean rebuild when an upstream image carries a non-absolute anonymous volume (such as `--net=host`) and the project YAML itself is valid, preserving host bind-mount data; localized Synology error messages to the active UI language without bilingual duplication (including existing history records), and switched card error alerts to a full-width stacked layout with expand/collapse support while preventing tall cards from stretching sibling cards in the same row ([`da34e9e`](https://github.com/kukushouhou/DKStore/commit/da34e9e))
+
 ## [v0.6.0] - 2026-11-17
 
 ### 新功能
