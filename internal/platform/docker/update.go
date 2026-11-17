@@ -81,7 +81,11 @@ func (a *Adapter) UpdateService(
 			Message: i18n.EngineDetail(i18n.MsgDockerImageChanged, shortID(req.ExpectedImageID), shortID(curImageID)),
 		}
 	}
-	addLog("precheck ok: container=%s image=%s wasRunning=%v", shortID(targetContainerID), shortID(curImageID), wasRunning)
+	wantRunning := wasRunning
+	if req.StartAfter != nil {
+		wantRunning = *req.StartAfter
+	}
+	addLog("precheck ok: container=%s image=%s wasRunning=%v wantRunning=%v", shortID(targetContainerID), shortID(curImageID), wasRunning, wantRunning)
 
 	// 若为 Compose / DSM 项目，提前记录 Compose YAML 的原始内容与 SHA256，用于冲突保护与失败回写
 	var (
@@ -179,7 +183,7 @@ func (a *Adapter) UpdateService(
 				req.Project.EnvFiles,
 				req.Project.Name,
 				req.ServiceName,
-				wasRunning,
+				wantRunning,
 				func(chunk string) {
 					emit(platform.PullProgress{
 						Phase:      "recreating",
@@ -197,7 +201,7 @@ func (a *Adapter) UpdateService(
 				req.Project.EnvFiles,
 				req.Project.Name,
 				req.ServiceName,
-				wasRunning,
+				wantRunning,
 			)
 			if out != "" {
 				emit(platform.PullProgress{
@@ -219,7 +223,7 @@ func (a *Adapter) UpdateService(
 	}
 
 	if !usedComposeCLI {
-		newCID, err := a.recreateContainerViaEngine(ctx, execTr, targetContainerID, rawInspect, req.TargetImageRef, wasRunning)
+		newCID, err := a.recreateContainerViaEngineWithState(ctx, execTr, targetContainerID, rawInspect, req.TargetImageRef, wasRunning, wantRunning, nil, nil)
 		if err != nil {
 			return nil, &platform.UpdateError{Code: "recreate_failed", Message: restoreCompose(i18n.DetailOf(err))}
 		}
@@ -239,7 +243,7 @@ func (a *Adapter) UpdateService(
 		Percent:    95,
 		LogChunk:   "Verifying container state & switched image...\r\n",
 	})
-	res, err := a.verifyUpdatedService(ctx, req, newImageID, newRepoDigest, wasRunning)
+	res, err := a.verifyUpdatedService(ctx, req, newImageID, newRepoDigest, wantRunning)
 	if err != nil {
 		return nil, &platform.UpdateError{Code: "verify_failed", Message: restoreCompose(i18n.DetailOf(err))}
 	}
@@ -1206,8 +1210,15 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 	}
 
 	removeOrphans := len(removedSvcs) > 0 && opts.ConfirmRemoveServices
+	preserveStopped := opts.StartAfter != nil && !*opts.StartAfter
+	var beforeRunningSvcs []string
+	if preserveStopped {
+		beforeRunningSvcs = a.listRunningComposeServiceNames(ctx, projName, effectiveAfter)
+	}
 	cmdDesc := "Running docker compose pull & up -d ...\r\n"
-	if removeOrphans {
+	if preserveStopped {
+		cmdDesc = "Running docker compose pull & up --no-start ...\r\n"
+	} else if removeOrphans {
 		cmdDesc = "Running docker compose pull & up -d --remove-orphans ...\r\n"
 	}
 
@@ -1220,22 +1231,34 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 	})
 
 	var runErr error
-	if optsTr, ok := execTr.(transport.ComposeProjectOptionsTransport); ok {
-		_, runErr = optsTr.ExecComposeProjectWithOptions(ctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, true, removeOrphans, func(chunk string) {
-			emit(parser.Feed(chunk))
-		})
-		parser.Flush()
-	} else if streamTr, ok := execTr.(transport.StreamingComposeTransport); ok {
-		_, runErr = streamTr.ExecComposeProjectStream(ctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, removeOrphans, func(chunk string) {
-			emit(parser.Feed(chunk))
-		})
-		parser.Flush()
-	} else {
-		var out string
-		out, runErr = execTr.ExecComposeProject(ctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, true)
-		if out != "" {
-			emit(parser.Feed(out + "\r\n"))
+	handledNoStart := false
+	if preserveStopped {
+		if lcTr, ok := execTr.(transport.ComposeLifecycleTransport); ok {
+			handledNoStart = true
+			_, runErr = lcTr.ExecComposeProjectNoStart(ctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, true, removeOrphans, beforeRunningSvcs, func(chunk string) {
+				emit(parser.Feed(chunk))
+			})
 			parser.Flush()
+		}
+	}
+	if !handledNoStart {
+		if optsTr, ok := execTr.(transport.ComposeProjectOptionsTransport); ok {
+			_, runErr = optsTr.ExecComposeProjectWithOptions(ctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, true, removeOrphans, func(chunk string) {
+				emit(parser.Feed(chunk))
+			})
+			parser.Flush()
+		} else if streamTr, ok := execTr.(transport.StreamingComposeTransport); ok {
+			_, runErr = streamTr.ExecComposeProjectStream(ctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, removeOrphans, func(chunk string) {
+				emit(parser.Feed(chunk))
+			})
+			parser.Flush()
+		} else {
+			var out string
+			out, runErr = execTr.ExecComposeProject(ctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, true)
+			if out != "" {
+				emit(parser.Feed(out + "\r\n"))
+				parser.Flush()
+			}
 		}
 	}
 	if runErr != nil {
@@ -1247,7 +1270,17 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 				Message: i18n.EngineDetail(i18n.MsgDockerComposeRestoreErr, runErr.Error(), rErr.Error()),
 			}
 		}
-		if _, rbErr := execTr.ExecComposeProject(rctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, false); rbErr != nil {
+		var rbErr error
+		if preserveStopped {
+			if lcTr, ok := execTr.(transport.ComposeLifecycleTransport); ok {
+				_, rbErr = lcTr.ExecComposeProjectNoStart(rctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, false, false, beforeRunningSvcs, nil)
+			} else {
+				_, rbErr = execTr.ExecComposeProject(rctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, false)
+			}
+		} else {
+			_, rbErr = execTr.ExecComposeProject(rctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, false)
+		}
+		if rbErr != nil {
 			return &platform.UpdateError{
 				Code:    "recreate_failed",
 				Message: i18n.EngineDetail(i18n.MsgDockerComposeRebuildErr, runErr.Error(), rbErr.Error()),

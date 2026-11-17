@@ -302,6 +302,21 @@ func (a *Adapter) updateProjectService(
 		}
 	}
 	beforeYAML := detail.Content
+	origSvcRunning := make(map[string]bool, len(detail.Containers))
+	for _, dc := range detail.Containers {
+		sn := strings.TrimSpace(dc.Config.Labels["com.docker.compose.service"])
+		if sn == "" {
+			sn = strings.TrimPrefix(dc.Name, "/")
+		}
+		if sn != "" && (dc.State.Running || strings.EqualFold(dc.State.Status, "running")) {
+			origSvcRunning[sn] = true
+		}
+	}
+	svcWasRunning := origSvcRunning[req.ServiceName]
+	wantSvcRunning := svcWasRunning
+	if req.StartAfter != nil {
+		wantSvcRunning = *req.StartAfter
+	}
 	oldImageID := ""
 	if c := findProjectServiceContainer(detail, req.ServiceName); c != nil {
 		oldImageID = c.Image
@@ -341,6 +356,28 @@ func (a *Adapter) updateProjectService(
 		}
 	}
 	parser.Flush()
+
+	// build_stream 默认执行 up -d 会启动项目内全部服务；对原本未运行且未要求启动的服务恢复停止状态
+	if curDetail, gErr := a.dsmCli.GetProject(ctx, projectID); gErr == nil && curDetail != nil {
+		for _, dc := range curDetail.Containers {
+			sn := strings.TrimSpace(dc.Config.Labels["com.docker.compose.service"])
+			cName := strings.TrimPrefix(dc.Name, "/")
+			if cName == "" {
+				continue
+			}
+			isTarget := sn == req.ServiceName || cName == req.ServiceName
+			shouldRun := origSvcRunning[sn]
+			if isTarget {
+				shouldRun = wantSvcRunning
+			}
+			nowRun := dc.State.Running || strings.EqualFold(dc.State.Status, "running")
+			if !shouldRun && nowRun {
+				_ = a.dsmCli.StopContainer(ctx, cName)
+			} else if isTarget && shouldRun && !nowRun {
+				_ = a.dsmCli.StartContainer(ctx, cName)
+			}
+		}
+	}
 
 	expectedID := ""
 	if imgs, err := a.dsmCli.ListImages(ctx); err == nil {
@@ -443,9 +480,25 @@ func (a *Adapter) upgradeStandalone(ctx context.Context, req platform.UpdateRequ
 	if oldImageID == "" {
 		oldImageID = req.ExpectedImageID
 	}
+	beforeRunning := before.State.Running || strings.EqualFold(before.State.Status, "running") || strings.EqualFold(before.Status, "running")
+	wantRunning := beforeRunning
+	if req.StartAfter != nil {
+		wantRunning = *req.StartAfter
+	}
+	cName := strings.TrimPrefix(before.Name, "/")
+	if cName == "" {
+		cName = req.AppName
+	}
 	emit(platform.PullProgress{Phase: "recreating", StatusText: "Upgrading container via DSM WebAPI", Percent: 90})
 	if err := a.dsmCli.UpgradeByRepository(ctx, repo); err != nil {
 		return nil, &platform.UpdateError{Code: "recreate_failed", Message: biErr(err)}
+	}
+	if cName != "" {
+		if wantRunning {
+			_ = a.dsmCli.StartContainer(ctx, cName)
+		} else {
+			_ = a.dsmCli.StopContainer(ctx, cName)
+		}
 	}
 
 	emit(platform.PullProgress{Phase: "verifying", StatusText: "Verifying container image via DSM WebAPI", Percent: 95})
@@ -537,6 +590,10 @@ func (a *Adapter) recreateStandalone(
 	if strings.TrimSpace(profileLabelValue(origProfile, "com.docker.compose.project")) != "" {
 		return nil, dsmCLIComposeUnsupportedErr()
 	}
+	wantRunning := wasRunning
+	if req.StartAfter != nil {
+		wantRunning = *req.StartAfter
+	}
 	backupProfile := cloneProfile(origProfile)
 
 	oldImageID := ""
@@ -601,7 +658,7 @@ func (a *Adapter) recreateStandalone(
 		return " | " + bi("已自动恢复原容器", "original container restored")
 	}
 
-	if err := a.dsmCli.CreateContainer(ctx, newProfile, wasRunning); err != nil {
+	if err := a.dsmCli.CreateContainer(ctx, newProfile, wantRunning); err != nil {
 		return nil, &platform.UpdateError{
 			Code:    "recreate_failed",
 			Message: biErr(err) + restoreBackup(false),
@@ -630,7 +687,7 @@ func (a *Adapter) recreateStandalone(
 				fmt.Sprintf("容器镜像 ID 未切换为新镜像（当前 %s，原 %s，期望 %s）", shortID(c.ImageID), shortID(oldImageID), shortID(expectedID)),
 				fmt.Sprintf("container image ID did not switch to the new image (current %s, old %s, expected %s)", shortID(c.ImageID), shortID(oldImageID), shortID(expectedID)),
 			)
-		} else if !standaloneStateMatches(*c, wasRunning) {
+		} else if !standaloneStateMatches(*c, wantRunning) {
 			lastReason = bi("重建后容器运行状态未达到预期", "container running state does not match expected state after recreate")
 		} else if strings.EqualFold(c.State.Health.Status, "unhealthy") {
 			found = nil
@@ -665,7 +722,7 @@ func (a *Adapter) recreateStandalone(
 		state = found.Status
 	}
 	if state == "" {
-		if wasRunning || found.State.Running {
+		if wantRunning || found.State.Running {
 			state = "running"
 		} else {
 			state = "stopped"
@@ -763,6 +820,7 @@ func (a *Adapter) UpdateStandaloneConfig(
 		OldImageRef:     req.OldImageRef,
 		TargetImageRef:  req.TargetImageRef,
 		RegistryAuthB64: req.RegistryAuthB64,
+		StartAfter:      req.StartAfter,
 	}
 	standalone := findStandaloneContainer(containers, upReq)
 	if standalone == nil {
@@ -1319,6 +1377,14 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 		return &platform.UpdateError{Code: "recreate_failed", Message: biErr(err)}
 	}
 	beforeYAML := detail.Content
+	beforeRunningSvcs := make(map[string]bool, len(detail.Containers))
+	for _, dc := range detail.Containers {
+		if dc.State.Running || strings.EqualFold(dc.State.Status, "running") {
+			if sn := strings.TrimSpace(dc.Config.Labels["com.docker.compose.service"]); sn != "" {
+				beforeRunningSvcs[sn] = true
+			}
+		}
+	}
 
 	beforeSet := make(map[string]bool)
 	var effectiveBefore []string
@@ -1416,6 +1482,21 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 		}
 	}
 	parser.Flush()
+
+	if opts.StartAfter != nil && !*opts.StartAfter {
+		if len(beforeRunningSvcs) == 0 {
+			_ = a.dsmCli.StopProject(ctx, project.DSMProjectID)
+		} else if afterDet, gErr := a.dsmCli.GetProject(ctx, project.DSMProjectID); gErr == nil && afterDet != nil {
+			for _, dc := range afterDet.Containers {
+				sn := strings.TrimSpace(dc.Config.Labels["com.docker.compose.service"])
+				cName := strings.TrimPrefix(dc.Name, "/")
+				nowRun := dc.State.Running || strings.EqualFold(dc.State.Status, "running")
+				if cName != "" && nowRun && !beforeRunningSvcs[sn] {
+					_ = a.dsmCli.StopContainer(ctx, cName)
+				}
+			}
+		}
+	}
 
 	if len(removedSvcs) > 0 && opts.ConfirmRemoveServices {
 		projName := strings.TrimSpace(project.Name)

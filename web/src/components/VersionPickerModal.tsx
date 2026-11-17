@@ -44,6 +44,7 @@ import { useUIStore } from '../store/ui'
 import { detectComposeOverwriteRisks, replaceComposeImageTag } from './composeGuard'
 import DeleteAppModal from './DeleteAppModal'
 import LockableVersionBar from './LockableVersionBar'
+import StoppedUpdateModal from './StoppedUpdateModal'
 import { compareNumericSegs, parseNumericSegs } from './versionUtils'
 
 export interface VersionPickSelection {
@@ -244,6 +245,27 @@ function VersionPickerModalBody({
   const [origVolumes, setOrigVolumes] = useState<ServiceVolumeItem[] | undefined>(undefined)
 
   const [submittingConfig, setSubmittingConfig] = useState(false)
+  const [stoppedPending, setStoppedPending] = useState<
+    | { kind: 'version' }
+    | {
+        kind: 'yaml'
+        opts?: {
+          confirmRemoveServices?: boolean
+          deleteRemovedImages?: boolean
+          deleteRemovedFileIds?: string[]
+        }
+      }
+    | {
+        kind: 'standalone'
+        env: ServiceEnvItem[]
+        ports: ServicePortItem[]
+      }
+    | null
+  >(null)
+  const [stoppedChoiceLoading, setStoppedChoiceLoading] = useState<'keep' | 'start' | null>(null)
+  const isSvcStopped = Boolean(
+    service.state && service.state.trim() && service.state !== 'running',
+  )
 
   const defaultTrackTag = useMemo(
     () => extractTagFromRef(service.targetRef) || extractTagFromRef(service.imageRef) || 'latest',
@@ -512,7 +534,7 @@ function VersionPickerModalBody({
     [effectiveOrigServices, extraFileServices, origYaml, yamlText],
   )
 
-  const handleSubmitVersion = async () => {
+  const doSubmitVersion = async (startAfter?: boolean) => {
     if (!service || !selectedTag) return
     const selection: VersionPickSelection = {
       targetTag: selectedTag,
@@ -520,14 +542,10 @@ function VersionPickerModalBody({
       policyPrefix: policy === 'prefix' ? lockedPrefix : undefined,
       skipTargetTag: policy === 'skip_latest' ? highestTag : undefined,
     }
-
-    if (onPickOnly) {
-      onPickOnly(selection)
-      onClose()
-      return
-    }
-
     setSubmitting(true)
+    if (startAfter !== undefined) {
+      setStoppedChoiceLoading(startAfter ? 'start' : 'keep')
+    }
     try {
       const res = await api.startUpdates({
         items: [
@@ -537,6 +555,7 @@ function VersionPickerModalBody({
             policyMode: selection.policyMode,
             policyPrefix: selection.policyPrefix,
             skipTargetTag: selection.skipTargetTag,
+            startAfter,
           },
         ],
       })
@@ -546,19 +565,41 @@ function VersionPickerModalBody({
         }
       }
       message.info(t.home.updating)
+      setStoppedPending(null)
       onUpdated?.()
       onClose()
     } catch (e) {
       showApiError(e)
     } finally {
       setSubmitting(false)
+      setStoppedChoiceLoading(null)
     }
+  }
+
+  const handleSubmitVersion = () => {
+    if (!service || !selectedTag) return
+    if (onPickOnly) {
+      onPickOnly({
+        targetTag: selectedTag,
+        policyMode: policy,
+        policyPrefix: policy === 'prefix' ? lockedPrefix : undefined,
+        skipTargetTag: policy === 'skip_latest' ? highestTag : undefined,
+      })
+      onClose()
+      return
+    }
+    if (isSvcStopped) {
+      setStoppedPending({ kind: 'version' })
+      return
+    }
+    void doSubmitVersion()
   }
 
   const submitYamlConfigWithOptions = async (opts?: {
     confirmRemoveServices?: boolean
     deleteRemovedImages?: boolean
     deleteRemovedFileIds?: string[]
+    startAfter?: boolean
   }) => {
     if (!app) return
     const policyPrefixVal = policy === 'prefix' ? lockedPrefix : undefined
@@ -573,6 +614,7 @@ function VersionPickerModalBody({
       confirmRemoveServices: opts?.confirmRemoveServices,
       deleteRemovedImages: opts?.deleteRemovedImages,
       deleteRemovedFileIds: opts?.deleteRemovedFileIds,
+      startAfter: opts?.startAfter,
     })
     if (res.job) {
       upsertUpdateJob(res.job)
@@ -583,14 +625,77 @@ function VersionPickerModalBody({
       }
     }
     message.success(t.versionPicker.configUpdateStarted)
+    setStoppedPending(null)
     onUpdated?.()
     onClose()
   }
 
-  const handleSubmitConfig = async () => {
-    if (!app) return
+  const executeYamlConfigOrPrompt = async (opts?: {
+    confirmRemoveServices?: boolean
+    deleteRemovedImages?: boolean
+    deleteRemovedFileIds?: string[]
+  }) => {
+    if (isSvcStopped) {
+      setStoppedPending({ kind: 'yaml', opts })
+      return
+    }
+    setSubmittingConfig(true)
+    try {
+      await submitYamlConfigWithOptions(opts)
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'compose_services_removed' && e.removedServices?.length) {
+        setPendingRemovalConfirm({
+          removedServices: e.removedServices,
+          addedServices: e.addedServices ?? [],
+        })
+        return
+      }
+      showApiError(e)
+    } finally {
+      setSubmittingConfig(false)
+    }
+  }
+
+  const doStandaloneSubmit = async (
+    cleanedEnv: ServiceEnvItem[],
+    cleanedPorts: ServicePortItem[],
+    startAfter?: boolean,
+  ) => {
     const policyPrefixVal = policy === 'prefix' ? lockedPrefix : undefined
     const skipTargetVal = policy === 'skip_latest' ? highestTag : undefined
+    setSubmittingConfig(true)
+    if (startAfter !== undefined) {
+      setStoppedChoiceLoading(startAfter ? 'start' : 'keep')
+    }
+    try {
+      const res = await api.updateServiceConfig({
+        serviceKey: service.key,
+        targetTag: selectedTag,
+        policyMode: policy,
+        policyPrefix: policyPrefixVal,
+        skipTargetTag: skipTargetVal,
+        startAfter,
+        env: cleanedEnv,
+        ports: cleanedPorts,
+        volumes: origVolumes,
+      })
+      if (res.job) {
+        upsertUpdateJob(res.job)
+      }
+      message.success(t.versionPicker.configUpdateStarted)
+      setStoppedPending(null)
+      onUpdated?.()
+      onClose()
+    } catch (e) {
+      showApiError(e)
+    } finally {
+      setSubmittingConfig(false)
+      setStoppedChoiceLoading(null)
+    }
+  }
+
+  const handleSubmitConfig = async () => {
+    if (!app) return
 
     if (!isStandaloneConfigMode) {
       if (!yamlText.trim()) {
@@ -604,21 +709,7 @@ function VersionPickerModalBody({
         })
         return
       }
-      setSubmittingConfig(true)
-      try {
-        await submitYamlConfigWithOptions()
-      } catch (e) {
-        if (e instanceof ApiError && e.code === 'compose_services_removed' && e.removedServices?.length) {
-          setPendingRemovalConfirm({
-            removedServices: e.removedServices,
-            addedServices: e.addedServices ?? [],
-          })
-          return
-        }
-        showApiError(e)
-      } finally {
-        setSubmittingConfig(false)
-      }
+      await executeYamlConfigOrPrompt()
       return
     }
 
@@ -652,29 +743,11 @@ function VersionPickerModalBody({
       })
     }
 
-    setSubmittingConfig(true)
-    try {
-      const res = await api.updateServiceConfig({
-        serviceKey: service.key,
-        targetTag: selectedTag,
-        policyMode: policy,
-        policyPrefix: policyPrefixVal,
-        skipTargetTag: skipTargetVal,
-        env: cleanedEnv,
-        ports: cleanedPorts,
-        volumes: origVolumes,
-      })
-      if (res.job) {
-        upsertUpdateJob(res.job)
-      }
-      message.success(t.versionPicker.configUpdateStarted)
-      onUpdated?.()
-      onClose()
-    } catch (e) {
-      showApiError(e)
-    } finally {
-      setSubmittingConfig(false)
+    if (isSvcStopped) {
+      setStoppedPending({ kind: 'standalone', env: cleanedEnv, ports: cleanedPorts })
+      return
     }
+    await doStandaloneSubmit(cleanedEnv, cleanedPorts)
   }
 
   const shortRepo = extractShortRepo(service.imageRef)
@@ -1472,7 +1545,7 @@ function VersionPickerModalBody({
                   addedServices: pendingRemovalConfirm.addedServices,
                   newContent: yamlText,
                   onConfirm: async ({ deleteImages, fileIds }) => {
-                    await submitYamlConfigWithOptions({
+                    await executeYamlConfigOrPrompt({
                       confirmRemoveServices: true,
                       deleteRemovedImages: deleteImages,
                       deleteRemovedFileIds: fileIds,
@@ -1484,6 +1557,53 @@ function VersionPickerModalBody({
           onClose={() => setPendingRemovalConfirm(null)}
         />
       )}
+
+      <StoppedUpdateModal
+        open={Boolean(stoppedPending)}
+        title={t.lifecycle.stoppedSingleTitle}
+        description={t.lifecycle.stoppedSingleDesc.replace(
+          '{name}',
+          service.name && service.name !== 'main' ? service.name : appName,
+        )}
+        loadingChoice={stoppedChoiceLoading}
+        onConfirm={async (startAfter) => {
+          if (!stoppedPending) return
+          if (stoppedPending.kind === 'version') {
+            await doSubmitVersion(startAfter)
+            return
+          }
+          if (stoppedPending.kind === 'standalone') {
+            await doStandaloneSubmit(stoppedPending.env, stoppedPending.ports, startAfter)
+            return
+          }
+          setStoppedChoiceLoading(startAfter ? 'start' : 'keep')
+          setSubmittingConfig(true)
+          try {
+            await submitYamlConfigWithOptions({
+              ...stoppedPending.opts,
+              startAfter,
+            })
+          } catch (e) {
+            if (
+              e instanceof ApiError &&
+              e.code === 'compose_services_removed' &&
+              e.removedServices?.length
+            ) {
+              setStoppedPending(null)
+              setPendingRemovalConfirm({
+                removedServices: e.removedServices,
+                addedServices: e.addedServices ?? [],
+              })
+              return
+            }
+            showApiError(e)
+          } finally {
+            setStoppedChoiceLoading(null)
+            setSubmittingConfig(false)
+          }
+        }}
+        onCancel={() => setStoppedPending(null)}
+      />
     </Flex>
   )
 }

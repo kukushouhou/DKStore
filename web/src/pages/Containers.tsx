@@ -7,6 +7,7 @@ import {
   Empty,
   Flex,
   Input,
+  Popconfirm,
   Row,
   Segmented,
   Space,
@@ -14,9 +15,11 @@ import {
   Tag,
   Tooltip,
   Typography,
+  message,
   theme,
 } from 'antd'
 import {
+  CaretRightOutlined,
   DeleteOutlined,
   DownOutlined,
   EditOutlined,
@@ -24,15 +27,22 @@ import {
   ExportOutlined,
   HddOutlined,
   PlusOutlined,
+  PoweroffOutlined,
   ReloadOutlined,
   RightOutlined,
   SearchOutlined,
   ShrinkOutlined,
   SyncOutlined,
 } from '@ant-design/icons'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router'
-import { api, type AppRuntimeTree, type ContainerRuntimeStat } from '../api/client'
+import {
+  api,
+  showApiError,
+  type AppRuntimeTree,
+  type ContainerRuntimeStat,
+  type LifecycleAction,
+} from '../api/client'
 import AppIconAvatar from '../components/AppIconAvatar'
 import ContainerMetaModal from '../components/ContainerMetaModal'
 import DeleteAppModal from '../components/DeleteAppModal'
@@ -101,6 +111,7 @@ function mergeFastWithCachedStats(
 export default function ContainersPage() {
   const { locale, t } = useI18n()
   const { token } = theme.useToken()
+  const qc = useQueryClient()
   const navigate = useNavigate()
 
   const [hostFilter, setHostFilter] = useState<string>('')
@@ -109,6 +120,7 @@ export default function ContainersPage() {
   const [keyword, setKeyword] = useState('')
   const [collapsedKeys, setCollapsedKeys] = useState<Record<string, boolean>>({})
   const [deletingApp, setDeletingApp] = useState<AppRuntimeTree | null>(null)
+  const [actingSlot, setActingSlot] = useState<string>('')
   const [editingTarget, setEditingTarget] = useState<{
     appKey: string
     containerMetaKey?: string
@@ -582,6 +594,178 @@ export default function ContainersPage() {
     )
   }
 
+  const executeLifecycle = async (
+    slotPrefix: string,
+    action: LifecycleAction,
+    appKey: string,
+    displayName: string,
+    isProjectTarget: boolean,
+    container?: ContainerRuntimeStat,
+  ) => {
+    const slot = `${slotPrefix}::${action}`
+    setActingSlot(slot)
+    try {
+      await api.controlAppLifecycle({
+        appKey,
+        containerId: container?.id || undefined,
+        containerName: container?.name || undefined,
+        serviceName: container?.service || undefined,
+        action,
+      })
+      const msgTpl = isProjectTarget
+        ? action === 'start'
+          ? t.lifecycle.startedProjectMsg
+          : action === 'stop'
+            ? t.lifecycle.stoppedProjectMsg
+            : t.lifecycle.restartedProjectMsg
+        : action === 'start'
+          ? t.lifecycle.startedMsg
+          : action === 'stop'
+            ? t.lifecycle.stoppedMsg
+            : t.lifecycle.restartedMsg
+      message.success(msgTpl.replace('{name}', displayName))
+      void qc.invalidateQueries({ queryKey: ['overview'] })
+      handleRefresh()
+    } catch (e) {
+      showApiError(e)
+    } finally {
+      setActingSlot('')
+    }
+  }
+
+  const renderLifecycleTopBtns = (
+    slotPrefix: string,
+    appKey: string,
+    displayName: string,
+    isProjectTarget: boolean,
+    running: boolean,
+    container?: ContainerRuntimeStat,
+  ) => {
+    const targetBusy = actingSlot.startsWith(`${slotPrefix}::`)
+    if (!running) {
+      const tip = isProjectTarget ? t.lifecycle.startProject : t.lifecycle.startContainer
+      const confirmText = (
+        isProjectTarget ? t.lifecycle.confirmStartProject : t.lifecycle.confirmStart
+      ).replace('{name}', displayName)
+      return (
+        <Space size={2}>
+          <Popconfirm
+            placement="left"
+            title={confirmText}
+            okText={t.lifecycle.ok}
+            cancelText={t.lifecycle.cancel}
+            onConfirm={(e) => {
+              e?.stopPropagation()
+              return executeLifecycle(
+                slotPrefix,
+                'start',
+                appKey,
+                displayName,
+                isProjectTarget,
+                container,
+              )
+            }}
+            onCancel={(e) => e?.stopPropagation()}
+            onPopupClick={(e) => e.stopPropagation()}
+          >
+            <Tooltip title={tip}>
+              <Button
+                type="text"
+                size="small"
+                aria-label={tip}
+                loading={actingSlot === `${slotPrefix}::start`}
+                disabled={targetBusy && actingSlot !== `${slotPrefix}::start`}
+                icon={<CaretRightOutlined />}
+                onClick={(e) => e.stopPropagation()}
+                style={{ color: token.colorSuccess }}
+              />
+            </Tooltip>
+          </Popconfirm>
+        </Space>
+      )
+    }
+
+    const restartTip = isProjectTarget ? t.lifecycle.restartProject : t.lifecycle.restartContainer
+    const stopTip = isProjectTarget ? t.lifecycle.stopProject : t.lifecycle.stopContainer
+    const restartConfirm = (
+      isProjectTarget ? t.lifecycle.confirmRestartProject : t.lifecycle.confirmRestart
+    ).replace('{name}', displayName)
+    const stopConfirm = (
+      isProjectTarget ? t.lifecycle.confirmStopProject : t.lifecycle.confirmStop
+    ).replace('{name}', displayName)
+
+    return (
+      <Space size={2}>
+        <Popconfirm
+          placement="left"
+          title={restartConfirm}
+          okText={t.lifecycle.ok}
+          cancelText={t.lifecycle.cancel}
+          onConfirm={(e) => {
+            e?.stopPropagation()
+            return executeLifecycle(
+              slotPrefix,
+              'restart',
+              appKey,
+              displayName,
+              isProjectTarget,
+              container,
+            )
+          }}
+          onCancel={(e) => e?.stopPropagation()}
+          onPopupClick={(e) => e.stopPropagation()}
+        >
+          <Tooltip title={restartTip}>
+            <Button
+              type="text"
+              size="small"
+              aria-label={restartTip}
+              loading={actingSlot === `${slotPrefix}::restart`}
+              disabled={targetBusy && actingSlot !== `${slotPrefix}::restart`}
+              icon={<ReloadOutlined />}
+              onClick={(e) => e.stopPropagation()}
+              style={{ color: token.colorTextSecondary }}
+            />
+          </Tooltip>
+        </Popconfirm>
+
+        <Popconfirm
+          placement="left"
+          title={stopConfirm}
+          okText={t.lifecycle.ok}
+          cancelText={t.lifecycle.cancel}
+          okButtonProps={{ danger: true }}
+          onConfirm={(e) => {
+            e?.stopPropagation()
+            return executeLifecycle(
+              slotPrefix,
+              'stop',
+              appKey,
+              displayName,
+              isProjectTarget,
+              container,
+            )
+          }}
+          onCancel={(e) => e?.stopPropagation()}
+          onPopupClick={(e) => e.stopPropagation()}
+        >
+          <Tooltip title={stopTip}>
+            <Button
+              type="text"
+              size="small"
+              aria-label={stopTip}
+              loading={actingSlot === `${slotPrefix}::stop`}
+              disabled={targetBusy && actingSlot !== `${slotPrefix}::stop`}
+              icon={<PoweroffOutlined />}
+              onClick={(e) => e.stopPropagation()}
+              style={{ color: token.colorWarning }}
+            />
+          </Tooltip>
+        </Popconfirm>
+      </Space>
+    )
+  }
+
   if (!hostsQuery.isPending && hosts.length === 0) {
     return (
       <Card style={{ textAlign: 'center', padding: '48px 16px' }}>
@@ -819,10 +1003,20 @@ export default function ContainersPage() {
                       <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                         -
                       </Typography.Text>
+                    ) : !canDelete ? (
+                      <Space size={2}>{renderOpenIconBtn(appUrl)}</Space>
                     ) : (
-                      <Space size={2}>
-                        {renderOpenIconBtn(appUrl)}
-                        {canDelete && (
+                      <Flex vertical align="flex-end" gap={2}>
+                        {renderLifecycleTopBtns(
+                          `single::${app.key}`,
+                          app.key,
+                          appTitle,
+                          false,
+                          isRunning,
+                          c,
+                        )}
+                        <Space size={2}>
+                          {renderOpenIconBtn(appUrl)}
                           <Tooltip
                             title={
                               app.source === 'compose' || app.source === 'dsm_project'
@@ -843,8 +1037,8 @@ export default function ContainersPage() {
                               onClick={() => setDeletingApp(app)}
                             />
                           </Tooltip>
-                        )}
-                      </Space>
+                        </Space>
+                      </Flex>
                     )}
                   </Col>
                 </Row>
@@ -1007,10 +1201,26 @@ export default function ContainersPage() {
                       <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                         -
                       </Typography.Text>
-                    ) : (
+                    ) : !canDeleteProject ? (
                       <Space size={2} onClick={(e) => e.stopPropagation()}>
                         {renderOpenIconBtn(appUrl)}
-                        {canDeleteProject && (
+                      </Space>
+                    ) : (
+                      <Flex
+                        vertical
+                        align="flex-end"
+                        gap={2}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {renderLifecycleTopBtns(
+                          `proj::${app.key}`,
+                          app.key,
+                          appTitle,
+                          true,
+                          app.runningCount > 0,
+                        )}
+                        <Space size={2}>
+                          {renderOpenIconBtn(appUrl)}
                           <Tooltip title={t.containers.deleteProjectBtn}>
                             <Button
                               type="text"
@@ -1021,8 +1231,8 @@ export default function ContainersPage() {
                               onClick={() => setDeletingApp(app)}
                             />
                           </Tooltip>
-                        )}
-                      </Space>
+                        </Space>
+                      </Flex>
                     )}
                   </Col>
                 </Row>
@@ -1130,7 +1340,30 @@ export default function ContainersPage() {
                         </Col>
                         <Col {...colSpan.image}>{renderImageCell(c.image)}</Col>
                         <Col {...colSpan.action} style={{ textAlign: 'right' }}>
-                          {renderOpenIconBtn(cUrl)}
+                          {!canDeleteProject ? (
+                            renderOpenIconBtn(cUrl)
+                          ) : cUrl ? (
+                            <Flex vertical align="flex-end" gap={2}>
+                              {renderLifecycleTopBtns(
+                                `child::${app.key}::${c.id || c.name}`,
+                                app.key,
+                                cTitle,
+                                false,
+                                isRunning,
+                                c,
+                              )}
+                              <Space size={2}>{renderOpenIconBtn(cUrl)}</Space>
+                            </Flex>
+                          ) : (
+                            renderLifecycleTopBtns(
+                              `child::${app.key}::${c.id || c.name}`,
+                              app.key,
+                              cTitle,
+                              false,
+                              isRunning,
+                              c,
+                            )
+                          )}
                         </Col>
                       </Row>
                     )

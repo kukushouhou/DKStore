@@ -62,6 +62,7 @@ type Job struct {
 	ErrorCode          string                `json:"errorCode,omitempty"`
 	ErrorMsg           string                `json:"errorMsg,omitempty"`
 	rawErrorMsg        string
+	startAfter         *bool
 	Logs               string                `json:"logs,omitempty"`
 	LogChunk           string                `json:"logChunk,omitempty"`
 	LogOffset          int                   `json:"logOffset,omitempty"`
@@ -94,6 +95,7 @@ type UpdateItemRequest struct {
 	PolicyMode    string `json:"policyMode,omitempty"` // "" | "all" | "skip_latest" | "prefix" | "forever"
 	PolicyPrefix  string `json:"policyPrefix,omitempty"`
 	SkipTargetTag string `json:"skipTargetTag,omitempty"`
+	StartAfter    *bool  `json:"startAfter,omitempty"`
 }
 
 // ComposeUpdateRequest 是整项目/单容器 YAML 按新版配置更新的异步任务请求（附录 E.4）。
@@ -107,6 +109,7 @@ type ComposeUpdateRequest struct {
 	ConfirmRemoveServices bool     `json:"confirmRemoveServices,omitempty"`
 	DeleteRemovedImages   bool     `json:"deleteRemovedImages,omitempty"`
 	DeleteRemovedFileIDs  []string `json:"deleteRemovedFileIds,omitempty"`
+	StartAfter            *bool    `json:"startAfter,omitempty"`
 }
 
 // StandaloneConfigUpdateRequest 是无 YAML 独立容器按新版配置（环境变量 + 端口映射）更新的异步任务请求（附录 E.4）。
@@ -116,6 +119,7 @@ type StandaloneConfigUpdateRequest struct {
 	PolicyMode    string                 `json:"policyMode,omitempty"`
 	PolicyPrefix  string                 `json:"policyPrefix,omitempty"`
 	SkipTargetTag string                 `json:"skipTargetTag,omitempty"`
+	StartAfter    *bool                  `json:"startAfter,omitempty"`
 	Env           []platform.EnvVar      `json:"env"`
 	Ports         []platform.PortBinding `json:"ports"`
 }
@@ -522,6 +526,7 @@ func (s *Service) prepareUpgradeJob(ctx context.Context, item UpdateItemRequest,
 		RollbackRef:        rollbackRef,
 		RollbackReason:     rollbackReason,
 		RollbackReasonText: i18n.FormatRollbackReason(lang, rollbackReason),
+		startAfter:         item.StartAfter,
 		StartedAt:          now,
 	}
 	initHeader := formatJobHeader(job)
@@ -877,6 +882,7 @@ func (s *Service) StartComposeUpdate(ctx context.Context, req ComposeUpdateReque
 		RollbackRef:        rollbackRef,
 		RollbackReason:     rollbackReason,
 		RollbackReasonText: i18n.FormatRollbackReason(lang, rollbackReason),
+		startAfter:         req.StartAfter,
 		StartedAt:          now,
 	}
 	initHeader := formatJobHeader(job)
@@ -892,6 +898,7 @@ func (s *Service) StartComposeUpdate(ctx context.Context, req ComposeUpdateReque
 		ConfirmRemoveServices: req.ConfirmRemoveServices,
 		DeleteRemovedImages:   req.DeleteRemovedImages,
 		DeleteRemovedFileIDs:  append([]string(nil), req.DeleteRemovedFileIDs...),
+		StartAfter:            req.StartAfter,
 	})
 	return &job, nil
 }
@@ -993,6 +1000,7 @@ func (s *Service) StartStandaloneConfigUpdate(ctx context.Context, req Standalon
 		PolicyMode:    strings.TrimSpace(req.PolicyMode),
 		PolicyPrefix:  strings.TrimSpace(req.PolicyPrefix),
 		SkipTargetTag: strings.TrimSpace(req.SkipTargetTag),
+		StartAfter:    req.StartAfter,
 	}
 	j, alreadyRunning, prevFindingVer, err := s.prepareUpgradeJob(ctx, item, lang)
 	if err != nil {
@@ -1330,6 +1338,7 @@ func (s *Service) executeJob(j Job) {
 		TargetImageRef:  j.TargetImageRef,
 		RegistryAuthB64: regAuth,
 		LayerSizes:      layerSizes,
+		StartAfter:      j.startAfter,
 	}, func(p platform.PullProgress) {
 		tracker.handleProgress(ctx, &j, p)
 	})
@@ -1488,6 +1497,7 @@ func (s *Service) executeStandaloneConfigJob(j Job, env []platform.EnvVar, ports
 		TargetImageRef:  j.TargetImageRef,
 		RegistryAuthB64: regAuth,
 		LayerSizes:      layerSizes,
+		StartAfter:      j.startAfter,
 		Env:             env,
 		Ports:           ports,
 	}, func(p platform.PullProgress) {
@@ -1553,9 +1563,12 @@ func (s *Service) finalizeSucceededServiceJob(j *Job, tracker *jobProgressTracke
 	_, _ = s.st.DB.ExecContext(fCtx, `
 		UPDATE service
 		SET image_ref=?, image_id=?, repo_digest=CASE WHEN ?<>'' THEN ? ELSE repo_digest END,
+		    state=CASE WHEN ?<>'' THEN ? ELSE state END,
 		    current_tags_json=?, updated_at=?
 		WHERE key=?`,
-		j.TargetImageRef, j.NewImageID, j.NewRepoDigest, j.NewRepoDigest, string(targetTagsJSON), finished, j.ServiceKey,
+		j.TargetImageRef, j.NewImageID, j.NewRepoDigest, j.NewRepoDigest,
+		res.ContainerState, res.ContainerState,
+		string(targetTagsJSON), finished, j.ServiceKey,
 	)
 	_, _ = s.st.DB.ExecContext(fCtx, `
 		UPDATE finding
@@ -1564,6 +1577,9 @@ func (s *Service) finalizeSucceededServiceJob(j *Job, tracker *jobProgressTracke
 		WHERE service_key=?`,
 		newDisplayVer, newResolvedTag, finished, j.ServiceKey,
 	)
+	if s.hosts != nil {
+		s.hosts.RefreshRuntimeAsync(j.HostID)
+	}
 	s.broadcast(*j)
 }
 

@@ -8,6 +8,7 @@ import {
   Dropdown,
   Flex,
   Modal,
+  Popconfirm,
   Progress,
   Space,
   Tag,
@@ -23,10 +24,12 @@ import {
   ExportOutlined,
   SyncOutlined,
 } from '@ant-design/icons'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   api,
   showApiError,
   type AppCardItem,
+  type LifecycleAction,
   type ServiceItem,
   type UpdateJobItem,
 } from '../api/client'
@@ -44,6 +47,7 @@ import {
   resolveHomeCardUrl,
 } from './metaUtils'
 import ProjectUpdateModal from './ProjectUpdateModal'
+import StoppedUpdateModal from './StoppedUpdateModal'
 import VersionPickerModal from './VersionPickerModal'
 import { unwrapConcreteVersion } from './versionUtils'
 
@@ -78,6 +82,7 @@ export default function AppCard({
 }: AppCardProps) {
   const { token } = theme.useToken()
   const { t } = useI18n()
+  const qc = useQueryClient()
 
   const activeUpdateJobs = useUIStore((s) => s.activeUpdateJobs)
   const lastFinishedJobs = useUIStore((s) => s.lastFinishedJobs)
@@ -95,6 +100,10 @@ export default function AppCard({
   const [detailOpen, setDetailOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [cautionTargetSvc, setCautionTargetSvc] = useState<ServiceItem | null>(null)
+  const [stoppedUpdateSvc, setStoppedUpdateSvc] = useState<ServiceItem | null>(null)
+  const [stoppedLoadingChoice, setStoppedLoadingChoice] = useState<'keep' | 'start' | null>(null)
+  const [pendingLifecycleAction, setPendingLifecycleAction] = useState<LifecycleAction | null>(null)
+  const [lifecycleSubmitting, setLifecycleSubmitting] = useState(false)
   const [updatingSvcKey, setUpdatingSvcKey] = useState('')
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null)
   const [restoring, setRestoring] = useState(false)
@@ -208,20 +217,40 @@ export default function AppCard({
     }
   }
 
-  const triggerSingleServiceUpdate = async (svc: ServiceItem) => {
+  const isSvcNotRunning = (svc: ServiceItem | null | undefined): boolean =>
+    Boolean(svc?.state && svc.state.trim() && svc.state !== 'running')
+
+  const triggerSingleServiceUpdate = async (svc: ServiceItem, startAfter?: boolean) => {
     setUpdatingSvcKey(svc.key)
+    if (startAfter !== undefined) {
+      setStoppedLoadingChoice(startAfter ? 'start' : 'keep')
+    }
     try {
-      const res = await api.startUpdates([svc.key])
+      const res =
+        startAfter !== undefined
+          ? await api.startUpdates({ items: [{ serviceKey: svc.key, startAfter }] })
+          : await api.startUpdates([svc.key])
       if (res.items && res.items[0]) {
         upsertUpdateJob(res.items[0])
       }
       message.info(t.home.updating)
+      setStoppedUpdateSvc(null)
     } catch (e) {
       showApiError(e)
     } finally {
       setUpdatingSvcKey('')
+      setStoppedLoadingChoice(null)
       setCautionTargetSvc(null)
     }
+  }
+
+  const requestSingleServiceUpdate = (svc: ServiceItem) => {
+    if (isSvcNotRunning(svc)) {
+      setCautionTargetSvc(null)
+      setStoppedUpdateSvc(svc)
+      return
+    }
+    void triggerSingleServiceUpdate(svc)
   }
 
   const handleRetryFailedJob = async (jobId: string) => {
@@ -252,7 +281,7 @@ export default function AppCard({
       setCautionTargetSvc(primaryService)
       return
     }
-    triggerSingleServiceUpdate(primaryService)
+    requestSingleServiceUpdate(primaryService)
   }
 
   const handleUpdateByConfigClick = useCallback(() => {
@@ -267,10 +296,90 @@ export default function AppCard({
     }
   }, [isMultiContainer, primaryService])
 
+  const cardServicesPool = useMemo(
+    () => (app.allServices?.length ? app.allServices : app.services),
+    [app.allServices, app.services],
+  )
+  const cardRunning = useMemo(() => {
+    const withState = cardServicesPool.filter((s) => Boolean(s.state && s.state.trim()))
+    if (withState.length === 0) return true
+    return withState.some((s) => s.state === 'running')
+  }, [cardServicesPool])
+
+  const handleConfirmLifecycle = async () => {
+    if (!pendingLifecycleAction) return
+    const action = pendingLifecycleAction
+    setLifecycleSubmitting(true)
+    try {
+      await api.controlAppLifecycle({
+        appKey: app.key,
+        action,
+      })
+      const msgTpl = isMultiContainer
+        ? action === 'start'
+          ? t.lifecycle.startedProjectMsg
+          : action === 'stop'
+            ? t.lifecycle.stoppedProjectMsg
+            : t.lifecycle.restartedProjectMsg
+        : action === 'start'
+          ? t.lifecycle.startedMsg
+          : action === 'stop'
+            ? t.lifecycle.stoppedMsg
+            : t.lifecycle.restartedMsg
+      message.success(msgTpl.replace('{name}', displayTitle))
+      setPendingLifecycleAction(null)
+      void qc.invalidateQueries({ queryKey: ['containers'] })
+      void qc.invalidateQueries({ queryKey: ['containers-fast'] })
+      void qc.invalidateQueries({ queryKey: ['containers-cached'] })
+      onChanged()
+    } catch (e) {
+      showApiError(e)
+    } finally {
+      setLifecycleSubmitting(false)
+    }
+  }
+
+  const lifecyclePopTitle = useMemo(() => {
+    if (!pendingLifecycleAction) return ''
+    const tpl = isMultiContainer
+      ? pendingLifecycleAction === 'start'
+        ? t.lifecycle.confirmStartProject
+        : pendingLifecycleAction === 'stop'
+          ? t.lifecycle.confirmStopProject
+          : t.lifecycle.confirmRestartProject
+      : pendingLifecycleAction === 'start'
+        ? t.lifecycle.confirmStart
+        : pendingLifecycleAction === 'stop'
+          ? t.lifecycle.confirmStop
+          : t.lifecycle.confirmRestart
+    return tpl.replace('{name}', displayTitle)
+  }, [displayTitle, isMultiContainer, pendingLifecycleAction, t.lifecycle])
+
   const deleteMenuLabel = isProjectApp ? t.home.deleteProjectMenu : t.home.deleteContainerMenu
   const canEditConfig = isMultiContainer || Boolean(primaryService)
   const extendedMenuItems = useMemo(
     () => [
+      ...(cardRunning
+        ? [
+            {
+              key: 'restart',
+              label: isMultiContainer ? t.lifecycle.restartProject : t.lifecycle.restartContainer,
+              onClick: () => setPendingLifecycleAction('restart'),
+            },
+            {
+              key: 'stop',
+              label: isMultiContainer ? t.lifecycle.stopProject : t.lifecycle.stopContainer,
+              onClick: () => setPendingLifecycleAction('stop'),
+            },
+          ]
+        : [
+            {
+              key: 'start',
+              label: isMultiContainer ? t.lifecycle.startProject : t.lifecycle.startContainer,
+              onClick: () => setPendingLifecycleAction('start'),
+            },
+          ]),
+      { type: 'divider' as const },
       ...(canEditConfig
         ? [
             {
@@ -288,7 +397,20 @@ export default function AppCard({
         onClick: () => setDeleteOpen(true),
       },
     ],
-    [canEditConfig, deleteMenuLabel, handleUpdateByConfigClick, t.home.updateByNewConfigMenu],
+    [
+      canEditConfig,
+      cardRunning,
+      deleteMenuLabel,
+      handleUpdateByConfigClick,
+      isMultiContainer,
+      t.home.updateByNewConfigMenu,
+      t.lifecycle.restartContainer,
+      t.lifecycle.restartProject,
+      t.lifecycle.startContainer,
+      t.lifecycle.startProject,
+      t.lifecycle.stopContainer,
+      t.lifecycle.stopProject,
+    ],
   )
 
   const handleRestoreReminder = async () => {
@@ -767,46 +889,63 @@ export default function AppCard({
                   {t.home.restoreReminder}
                 </Button>
               )}
-              {app.source !== 'vendor_managed' &&
-                (primaryService && primaryService.kind !== 'uncomparable' ? (
-                  <Space.Compact size="small">
-                    <Button
-                      disabled={updatingNow}
-                      onClick={() => {
-                        setPickerInitialTab('version')
-                        setPickerSvc(primaryService)
-                      }}
-                    >
-                      {t.home.switchVersion}
-                    </Button>
+              {app.source !== 'vendor_managed' && (
+                <Popconfirm
+                  open={Boolean(pendingLifecycleAction)}
+                  placement="topRight"
+                  title={lifecyclePopTitle}
+                  okText={t.lifecycle.ok}
+                  cancelText={t.lifecycle.cancel}
+                  okButtonProps={{
+                    danger: pendingLifecycleAction === 'stop',
+                    loading: lifecycleSubmitting,
+                  }}
+                  onConfirm={handleConfirmLifecycle}
+                  onCancel={() => {
+                    if (!lifecycleSubmitting) setPendingLifecycleAction(null)
+                  }}
+                >
+                  {primaryService && primaryService.kind !== 'uncomparable' ? (
+                    <Space.Compact size="small">
+                      <Button
+                        disabled={updatingNow || lifecycleSubmitting}
+                        onClick={() => {
+                          setPickerInitialTab('version')
+                          setPickerSvc(primaryService)
+                        }}
+                      >
+                        {t.home.switchVersion}
+                      </Button>
+                      <Dropdown
+                        trigger={['click']}
+                        placement="bottomRight"
+                        disabled={updatingNow || lifecycleSubmitting}
+                        menu={{ items: extendedMenuItems }}
+                      >
+                        <Button
+                          disabled={updatingNow || lifecycleSubmitting}
+                          aria-label={t.home.moreActionsAria}
+                          icon={<DownOutlined />}
+                        />
+                      </Dropdown>
+                    </Space.Compact>
+                  ) : (
                     <Dropdown
                       trigger={['click']}
                       placement="bottomRight"
-                      disabled={updatingNow}
+                      disabled={updatingNow || lifecycleSubmitting}
                       menu={{ items: extendedMenuItems }}
                     >
                       <Button
-                        disabled={updatingNow}
+                        size="small"
+                        disabled={updatingNow || lifecycleSubmitting}
                         aria-label={t.home.moreActionsAria}
                         icon={<DownOutlined />}
                       />
                     </Dropdown>
-                  </Space.Compact>
-                ) : (
-                  <Dropdown
-                    trigger={['click']}
-                    placement="bottomRight"
-                    disabled={updatingNow}
-                    menu={{ items: extendedMenuItems }}
-                  >
-                    <Button
-                      size="small"
-                      disabled={updatingNow}
-                      aria-label={t.home.moreActionsAria}
-                      icon={<DownOutlined />}
-                    />
-                  </Dropdown>
-                ))}
+                  )}
+                </Popconfirm>
+              )}
             </Space>
           ) : (
             <Space size={8} style={{ flexShrink: 0 }}>
@@ -823,28 +962,45 @@ export default function AppCard({
               ) : (
                 /* 统一组合主按钮 [ 更新 | ▾ ] */
                 <ConfigProvider theme={cautionBtnTheme}>
-                  <Space.Compact size="small">
-                    <Button
-                      type="primary"
-                      loading={updatingNow}
-                      onClick={handleUpdateClick}
-                    >
-                      {updatingNow ? t.home.updating : t.home.updateBtn}
-                    </Button>
-                    <Dropdown
-                      trigger={['click']}
-                      placement="bottomRight"
-                      disabled={updatingNow}
-                      menu={{ items: extendedMenuItems }}
-                    >
+                  <Popconfirm
+                    open={Boolean(pendingLifecycleAction)}
+                    placement="topRight"
+                    title={lifecyclePopTitle}
+                    okText={t.lifecycle.ok}
+                    cancelText={t.lifecycle.cancel}
+                    okButtonProps={{
+                      danger: pendingLifecycleAction === 'stop',
+                      loading: lifecycleSubmitting,
+                    }}
+                    onConfirm={handleConfirmLifecycle}
+                    onCancel={() => {
+                      if (!lifecycleSubmitting) setPendingLifecycleAction(null)
+                    }}
+                  >
+                    <Space.Compact size="small">
                       <Button
                         type="primary"
-                        disabled={updatingNow}
-                        aria-label={t.home.moreActionsAria}
-                        icon={<DownOutlined />}
-                      />
-                    </Dropdown>
-                  </Space.Compact>
+                        loading={updatingNow}
+                        disabled={lifecycleSubmitting}
+                        onClick={handleUpdateClick}
+                      >
+                        {updatingNow ? t.home.updating : t.home.updateBtn}
+                      </Button>
+                      <Dropdown
+                        trigger={['click']}
+                        placement="bottomRight"
+                        disabled={updatingNow || lifecycleSubmitting}
+                        menu={{ items: extendedMenuItems }}
+                      >
+                        <Button
+                          type="primary"
+                          disabled={updatingNow || lifecycleSubmitting}
+                          aria-label={t.home.moreActionsAria}
+                          icon={<DownOutlined />}
+                        />
+                      </Dropdown>
+                    </Space.Compact>
+                  </Popconfirm>
                 </ConfigProvider>
               )}
             </Space>
@@ -868,7 +1024,7 @@ export default function AppCard({
         okText={t.home.cautionConfirmBtn}
         cancelText={t.ignoreModal.cancel}
         okButtonProps={{ danger: true, loading: Boolean(updatingSvcKey) }}
-        onOk={() => cautionTargetSvc && triggerSingleServiceUpdate(cautionTargetSvc)}
+        onOk={() => cautionTargetSvc && requestSingleServiceUpdate(cautionTargetSvc)}
         onCancel={() => setCautionTargetSvc(null)}
       >
         <Flex vertical gap="middle">
@@ -880,6 +1036,24 @@ export default function AppCard({
           <Typography.Text>{t.home.cautionConfirmDesc}</Typography.Text>
         </Flex>
       </Modal>
+
+      <StoppedUpdateModal
+        open={Boolean(stoppedUpdateSvc)}
+        title={t.lifecycle.stoppedSingleTitle}
+        description={t.lifecycle.stoppedSingleDesc.replace(
+          '{name}',
+          stoppedUpdateSvc?.name && stoppedUpdateSvc.name !== 'main'
+            ? stoppedUpdateSvc.name
+            : displayTitle,
+        )}
+        loadingChoice={stoppedLoadingChoice}
+        onConfirm={(startAfter) => {
+          if (stoppedUpdateSvc) {
+            void triggerSingleServiceUpdate(stoppedUpdateSvc, startAfter)
+          }
+        }}
+        onCancel={() => setStoppedUpdateSvc(null)}
+      />
 
       {/* 双栏版本选择与按新版配置更新一体化弹窗 */}
       <VersionPickerModal

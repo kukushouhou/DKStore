@@ -299,6 +299,20 @@ func (a *Adapter) recreateContainerViaEngineWithOverrides(
 	overrideEnv *[]platform.EnvVar,
 	overridePorts *[]platform.PortBinding,
 ) (newID string, err error) {
+	return a.recreateContainerViaEngineWithState(ctx, execTr, oldID, rawInspect, targetImageRef, wasRunning, wasRunning, overrideEnv, overridePorts)
+}
+
+func (a *Adapter) recreateContainerViaEngineWithState(
+	ctx context.Context,
+	execTr transport.ExecutableTransport,
+	oldID string,
+	rawInspect map[string]any,
+	targetImageRef string,
+	wasRunning bool,
+	wantRunning bool,
+	overrideEnv *[]platform.EnvVar,
+	overridePorts *[]platform.PortBinding,
+) (newID string, err error) {
 	rawName, _ := rawInspect["Name"].(string)
 	origName := strings.TrimPrefix(rawName, "/")
 	if origName == "" {
@@ -477,8 +491,8 @@ func (a *Adapter) recreateContainerViaEngineWithOverrides(
 		}
 	}
 
-	// 5. 若原容器原本处于运行状态，启动新容器；若原容器原本处于停止状态，保持停止（立项文档 §7.2）
-	if wasRunning {
+	// 5. 按目标运行状态启动新容器（默认继承原容器运行状态，或按用户显式选择更新后启动/保持停止）
+	if wantRunning {
 		stResp, err := execTr.RequestDocker(ctx, http.MethodPost, "/containers/"+url.PathEscape(newID)+"/start", nil, nil)
 		if err != nil {
 			removeNew(newID)

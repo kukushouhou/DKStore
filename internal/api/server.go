@@ -93,6 +93,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/apps/delete-preview", s.requireAuth(s.handlePreviewDeleteApp))
 	mux.HandleFunc("POST /api/v1/apps/delete-preview", s.requireAuth(s.handlePreviewDeleteApp))
 	mux.HandleFunc("POST /api/v1/apps/delete", s.requireAuth(s.handleDeleteApp))
+	mux.HandleFunc("POST /api/v1/apps/lifecycle", s.requireAuth(s.handleAppLifecycle))
 	mux.HandleFunc("GET /api/v1/services/tags", s.requireAuth(s.handleSearchServiceTags))
 	mux.HandleFunc("GET /api/v1/services/{key}/tags", s.requireAuth(s.handleSearchServiceTags))
 	mux.HandleFunc("GET /api/v1/services/config", s.requireAuth(s.handleGetServiceConfig))
@@ -848,6 +849,7 @@ func (s *Server) handleUpdateAppCompose(w http.ResponseWriter, r *http.Request) 
 		ConfirmRemoveServices bool     `json:"confirmRemoveServices"`
 		DeleteRemovedImages   bool     `json:"deleteRemovedImages"`
 		DeleteRemovedFileIDs  []string `json:"deleteRemovedFileIds"`
+		StartAfter            *bool    `json:"startAfter"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
@@ -878,6 +880,7 @@ func (s *Server) handleUpdateAppCompose(w http.ResponseWriter, r *http.Request) 
 		ConfirmRemoveServices: body.ConfirmRemoveServices,
 		DeleteRemovedImages:   body.DeleteRemovedImages,
 		DeleteRemovedFileIDs:  body.DeleteRemovedFileIDs,
+		StartAfter:            body.StartAfter,
 	}, lang)
 	if err != nil {
 		var csrErr *platform.ComposeServicesRemovedError
@@ -1032,6 +1035,33 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = meta.DeleteByApp(r.Context(), s.d.Store, req.AppKey)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "result": res})
+}
+
+func (s *Server) handleAppLifecycle(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
+	if s.d.Updater == nil {
+		writeError(w, lang, http.StatusInternalServerError, "updater_unavailable", "")
+		return
+	}
+	var req updater.AppLifecycleSubmitRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if strings.TrimSpace(req.AppKey) == "" || strings.TrimSpace(req.Action) == "" {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", "missing appKey or action")
+		return
+	}
+	if err := s.d.Updater.ControlLifecycle(r.Context(), req, lang); err != nil {
+		var ee *i18n.EngineError
+		if errors.As(err, &ee) && ee.Key == i18n.MsgDeleteAppNotFound {
+			writeError(w, lang, http.StatusNotFound, "not_found", i18n.LocalizeError(lang, err))
+			return
+		}
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (s *Server) handleGetUpdateJob(w http.ResponseWriter, r *http.Request) {

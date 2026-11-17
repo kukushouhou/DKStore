@@ -414,11 +414,22 @@ export interface StartUpdateItemInput {
   policyMode?: UpdatePolicyMode
   policyPrefix?: string
   skipTargetTag?: string
+  startAfter?: boolean
 }
 
 export interface StartUpdatesPayload {
   serviceKeys?: string[]
   items?: StartUpdateItemInput[]
+}
+
+export type LifecycleAction = 'start' | 'stop' | 'restart'
+
+export interface AppLifecyclePayload {
+  appKey: string
+  containerId?: string
+  containerName?: string
+  serviceName?: string
+  action: LifecycleAction
 }
 
 export interface AppComposeResponse {
@@ -439,6 +450,7 @@ export interface UpdateAppComposePayload {
   confirmRemoveServices?: boolean
   deleteRemovedImages?: boolean
   deleteRemovedFileIds?: string[]
+  startAfter?: boolean
 }
 
 export interface DeleteFileItem {
@@ -515,6 +527,7 @@ export interface UpdateServiceConfigPayload {
   policyMode?: string
   policyPrefix?: string
   skipTargetTag?: string
+  startAfter?: boolean
   env: ServiceEnvItem[]
   ports: ServicePortItem[]
   volumes?: ServiceVolumeItem[]
@@ -731,6 +744,11 @@ export const api = {
     }),
   deleteApp: (payload: DeleteAppPayload) =>
     request<{ ok: boolean; result: DeleteAppResult }>('/apps/delete', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    }),
+  controlAppLifecycle: (payload: AppLifecyclePayload) =>
+    request<{ ok: boolean }>('/apps/lifecycle', {
       method: 'POST',
       body: JSON.stringify(payload),
     }),

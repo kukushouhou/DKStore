@@ -23,6 +23,7 @@ import { useI18n } from '../i18n'
 import { useUIStore } from '../store/ui'
 import { detectComposeOverwriteRisks } from './composeGuard'
 import DeleteAppModal from './DeleteAppModal'
+import StoppedUpdateModal from './StoppedUpdateModal'
 import VersionPickerModal, { type VersionPickSelection } from './VersionPickerModal'
 
 interface ProjectUpdateModalProps {
@@ -77,7 +78,7 @@ function ProjectUpdateModalBody({
   onUpdated,
 }: ProjectUpdateModalProps) {
   const { token } = theme.useToken()
-  const { t } = useI18n()
+  const { locale, t } = useI18n()
   const upsertUpdateJob = useUIStore((s) => s.upsertUpdateJob)
 
   const services = useMemo(
@@ -114,6 +115,18 @@ function ProjectUpdateModalBody({
     removedServices: string[]
     addedServices: string[]
   } | null>(null)
+  const [stoppedModal, setStoppedModal] = useState<{
+    mode: 'direct' | 'yaml'
+    title: string
+    description: string
+    partial: boolean
+    yamlOpts?: {
+      confirmRemoveServices?: boolean
+      deleteRemovedImages?: boolean
+      deleteRemovedFileIds?: string[]
+    }
+  } | null>(null)
+  const [stoppedChoiceLoading, setStoppedChoiceLoading] = useState<'keep' | 'start' | null>(null)
 
   const loadingYaml = tab === 'yaml' && !yamlLoaded
 
@@ -162,20 +175,31 @@ function ProjectUpdateModalBody({
     setCheckedKeys(new Set(updatableServices.map((s) => s.key)))
   }
 
-  const handleDirectSubmit = async () => {
+  const isSvcStopped = (svc: ServiceItem): boolean =>
+    Boolean(svc.state && svc.state.trim() && svc.state !== 'running')
+
+  const joinNames = (list: ServiceItem[]): string =>
+    list.map((s) => s.name).join(locale === 'zh-CN' ? '、' : ', ')
+
+  const doDirectSubmit = async (startStopped?: boolean) => {
     const selected = updatableServices.filter((s) => checkedKeys.has(s.key))
     if (selected.length === 0) return
     setSubmittingDirect(true)
+    if (startStopped !== undefined) {
+      setStoppedChoiceLoading(startStopped ? 'start' : 'keep')
+    }
     try {
       const res = await api.startUpdates({
         items: selected.map((s) => {
           const ov = overrides[s.key]
+          const stopped = isSvcStopped(s)
           return {
             serviceKey: s.key,
             targetTag: ov?.targetTag,
             policyMode: ov?.policyMode,
             policyPrefix: ov?.policyPrefix,
             skipTargetTag: ov?.skipTargetTag,
+            startAfter: stopped && startStopped !== undefined ? startStopped : undefined,
           }
         }),
       })
@@ -185,13 +209,38 @@ function ProjectUpdateModalBody({
         }
       }
       message.info(t.home.updating)
+      setStoppedModal(null)
       onUpdated()
       onClose()
     } catch (e) {
       showApiError(e)
     } finally {
       setSubmittingDirect(false)
+      setStoppedChoiceLoading(null)
     }
+  }
+
+  const handleDirectSubmit = () => {
+    const selected = updatableServices.filter((s) => checkedKeys.has(s.key))
+    if (selected.length === 0) return
+    const stoppedSel = selected.filter(isSvcStopped)
+    if (stoppedSel.length === 0) {
+      void doDirectSubmit()
+      return
+    }
+    const allSelStopped = stoppedSel.length === selected.length
+    const names = joinNames(stoppedSel)
+    setStoppedModal({
+      mode: 'direct',
+      title: allSelStopped
+        ? t.lifecycle.stoppedSelectedAllTitle
+        : t.lifecycle.stoppedSelectedPartTitle,
+      description: (allSelStopped
+        ? t.lifecycle.stoppedSelectedAllDesc
+        : t.lifecycle.stoppedSelectedPartDesc
+      ).replace('{names}', names),
+      partial: !allSelStopped,
+    })
   }
 
   const overwriteRisks = useMemo(
@@ -207,6 +256,7 @@ function ProjectUpdateModalBody({
     confirmRemoveServices?: boolean
     deleteRemovedImages?: boolean
     deleteRemovedFileIds?: string[]
+    startAfter?: boolean
   }) => {
     const res = await api.updateAppCompose({
       appKey: app.key,
@@ -214,6 +264,7 @@ function ProjectUpdateModalBody({
       confirmRemoveServices: opts?.confirmRemoveServices,
       deleteRemovedImages: opts?.deleteRemovedImages,
       deleteRemovedFileIds: opts?.deleteRemovedFileIds,
+      startAfter: opts?.startAfter,
     })
     if (res.job) {
       upsertUpdateJob(res.job)
@@ -224,8 +275,48 @@ function ProjectUpdateModalBody({
       }
     }
     message.success(t.projectUpdate.yamlUpdateStarted)
+    setStoppedModal(null)
     onUpdated()
     onClose()
+  }
+
+  const executeYamlWithOptionalPrompt = async (opts?: {
+    confirmRemoveServices?: boolean
+    deleteRemovedImages?: boolean
+    deleteRemovedFileIds?: string[]
+  }) => {
+    const stoppedAll = services.filter(isSvcStopped)
+    if (stoppedAll.length > 0) {
+      const allStopped = stoppedAll.length === services.length
+      const names = joinNames(stoppedAll)
+      setStoppedModal({
+        mode: 'yaml',
+        title: allStopped ? t.lifecycle.stoppedProjectAllTitle : t.lifecycle.stoppedProjectPartTitle,
+        description: allStopped
+          ? t.lifecycle.stoppedProjectAllDesc.replace('{name}', projectTitle)
+          : t.lifecycle.stoppedProjectPartDesc
+              .replace('{name}', projectTitle)
+              .replace('{names}', names),
+        partial: !allStopped,
+        yamlOpts: opts,
+      })
+      return
+    }
+    setSubmittingYaml(true)
+    try {
+      await submitComposeWithOptions(opts)
+    } catch (e) {
+      if (e instanceof ApiError && e.code === 'compose_services_removed' && e.removedServices?.length) {
+        setPendingRemovalConfirm({
+          removedServices: e.removedServices,
+          addedServices: e.addedServices ?? [],
+        })
+        return
+      }
+      showApiError(e)
+    } finally {
+      setSubmittingYaml(false)
+    }
   }
 
   const handleYamlSubmit = async () => {
@@ -240,21 +331,7 @@ function ProjectUpdateModalBody({
       })
       return
     }
-    setSubmittingYaml(true)
-    try {
-      await submitComposeWithOptions()
-    } catch (e) {
-      if (e instanceof ApiError && e.code === 'compose_services_removed' && e.removedServices?.length) {
-        setPendingRemovalConfirm({
-          removedServices: e.removedServices,
-          addedServices: e.addedServices ?? [],
-        })
-        return
-      }
-      showApiError(e)
-    } finally {
-      setSubmittingYaml(false)
-    }
+    await executeYamlWithOptionalPrompt()
   }
 
   const roleBadgeForService = (svc: ServiceItem) => {
@@ -749,7 +826,7 @@ function ProjectUpdateModalBody({
                 addedServices: pendingRemovalConfirm.addedServices,
                 newContent: yamlText,
                 onConfirm: async ({ deleteImages, fileIds }) => {
-                  await submitComposeWithOptions({
+                  await executeYamlWithOptionalPrompt({
                     confirmRemoveServices: true,
                     deleteRemovedImages: deleteImages,
                     deleteRemovedFileIds: fileIds,
@@ -759,6 +836,47 @@ function ProjectUpdateModalBody({
             : undefined
         }
         onClose={() => setPendingRemovalConfirm(null)}
+      />
+
+      <StoppedUpdateModal
+        open={Boolean(stoppedModal)}
+        title={stoppedModal?.title || ''}
+        description={stoppedModal?.description || ''}
+        partial={stoppedModal?.partial}
+        loadingChoice={stoppedChoiceLoading}
+        onConfirm={async (startAfter) => {
+          if (!stoppedModal) return
+          if (stoppedModal.mode === 'direct') {
+            await doDirectSubmit(startAfter)
+            return
+          }
+          setStoppedChoiceLoading(startAfter ? 'start' : 'keep')
+          setSubmittingYaml(true)
+          try {
+            await submitComposeWithOptions({
+              ...stoppedModal.yamlOpts,
+              startAfter,
+            })
+          } catch (e) {
+            if (
+              e instanceof ApiError &&
+              e.code === 'compose_services_removed' &&
+              e.removedServices?.length
+            ) {
+              setStoppedModal(null)
+              setPendingRemovalConfirm({
+                removedServices: e.removedServices,
+                addedServices: e.addedServices ?? [],
+              })
+              return
+            }
+            showApiError(e)
+          } finally {
+            setStoppedChoiceLoading(null)
+            setSubmittingYaml(false)
+          }
+        }}
+        onCancel={() => setStoppedModal(null)}
       />
     </>
   )

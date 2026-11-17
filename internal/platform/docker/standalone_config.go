@@ -132,7 +132,11 @@ func (a *Adapter) UpdateStandaloneConfig(
 			Message: i18n.EngineDetail(i18n.MsgDockerImageChanged, shortID(req.ExpectedImageID), shortID(curImageID)),
 		}
 	}
-	addLog("precheck ok: container=%s image=%s wasRunning=%v", shortID(targetContainerID), shortID(curImageID), wasRunning)
+	wantRunning := wasRunning
+	if req.StartAfter != nil {
+		wantRunning = *req.StartAfter
+	}
+	addLog("precheck ok: container=%s image=%s wasRunning=%v wantRunning=%v", shortID(targetContainerID), shortID(curImageID), wasRunning, wantRunning)
 
 	emit(platform.PullProgress{
 		Phase:      "pulling",
@@ -154,7 +158,7 @@ func (a *Adapter) UpdateStandaloneConfig(
 	})
 	envCopy := append([]platform.EnvVar(nil), req.Env...)
 	portsCopy := append([]platform.PortBinding(nil), req.Ports...)
-	newCID, err := a.recreateContainerViaEngineWithOverrides(ctx, execTr, targetContainerID, rawInspect, req.TargetImageRef, wasRunning, &envCopy, &portsCopy)
+	newCID, err := a.recreateContainerViaEngineWithState(ctx, execTr, targetContainerID, rawInspect, req.TargetImageRef, wasRunning, wantRunning, &envCopy, &portsCopy)
 	if err != nil {
 		return nil, &platform.UpdateError{Code: "recreate_failed", Message: i18n.DetailOf(err)}
 	}
@@ -166,7 +170,7 @@ func (a *Adapter) UpdateStandaloneConfig(
 		Percent:    95,
 		LogChunk:   "Verifying container state & switched image...\r\n",
 	})
-	res, err := a.verifyUpdatedService(ctx, upReq, newImageID, newRepoDigest, wasRunning)
+	res, err := a.verifyUpdatedService(ctx, upReq, newImageID, newRepoDigest, wantRunning)
 	if err != nil {
 		return nil, &platform.UpdateError{Code: "verify_failed", Message: i18n.DetailOf(err)}
 	}
