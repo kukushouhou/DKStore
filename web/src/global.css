@@ -136,3 +136,26 @@ html[data-theme='dark'] .dk-setup-right {
     display: flex !important;
   }
 }
+
+/* 应用卡片底栏原位进度条动态流光 */
+@keyframes dk-progress-shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(220%);
+  }
+}
+
+.dk-card-progress-fill::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.38) 50%,
+    transparent 100%
+  );
+  animation: dk-progress-shimmer 1.6s ease-in-out infinite;
+}

@@ -9,7 +9,6 @@ import {
   Flex,
   Modal,
   Popconfirm,
-  Progress,
   Space,
   Tag,
   Tooltip,
@@ -200,24 +199,38 @@ export default function AppCard({
     return list
   }, [app.key, app.services, lastFinishedJobs, updateQueueJobs])
 
-  const formatPhaseText = (job: UpdateJobItem): string => {
-    switch (job.phase || job.progress?.phase) {
-      case 'precheck':
-        return t.home.phasePrecheck
-      case 'pulling':
-        return (job.progress?.totalLayers ?? 0) === 0 && (job.progress?.downloadedBytes ?? 0) === 0
-          ? t.home.phaseFetchingLayers
-          : t.home.phasePulling
-      case 'recreating':
-        return t.home.phaseRecreating
-      case 'verifying':
-        return t.home.phaseVerifying
-      case 'done':
-        return t.home.phaseDone
-      default:
-        return job.progress?.statusText || job.phase
-    }
-  }
+  const formatPhaseText = useCallback(
+    (job: UpdateJobItem): string => {
+      if (job.status === 'queued') return t.queue.statusQueued
+      switch (job.phase || job.progress?.phase) {
+        case 'precheck':
+          return t.home.phasePrecheck
+        case 'pulling':
+          return (job.progress?.totalLayers ?? 0) === 0 &&
+            (job.progress?.downloadedBytes ?? 0) === 0
+            ? t.home.phaseFetchingLayers
+            : t.home.phasePulling
+        case 'recreating':
+          return t.home.phaseRecreating
+        case 'verifying':
+          return t.home.phaseVerifying
+        case 'done':
+          return t.home.phaseDone
+        default:
+          return job.progress?.statusText || job.phase || t.home.updating
+      }
+    },
+    [
+      t.home.phaseDone,
+      t.home.phaseFetchingLayers,
+      t.home.phasePrecheck,
+      t.home.phasePulling,
+      t.home.phaseRecreating,
+      t.home.phaseVerifying,
+      t.home.updating,
+      t.queue.statusQueued,
+    ],
+  )
 
   const isSvcNotRunning = (svc: ServiceItem | null | undefined): boolean =>
     Boolean(svc?.state && svc.state.trim() && svc.state !== 'running')
@@ -535,6 +548,46 @@ export default function AppCard({
 
   const updatingNow = activeJobsForApp.length > 0 || Boolean(updatingSvcKey)
 
+  const activePrimaryJob: UpdateJobItem | null = useMemo(() => {
+    if (activeJobsForApp.length === 0) return null
+    return activeJobsForApp.find((j) => j.status === 'running') ?? activeJobsForApp[0]
+  }, [activeJobsForApp])
+
+  const activeProgressPercent = useMemo(() => {
+    if (activeJobsForApp.length === 0) return 0
+    const sum = activeJobsForApp.reduce((acc, j) => acc + (j.progress?.percent ?? 0), 0)
+    return Math.max(0, Math.min(100, Math.round(sum / activeJobsForApp.length)))
+  }, [activeJobsForApp])
+
+  const activeStatusLine = useMemo(() => {
+    if (!activePrimaryJob) return t.home.phasePrecheck
+    const svcPrefix =
+      activeJobsForApp.length > 1 &&
+      activePrimaryJob.serviceName &&
+      activePrimaryJob.serviceName !== 'main'
+        ? `${activePrimaryJob.serviceName}: `
+        : ''
+    const phase = formatPhaseText(activePrimaryJob)
+    const prog = activePrimaryJob.progress
+    if ((prog?.totalBytes ?? 0) > 0) {
+      return `${svcPrefix}${phase} · ${formatBytes(prog.downloadedBytes ?? 0)} / ${formatBytes(prog.totalBytes ?? 0)}`
+    }
+    if ((prog?.totalLayers ?? 0) > 0) {
+      return `${svcPrefix}${phase} · ${t.home.layerStat
+        .replace('{done}', String(prog.completedLayers ?? 0))
+        .replace('{total}', String(prog.totalLayers ?? 0))}`
+    }
+    return `${svcPrefix}${phase}`
+  }, [
+    activeJobsForApp.length,
+    activePrimaryJob,
+    formatPhaseText,
+    t.home.layerStat,
+    t.home.phasePrecheck,
+  ])
+
+  const displayTargetVer = activePrimaryJob?.targetVersion || tgtVer
+
   return (
     <>
       <Card
@@ -544,7 +597,6 @@ export default function AppCard({
             padding: '16px 18px',
             display: 'flex',
             flexDirection: 'column',
-            justifyContent: 'space-between',
           },
         }}
         style={{
@@ -654,20 +706,46 @@ export default function AppCard({
           )}
         </div>
 
-        {/* 下半锚定区：中部版本状态 + 升级进度 + 底部操作栏（确保同排有无标签卡片底部基准线齐平） */}
-        <div style={{ marginTop: 14 }}>
-          <div>
-            {isChecking ? (
-              <Tag
-                icon={<SyncOutlined spin />}
-                color="processing"
-                variant="filled"
-                style={{ margin: 0, padding: '3px 10px', fontSize: token.fontSizeSM }}
-              >
-                {t.home.checkingCard}
-              </Tag>
-            ) : isNoUpdate ? (
-              <Flex align="center" justify="space-between" gap={8}>
+        {/* 中部版本状态行（紧接标题区下方，保证同行卡片版本号严格水平对称） */}
+        <div style={{ marginTop: 14, minHeight: 24, display: 'flex', alignItems: 'center' }}>
+          {isChecking ? (
+            <Tag
+              icon={<SyncOutlined spin />}
+              color="processing"
+              variant="filled"
+              style={{ margin: 0, padding: '2px 10px', fontSize: token.fontSizeSM }}
+            >
+              {t.home.checkingCard}
+            </Tag>
+          ) : isNoUpdate ? (
+            updatingNow && activePrimaryJob?.targetVersion ? (
+              <Space size={6} wrap align="center">
+                <Tag
+                  style={{
+                    margin: 0,
+                    fontFamily: token.fontFamilyCode,
+                    fontSize: token.fontSizeSM,
+                    padding: '2px 8px',
+                  }}
+                >
+                  {curVer}
+                </Tag>
+                <ArrowRightOutlined style={{ fontSize: 11, color: token.colorTextTertiary }} />
+                <Button
+                  size="small"
+                  type="primary"
+                  ghost
+                  style={{
+                    fontFamily: token.fontFamilyCode,
+                    fontWeight: 600,
+                    pointerEvents: 'none',
+                  }}
+                >
+                  {activePrimaryJob.targetVersion}
+                </Button>
+              </Space>
+            ) : (
+              <Flex align="center" justify="space-between" gap={8} style={{ width: '100%' }}>
                 <Tag
                   style={{
                     margin: 0,
@@ -730,22 +808,37 @@ export default function AppCard({
                   </Typography.Text>
                 )}
               </Flex>
-            ) : (
-              <Space size={6} wrap align="center">
-                <Tag
-                  style={{
-                    margin: 0,
-                    fontFamily: token.fontFamilyCode,
-                    fontSize: token.fontSizeSM,
-                    padding: '2px 8px',
-                  }}
-                >
-                  {curVer}
-                </Tag>
+            )
+          ) : (
+            <Space size={6} wrap align="center">
+              <Tag
+                style={{
+                  margin: 0,
+                  fontFamily: token.fontFamilyCode,
+                  fontSize: token.fontSizeSM,
+                  padding: '2px 8px',
+                }}
+              >
+                {curVer}
+              </Tag>
 
-                <ArrowRightOutlined style={{ fontSize: 11, color: token.colorTextTertiary }} />
+              <ArrowRightOutlined style={{ fontSize: 11, color: token.colorTextTertiary }} />
 
-                <ConfigProvider theme={cautionBtnTheme}>
+              <ConfigProvider theme={cautionBtnTheme}>
+                {updatingNow ? (
+                  <Button
+                    size="small"
+                    type="primary"
+                    ghost
+                    style={{
+                      fontFamily: token.fontFamilyCode,
+                      fontWeight: 600,
+                      pointerEvents: 'none',
+                    }}
+                  >
+                    {displayTargetVer}
+                  </Button>
+                ) : (
                   <Tooltip title={t.home.pickOtherVersionTip}>
                     <Button
                       size="small"
@@ -765,46 +858,14 @@ export default function AppCard({
                       {tgtVer} <DownOutlined style={{ fontSize: 10 }} />
                     </Button>
                   </Tooltip>
-                </ConfigProvider>
-              </Space>
-            )}
-          </div>
+                )}
+              </ConfigProvider>
+            </Space>
+          )}
+        </div>
 
-          {/* 活跃升级进度条 + 实时查看日志入口 */}
-          {activeJobsForApp.map((job) => (
-            <div key={job.id} style={{ marginTop: 10 }}>
-              <Flex justify="space-between" align="center" gap={6}>
-                <Typography.Text
-                  type="secondary"
-                  ellipsis
-                  style={{ fontSize: token.fontSizeSM, flex: 1, minWidth: 0 }}
-                >
-                  {formatPhaseText(job)}
-                </Typography.Text>
-                <Space size={6} style={{ flexShrink: 0 }}>
-                  {(job.progress?.totalLayers ?? 0) > 0 && (
-                    <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-                      {t.home.layerStat
-                        .replace('{done}', String(job.progress?.completedLayers ?? 0))
-                        .replace('{total}', String(job.progress?.totalLayers ?? 0))}
-                      {(job.progress?.totalBytes ?? 0) > 0
-                        ? ` (${formatBytes(job.progress?.downloadedBytes ?? 0)} / ${formatBytes(job.progress?.totalBytes ?? 0)})`
-                        : ''}
-                    </Typography.Text>
-                  )}
-                  <Typography.Link
-                    onClick={() => setActiveLogJobId(job.id)}
-                    style={{ fontSize: token.fontSizeSM }}
-                  >
-                    {t.home.viewLogs}
-                  </Typography.Link>
-                </Space>
-              </Flex>
-              <Progress percent={job.progress?.percent ?? 0} size="small" status="active" />
-            </div>
-          ))}
-
-          {failedJobsForApp.map((job) => {
+        {!updatingNow &&
+          failedJobsForApp.map((job) => {
             const errBody = job.errorMsg || job.errorCode || ''
             const isLongErr = errBody.length > 68
             const isExpanded = Boolean(expandedErrIds[job.id])
@@ -888,131 +949,130 @@ export default function AppCard({
             )
           })}
 
-          {/* 底部对齐操作栏 */}
-        <Flex
-          align="center"
-          justify="space-between"
-          gap={8}
-          style={{
-            marginTop: 14,
-            paddingTop: 12,
-            borderTop: `1px solid ${token.colorSplit}`,
-            opacity: isChecking ? 0.45 : 1,
-            pointerEvents: isChecking ? 'none' : 'auto',
-          }}
-        >
-          {/* 底栏左侧：更新说明/官方仓库 · 详情 */}
-          <Space
-            size={6}
-            align="center"
-            separator={<Typography.Text type="secondary">·</Typography.Text>}
-            style={{ minWidth: 0 }}
+        {/* 底部固定高度区（37px）：常规操作栏 / 更新中原位实时进度栏（确保更新前后卡片零增高） */}
+        {updatingNow ? (
+          <div
+            style={{
+              height: 37,
+              marginTop: 14,
+              paddingTop: 8,
+              borderTop: `1px solid ${token.colorSplit}`,
+              boxSizing: 'border-box',
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'space-between',
+            }}
           >
-            {releaseUrl && (
+            <Flex align="center" justify="space-between" gap={8} style={{ lineHeight: '16px' }}>
+              <Typography.Text
+                type="secondary"
+                ellipsis={{ tooltip: activeStatusLine }}
+                style={{ fontSize: token.fontSizeSM, lineHeight: '16px', flex: 1, minWidth: 0 }}
+              >
+                {activeStatusLine}
+              </Typography.Text>
+              <Space size={8} align="center" style={{ flexShrink: 0, lineHeight: '16px' }}>
+                <Typography.Text
+                  style={{
+                    fontFamily: token.fontFamilyCode,
+                    fontVariantNumeric: 'tabular-nums',
+                    fontSize: token.fontSizeSM,
+                    lineHeight: '16px',
+                    fontWeight: 500,
+                    color: token.colorText,
+                  }}
+                >
+                  {activeProgressPercent}%
+                </Typography.Text>
+                {activePrimaryJob && (
+                  <Typography.Link
+                    onClick={() => setActiveLogJobId(activePrimaryJob.id)}
+                    style={{ fontSize: token.fontSizeSM, lineHeight: '16px', whiteSpace: 'nowrap' }}
+                  >
+                    {t.home.viewLogs}
+                  </Typography.Link>
+                )}
+              </Space>
+            </Flex>
+
+            <div
+              style={{
+                width: '100%',
+                height: 6,
+                borderRadius: 999,
+                background: token.colorFillSecondary,
+                overflow: 'hidden',
+              }}
+            >
+              <div
+                className={activeProgressPercent > 0 ? 'dk-card-progress-fill' : undefined}
+                style={{
+                  width: `${activeProgressPercent}%`,
+                  height: '100%',
+                  borderRadius: 999,
+                  background: token.colorPrimary,
+                  position: 'relative',
+                  overflow: 'hidden',
+                  transition: 'width 0.24s ease',
+                }}
+              />
+            </div>
+          </div>
+        ) : (
+          <Flex
+            align="center"
+            justify="space-between"
+            gap={8}
+            style={{
+              height: 37,
+              marginTop: 14,
+              paddingTop: 12,
+              borderTop: `1px solid ${token.colorSplit}`,
+              boxSizing: 'border-box',
+              opacity: isChecking ? 0.45 : 1,
+              pointerEvents: isChecking ? 'none' : 'auto',
+            }}
+          >
+            {/* 底栏左侧：更新说明/官方仓库 · 详情 */}
+            <Space
+              size={6}
+              align="center"
+              separator={<Typography.Text type="secondary">·</Typography.Text>}
+              style={{ minWidth: 0 }}
+            >
+              {releaseUrl && (
+                <Typography.Link
+                  href={releaseUrl}
+                  target="_blank"
+                  style={{ fontSize: token.fontSize, whiteSpace: 'nowrap' }}
+                >
+                  {app.links.releases ? t.home.viewReleaseNotes : t.home.viewRepo}
+                </Typography.Link>
+              )}
               <Typography.Link
-                href={releaseUrl}
-                target="_blank"
+                type="secondary"
+                onClick={() => setDetailOpen(true)}
                 style={{ fontSize: token.fontSize, whiteSpace: 'nowrap' }}
               >
-                {app.links.releases ? t.home.viewReleaseNotes : t.home.viewRepo}
+                {t.home.detailsBtn}
               </Typography.Link>
-            )}
-            <Typography.Link
-              type="secondary"
-              onClick={() => setDetailOpen(true)}
-              style={{ fontSize: token.fontSize, whiteSpace: 'nowrap' }}
-            >
-              {t.home.detailsBtn}
-            </Typography.Link>
-          </Space>
-
-          {/* 底栏右侧：按分组渲染操作按钮 */}
-          {isNoUpdate ? (
-            <Space size={8} style={{ flexShrink: 0 }}>
-              {isIgnored && (
-                <Button
-                  size="small"
-                  type="primary"
-                  ghost
-                  loading={restoring}
-                  onClick={handleRestoreReminder}
-                >
-                  {t.home.restoreReminder}
-                </Button>
-              )}
-              {app.source !== 'vendor_managed' && (
-                <Popconfirm
-                  open={Boolean(pendingLifecycleAction)}
-                  placement="topRight"
-                  title={lifecyclePopTitle}
-                  okText={t.lifecycle.ok}
-                  cancelText={t.lifecycle.cancel}
-                  okButtonProps={{
-                    danger: pendingLifecycleAction === 'stop',
-                    loading: lifecycleSubmitting,
-                  }}
-                  onConfirm={handleConfirmLifecycle}
-                  onCancel={() => {
-                    if (!lifecycleSubmitting) setPendingLifecycleAction(null)
-                  }}
-                >
-                  {primaryService && primaryService.kind !== 'uncomparable' ? (
-                    <Space.Compact size="small">
-                      <Button
-                        disabled={updatingNow || lifecycleSubmitting}
-                        onClick={() => {
-                          setPickerInitialTab('version')
-                          setPickerSvc(primaryService)
-                        }}
-                      >
-                        {t.home.switchVersion}
-                      </Button>
-                      <Dropdown
-                        trigger={['click']}
-                        placement="bottomRight"
-                        disabled={updatingNow || lifecycleSubmitting}
-                        menu={{ items: extendedMenuItems }}
-                      >
-                        <Button
-                          disabled={updatingNow || lifecycleSubmitting}
-                          aria-label={t.home.moreActionsAria}
-                          icon={<DownOutlined />}
-                        />
-                      </Dropdown>
-                    </Space.Compact>
-                  ) : (
-                    <Dropdown
-                      trigger={['click']}
-                      placement="bottomRight"
-                      disabled={updatingNow || lifecycleSubmitting}
-                      menu={{ items: extendedMenuItems }}
-                    >
-                      <Button
-                        size="small"
-                        disabled={updatingNow || lifecycleSubmitting}
-                        aria-label={t.home.moreActionsAria}
-                        icon={<DownOutlined />}
-                      />
-                    </Dropdown>
-                  )}
-                </Popconfirm>
-              )}
             </Space>
-          ) : (
-            <Space size={8} style={{ flexShrink: 0 }}>
-              <Button size="small" onClick={() => setIgnoreOpen(true)}>
-                {t.home.ignore}
-              </Button>
 
-              {app.source === 'vendor_managed' ? (
-                <Tooltip title={t.home.vendorReadonlyTip}>
-                  <Tag variant="filled" style={{ margin: 0 }}>
-                    {t.home.tagVendor}
-                  </Tag>
-                </Tooltip>
-              ) : (
-                /* 统一组合主按钮 [ 更新 | ▾ ] */
-                <ConfigProvider theme={cautionBtnTheme}>
+            {/* 底栏右侧：按分组渲染操作按钮 */}
+            {isNoUpdate ? (
+              <Space size={8} style={{ flexShrink: 0 }}>
+                {isIgnored && (
+                  <Button
+                    size="small"
+                    type="primary"
+                    ghost
+                    loading={restoring}
+                    onClick={handleRestoreReminder}
+                  >
+                    {t.home.restoreReminder}
+                  </Button>
+                )}
+                {app.source !== 'vendor_managed' && (
                   <Popconfirm
                     open={Boolean(pendingLifecycleAction)}
                     placement="topRight"
@@ -1028,36 +1088,107 @@ export default function AppCard({
                       if (!lifecycleSubmitting) setPendingLifecycleAction(null)
                     }}
                   >
-                    <Space.Compact size="small">
-                      <Button
-                        type="primary"
-                        loading={updatingNow}
-                        disabled={lifecycleSubmitting}
-                        onClick={handleUpdateClick}
-                      >
-                        {updatingNow ? t.home.updating : t.home.updateBtn}
-                      </Button>
+                    {primaryService && primaryService.kind !== 'uncomparable' ? (
+                      <Space.Compact size="small">
+                        <Button
+                          disabled={lifecycleSubmitting}
+                          onClick={() => {
+                            setPickerInitialTab('version')
+                            setPickerSvc(primaryService)
+                          }}
+                        >
+                          {t.home.switchVersion}
+                        </Button>
+                        <Dropdown
+                          trigger={['click']}
+                          placement="bottomRight"
+                          disabled={lifecycleSubmitting}
+                          menu={{ items: extendedMenuItems }}
+                        >
+                          <Button
+                            disabled={lifecycleSubmitting}
+                            aria-label={t.home.moreActionsAria}
+                            icon={<DownOutlined />}
+                          />
+                        </Dropdown>
+                      </Space.Compact>
+                    ) : (
                       <Dropdown
                         trigger={['click']}
                         placement="bottomRight"
-                        disabled={updatingNow || lifecycleSubmitting}
+                        disabled={lifecycleSubmitting}
                         menu={{ items: extendedMenuItems }}
                       >
                         <Button
-                          type="primary"
-                          disabled={updatingNow || lifecycleSubmitting}
+                          size="small"
+                          disabled={lifecycleSubmitting}
                           aria-label={t.home.moreActionsAria}
                           icon={<DownOutlined />}
                         />
                       </Dropdown>
-                    </Space.Compact>
+                    )}
                   </Popconfirm>
-                </ConfigProvider>
-              )}
-            </Space>
-          )}
-        </Flex>
-        </div>
+                )}
+              </Space>
+            ) : (
+              <Space size={8} style={{ flexShrink: 0 }}>
+                <Button size="small" onClick={() => setIgnoreOpen(true)}>
+                  {t.home.ignore}
+                </Button>
+
+                {app.source === 'vendor_managed' ? (
+                  <Tooltip title={t.home.vendorReadonlyTip}>
+                    <Tag variant="filled" style={{ margin: 0 }}>
+                      {t.home.tagVendor}
+                    </Tag>
+                  </Tooltip>
+                ) : (
+                  /* 统一组合主按钮 [ 更新 | ▾ ] */
+                  <ConfigProvider theme={cautionBtnTheme}>
+                    <Popconfirm
+                      open={Boolean(pendingLifecycleAction)}
+                      placement="topRight"
+                      title={lifecyclePopTitle}
+                      okText={t.lifecycle.ok}
+                      cancelText={t.lifecycle.cancel}
+                      okButtonProps={{
+                        danger: pendingLifecycleAction === 'stop',
+                        loading: lifecycleSubmitting,
+                      }}
+                      onConfirm={handleConfirmLifecycle}
+                      onCancel={() => {
+                        if (!lifecycleSubmitting) setPendingLifecycleAction(null)
+                      }}
+                    >
+                      <Space.Compact size="small">
+                        <Button
+                          type="primary"
+                          disabled={lifecycleSubmitting}
+                          onClick={handleUpdateClick}
+                        >
+                          {t.home.updateBtn}
+                        </Button>
+                        <Dropdown
+                          trigger={['click']}
+                          placement="bottomRight"
+                          disabled={lifecycleSubmitting}
+                          menu={{ items: extendedMenuItems }}
+                        >
+                          <Button
+                            type="primary"
+                            disabled={lifecycleSubmitting}
+                            aria-label={t.home.moreActionsAria}
+                            icon={<DownOutlined />}
+                          />
+                        </Dropdown>
+                      </Space.Compact>
+                    </Popconfirm>
+                  </ConfigProvider>
+                )}
+              </Space>
+            )}
+          </Flex>
+        )}
       </Card>
 
       <ContainerMetaModal
