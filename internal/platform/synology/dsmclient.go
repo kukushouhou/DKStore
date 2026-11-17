@@ -908,7 +908,7 @@ func (c *dsmClient) PullImage(
 		onProgress(platform.PullProgress{
 			Phase:      "pulling",
 			StatusText: fmt.Sprintf("Pulling %s:%s", repository, tag),
-			Percent:    10,
+			Percent:    0,
 			LogChunk:   fmt.Sprintf("Pulling %s:%s via DSM WebAPI...\r\n", repository, tag),
 		})
 	}
@@ -924,7 +924,7 @@ func (c *dsmClient) PullImage(
 			onProgress(platform.PullProgress{
 				Phase:      "pulling",
 				StatusText: "Pull complete",
-				Percent:    80,
+				Percent:    85,
 				LogChunk:   fmt.Sprintf("Pull complete: %s:%s\r\n", repository, tag),
 			})
 		}
@@ -949,11 +949,12 @@ func (c *dsmClient) PullImage(
 			}
 			finished := anyBool(st["finished"])
 			if onProgress != nil {
+				_, hasDownloadedField := st["downloaded"]
 				downloaded := anyFloat(st["downloaded"])
 				current := int64(anyFloat(st["current"]))
 				total := int64(anyFloat(st["total"]))
 				rawPct := int(downloaded * 100)
-				if rawPct <= 0 && total > 0 {
+				if !hasDownloadedField && rawPct <= 0 && total > 0 {
 					rawPct = int(current * 100 / total)
 				}
 				if rawPct > 99 && !finished {
@@ -962,7 +963,12 @@ func (c *dsmClient) PullImage(
 				if rawPct < 0 {
 					rawPct = 0
 				}
-				pct := 10 + rawPct*70/100
+				pct := rawPct * 85 / 100
+				if finished {
+					pct = 85
+				} else if pct >= 85 {
+					pct = 84
+				}
 				chunk := ""
 				if !finished && rawPct > 0 {
 					chunk = fmt.Sprintf("\r\x1b[2KPulling %s:%s ... %d%%", strippedRepo, tag, rawPct)
@@ -981,7 +987,7 @@ func (c *dsmClient) PullImage(
 					onProgress(platform.PullProgress{
 						Phase:      "pulling",
 						StatusText: "Pull complete",
-						Percent:    80,
+						Percent:    85,
 						LogChunk:   fmt.Sprintf("\r\x1b[2K\x1b[32m✔\x1b[0m Pull complete: %s:%s\r\n", repository, tag),
 					})
 				}

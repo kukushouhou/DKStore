@@ -197,6 +197,79 @@ func TestPullImageStream_LayerProgress(t *testing.T) {
 	}
 }
 
+func TestPullImageStreamWithSizes_ZeroStartAndAccurateManifestTotal(t *testing.T) {
+	streamLines := strings.Join([]string{
+		`{"status":"Pulling from homeassistant/home-assistant","id":"latest"}`,
+		`{"status":"Pulling fs layer","id":"111111111111"}`,
+		`{"status":"Pulling fs layer","id":"222222222222"}`,
+		`{"status":"Pulling fs layer","id":"333333333333"}`,
+		`{"status":"Already exists","id":"111111111111"}`,
+		`{"status":"Waiting","id":"333333333333"}`,
+		// 小层先下载完成并进入解压（解压大小 90MB > 压缩大小 10MB）
+		`{"status":"Downloading","id":"222222222222","progressDetail":{"current":10000000,"total":10000000}}`,
+		`{"status":"Download complete","id":"222222222222"}`,
+		`{"status":"Extracting","id":"222222222222","progressDetail":{"current":45000000,"total":90000000}}`,
+		`{"status":"Pull complete","id":"222222222222"}`,
+		// 大层随后下载完成
+		`{"status":"Downloading","id":"333333333333","progressDetail":{"current":95000000,"total":190000000}}`,
+		`{"status":"Pull complete","id":"333333333333"}`,
+	}, "\n")
+
+	layerSizes := map[string]int64{
+		"111111111111": 50_000_000,  // Already exists -> 不计入需下载体积
+		"222222222222": 10_000_000,  // 待拉取小层 10MB
+		"333333333333": 190_000_000, // 待拉取大层 190MB（共 200MB 待拉取）
+	}
+
+	tr := &fakeExecTransport{
+		doHandler: func(path string) (*http.Response, error) {
+			return jsonHTTPResp(200, map[string]any{
+				"Id":          "sha256:ha1234567890",
+				"RepoDigests": []string{"homeassistant/home-assistant@sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+			}), nil
+		},
+		reqHandler: func(method, path string, _ []byte) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: 200,
+				Body:       io.NopCloser(strings.NewReader(streamLines)),
+			}, nil
+		},
+	}
+
+	ad := New("local", tr)
+	var events []platform.PullProgress
+	_, _, err := ad.pullImageStreamWithSizes(context.Background(), tr, "homeassistant/home-assistant:latest", "", layerSizes, func(p platform.PullProgress) {
+		events = append(events, p)
+	})
+	if err != nil {
+		t.Fatalf("pullImageStreamWithSizes failed: %v", err)
+	}
+
+	// 1. 尚未产生实际下载前的事件（Pulling fs layer / Waiting / Already exists）必须保持 0%
+	for i := 0; i < 6; i++ {
+		if events[i].Percent != 0 {
+			t.Fatalf("event[%d] (%s) expected 0%% before real download starts, got %d%%", i, events[i].StatusText, events[i].Percent)
+		}
+	}
+
+	// 2. 小层（10MB）进入 Extracting（90MB 解压流）及完成时：
+	//    总待下载体积必须稳定锁定为 200MB（绝不被 90MB 解压大小污染），且大进度条严禁冲到 80%（10/200 仅约 4%~5%）
+	extractEv := events[8]
+	doneSmallEv := events[9]
+	if extractEv.TotalBytes != 200_000_000 || extractEv.DownloadedBytes != 10_000_000 {
+		t.Fatalf("extracting must not pollute download bytes, got %d / %d", extractEv.DownloadedBytes, extractEv.TotalBytes)
+	}
+	if doneSmallEv.Percent > 10 {
+		t.Fatalf("after 10MB of 200MB completed, percent must stay <=10%%, got %d%%", doneSmallEv.Percent)
+	}
+
+	// 3. 全部层完成后到达 85%
+	finalEv := events[len(events)-1]
+	if finalEv.Percent != 85 || finalEv.DownloadedBytes != 200_000_000 || finalEv.TotalBytes != 200_000_000 {
+		t.Fatalf("expected final pull 85%% (200MB/200MB), got pct=%d (%d/%d)", finalEv.Percent, finalEv.DownloadedBytes, finalEv.TotalBytes)
+	}
+}
+
 func TestRecreateContainerViaEngine_StoppedContainerStaysStopped(t *testing.T) {
 	var calls []string
 	var createdBody map[string]any

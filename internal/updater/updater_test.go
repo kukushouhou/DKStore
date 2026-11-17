@@ -265,7 +265,7 @@ func TestJobProgressTracker_MonotonicPercentLiveMemoryLogsAndErrorFormatting(t *
 		Source:         "dsm_project",
 		Status:         "running",
 		Phase:          "precheck",
-		Progress:       platform.PullProgress{Phase: "precheck", StatusText: "Preparing", Percent: 5},
+		Progress:       platform.PullProgress{Phase: "precheck", StatusText: "Preparing", Percent: 0},
 		OldImageRef:    "ghcr.io/org/demo:1.0",
 		TargetImageRef: "ghcr.io/org/demo:1.1",
 		StartedAt:      1700000400,
@@ -278,18 +278,21 @@ func TestJobProgressTracker_MonotonicPercentLiveMemoryLogsAndErrorFormatting(t *
 	}
 
 	tracker := newJobProgressTracker(up, &job)
+	if job.Progress.Percent != 0 {
+		t.Fatalf("expected initial precheck percent to stay at 0, got %d", job.Progress.Percent)
+	}
 
-	// Emit a pulling event with Percent: 0 -> must stay monotonic at 5%
+	// Emit a pulling event with Percent: 0 while waiting -> must remain honestly at 0%
 	tracker.handleProgress(ctx, &job, platform.PullProgress{
-		Phase:      "pulling",
-		StatusText: "Pulling fs layer",
-		Percent:    0,
+		Phase:       "pulling",
+		StatusText:  "Pulling fs layer",
+		Percent:     0,
 		TotalLayers: 1,
-		Layers:     []platform.LayerProgress{{ID: "a1b2c3d4", Status: "waiting", Percent: 0}},
-		LogChunk:   "a1b2c3d4: Pulling fs layer\r\n",
+		Layers:      []platform.LayerProgress{{ID: "a1b2c3d4", Status: "waiting", Percent: 0}},
+		LogChunk:    "a1b2c3d4: Pulling fs layer\r\n",
 	})
-	if job.Progress.Percent != 5 {
-		t.Fatalf("expected monotonic percent 5 (not dropping to 0), got %d", job.Progress.Percent)
+	if job.Progress.Percent != 0 {
+		t.Fatalf("expected 0 percent before any download starts, got %d", job.Progress.Percent)
 	}
 
 	// Verify GetJob returns live in-memory accumulated logs while running

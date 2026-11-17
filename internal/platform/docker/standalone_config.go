@@ -117,7 +117,7 @@ func (a *Adapter) UpdateStandaloneConfig(
 	emit(platform.PullProgress{
 		Phase:      "precheck",
 		StatusText: "Checking standalone container & configuration",
-		Percent:    5,
+		Percent:    0,
 		LogChunk:   "Checking standalone container & configuration...\r\n",
 	})
 	targetContainerID, rawInspect, wasRunning, err := a.findTargetContainer(ctx, upReq)
@@ -137,10 +137,10 @@ func (a *Adapter) UpdateStandaloneConfig(
 	emit(platform.PullProgress{
 		Phase:      "pulling",
 		StatusText: "Pulling image " + req.TargetImageRef,
-		Percent:    10,
+		Percent:    0,
 		LogChunk:   fmt.Sprintf("Pulling image %s ...\r\n", req.TargetImageRef),
 	})
-	newImageID, newRepoDigest, err := a.pullImageStream(ctx, execTr, req.TargetImageRef, req.RegistryAuthB64, emit)
+	newImageID, newRepoDigest, err := a.pullImageStreamWithSizes(ctx, execTr, req.TargetImageRef, req.RegistryAuthB64, req.LayerSizes, emit)
 	if err != nil {
 		return nil, &platform.UpdateError{Code: "pull_failed", Message: i18n.DetailOf(err)}
 	}
@@ -149,7 +149,7 @@ func (a *Adapter) UpdateStandaloneConfig(
 	emit(platform.PullProgress{
 		Phase:      "recreating",
 		StatusText: "Recreating standalone container with updated config",
-		Percent:    85,
+		Percent:    90,
 		LogChunk:   "Applying updated environment & port bindings and recreating container...\r\n",
 	})
 	envCopy := append([]platform.EnvVar(nil), req.Env...)

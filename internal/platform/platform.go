@@ -231,6 +231,8 @@ type StandaloneUpdateRequest struct {
 	OldImageRef     string
 	TargetImageRef  string
 	RegistryAuthB64 string
+	LayerSizes      map[string]int64
+	StartAfter      *bool
 	Env             []EnvVar
 	Ports           []PortBinding
 }
@@ -278,6 +280,8 @@ type ComposeUpdateOptions struct {
 	ConfirmRemoveServices bool
 	DeleteRemovedImages   bool
 	DeleteRemovedFileIDs  []string
+	LayerSizes            map[string]int64
+	StartAfter            *bool
 }
 
 // ComposeServiceSetSummary 汇总 Compose 项目当前的生效服务名集合与附加覆盖文件保留服务名集合。
@@ -346,10 +350,12 @@ type UpdateRequest struct {
 	ServiceName     string
 	Source          SourceKind
 	Project         *ProjectInfo
-	ExpectedImageID string // 执行前容器中运行的 ImageID（用于检测外部并发修改冲突）
-	OldImageRef     string // 更新前声明的镜像引用
-	TargetImageRef  string // 目标镜像引用（如 nginx:1.27.4 或 ghcr.io/xxx:v1.2.0）
-	RegistryAuthB64 string // 可选的 Docker X-Registry-Auth 头
+	ExpectedImageID string           // 执行前容器中运行的 ImageID（用于检测外部并发修改冲突）
+	OldImageRef     string           // 更新前声明的镜像引用
+	TargetImageRef  string           // 目标镜像引用（如 nginx:1.27.4 或 ghcr.io/xxx:v1.2.0）
+	RegistryAuthB64 string           // 可选的 Docker X-Registry-Auth 头
+	LayerSizes      map[string]int64 // 预读自镜像 Manifest 的各层真实压缩体积（key 为层摘要 hex 或前 12 位 ID）
+	StartAfter      *bool            // 可选：更新完成后是否启动容器（nil 表示保持原运行状态）
 }
 
 // UpdateResult 是单服务更新完成后的核验结果。

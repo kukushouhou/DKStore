@@ -303,3 +303,62 @@ func TestSearchTagsVersionOrderingAndVariantFiltering(t *testing.T) {
 		t.Fatalf("unexpected non-semver items: hi=%q items=%+v", gcliHi, gcliItems)
 	}
 }
+
+func TestFetchImageLayerSizes_HubAndOCIMultiArch(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	box, _ := secret.LoadOrCreate(dir)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v2/repositories/homeassistant/home-assistant/tags/latest/images":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`[
+				{"os":"linux","architecture":"arm64","layers":[{"digest":"sha256:aaaa111122223333444455556666777788889999000011112222333344445555","size":12000}]},
+				{"os":"linux","architecture":"amd64","layers":[
+					{"digest":"","size":0},
+					{"digest":"sha256:6f837d52a1b90000111122223333444455556666777788889999000011112222","size":38500000},
+					{"digest":"sha256:b2c3d4e5f6a10000111122223333444455556666777788889999000011112222","size":90500000}
+				]}
+			]`))
+		case "/v2/org/app/manifests/v1.2.0":
+			w.Header().Set("Content-Type", "application/vnd.oci.image.index.v1+json")
+			_, _ = w.Write([]byte(`{
+				"manifests":[
+					{"digest":"sha256:subamd6411111111111111111111111111111111111111111111111111111111","platform":{"os":"linux","architecture":"amd64"}}
+				]
+			}`))
+		case "/v2/org/app/manifests/sha256:subamd6411111111111111111111111111111111111111111111111111111111":
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			_, _ = w.Write([]byte(`{
+				"layers":[
+					{"digest":"sha256:deadbeefcafebabe111122223333444455556666777788889999000011112222","size":77000000}
+				]
+			}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	cli := New(st, box)
+	cli.BaseURLOverride = map[string]string{
+		"hub.docker.com": srv.URL,
+		"ghcr.io":        srv.URL,
+	}
+
+	hubSizes := cli.FetchImageLayerSizes(ctx, "homeassistant/home-assistant:latest", "linux/amd64")
+	if hubSizes["6f837d52a1b9"] != 38500000 || hubSizes["b2c3d4e5f6a1"] != 90500000 {
+		t.Fatalf("unexpected hub layer sizes: %+v", hubSizes)
+	}
+
+	ociSizes := cli.FetchImageLayerSizes(ctx, "ghcr.io/org/app:v1.2.0", "linux/amd64")
+	if ociSizes["deadbeefcafe"] != 77000000 {
+		t.Fatalf("unexpected oci multi-arch layer sizes: %+v", ociSizes)
+	}
+}

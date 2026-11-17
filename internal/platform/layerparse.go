@@ -20,12 +20,171 @@ func StripANSI(s string) string {
 	return reANSI.ReplaceAllString(s, "")
 }
 
+// LookupLayerSize 根据 Docker 输出的短层 ID（通常为 8~16 位十六进制前缀）在预读的 Manifest 层体积字典中匹配真实压缩字节数。
+func LookupLayerSize(sizes map[string]int64, layerID string) int64 {
+	if len(sizes) == 0 {
+		return 0
+	}
+	id := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(layerID, "sha256:")))
+	if id == "" {
+		return 0
+	}
+	if sz, ok := sizes[id]; ok && sz > 0 {
+		return sz
+	}
+	if len(id) < 8 {
+		return 0
+	}
+	for k, sz := range sizes {
+		if sz <= 0 {
+			continue
+		}
+		if strings.HasPrefix(k, id) || strings.HasPrefix(id, k) {
+			return sz
+		}
+	}
+	return 0
+}
+
+// WeightedLayerInput 描述单层用于计算整体拉取百分比与真实下载流量的输入状态。
+type WeightedLayerInput struct {
+	Status    string // waiting | downloading | extracting | done
+	Cached    bool   // true 表示本地 Already exists，无需网络下载
+	DLCurrent int64  // 已下载压缩字节数
+	DLTotal   int64  // 该层真实压缩总字节数（来自 Manifest 预读或 Downloading 事件）
+	StagePct  int    // 当前阶段（下载或解压）0..100 进度
+}
+
+// ComputeWeightedPullProgress 按全量待拉取镜像层的真实体积加权计算下载字节数与整体百分比（0%..85%）：
+//   - 未产生任何实际下载/解压进度前严格返回 0%（消除硬编码 5%/10% 假起步）；
+//   - 每层内下载占 70% 权重、解压占 30% 权重；本地已缓存层（Already exists）不计入待下载体积；
+//   - 若个别场景未能预读到等待层大小，对未知大小的等待层按已知层平均体积估算权重，绝不按 0 B 漏算导致提前冲顶。
+func ComputeWeightedPullProgress(items []WeightedLayerInput) (downloadedBytes, totalBytes int64, pullPercent int) {
+	if len(items) == 0 {
+		return 0, 0, 0
+	}
+
+	var pullItems []WeightedLayerInput
+	allDone := true
+	for _, it := range items {
+		if it.Status != "done" {
+			allDone = false
+		}
+		if !it.Cached {
+			pullItems = append(pullItems, it)
+		}
+	}
+
+	// 若全部层均为本地缓存（Already exists），仅在全部确认完成后进入 85%
+	if len(pullItems) == 0 {
+		if allDone {
+			return 0, 0, 85
+		}
+		return 0, 0, 0
+	}
+
+	anyActive := false
+	allPullDone := true
+	var knownSizeSum int64
+	knownSizeCount := 0
+	var dlCurSum int64
+
+	for _, it := range pullItems {
+		if it.Status != "done" {
+			allPullDone = false
+		}
+		cur := it.DLCurrent
+		if (it.Status == "done" || it.Status == "extracting") && it.DLTotal > cur {
+			cur = it.DLTotal
+		}
+		if cur > 0 || it.Status == "downloading" || it.Status == "extracting" || it.Status == "done" {
+			anyActive = true
+		}
+		dlCurSum += cur
+		if it.DLTotal > 0 {
+			knownSizeSum += it.DLTotal
+			knownSizeCount++
+		}
+	}
+
+	if !anyActive {
+		return 0, 0, 0
+	}
+
+	downloadedBytes = dlCurSum
+	totalBytes = knownSizeSum
+	if downloadedBytes > totalBytes {
+		totalBytes = downloadedBytes
+	}
+
+	if allPullDone {
+		return downloadedBytes, totalBytes, 85
+	}
+
+	unknownWeight := 1.0
+	if knownSizeCount > 0 {
+		unknownWeight = float64(knownSizeSum) / float64(knownSizeCount)
+	}
+
+	var weightedDone, weightTotal float64
+	for _, it := range pullItems {
+		w := float64(it.DLTotal)
+		if w <= 0 {
+			w = unknownWeight
+		}
+		sp := float64(it.StagePct)
+		if sp < 0 {
+			sp = 0
+		}
+		if sp > 100 {
+			sp = 100
+		}
+		var frac float64
+		switch it.Status {
+		case "done":
+			frac = 1.0
+		case "extracting":
+			frac = 0.70 + 0.30*(sp/100.0)
+		case "downloading":
+			frac = 0.70 * (sp / 100.0)
+		default:
+			frac = 0.0
+		}
+		weightedDone += w * frac
+		weightTotal += w
+	}
+
+	if weightTotal <= 0 {
+		return downloadedBytes, totalBytes, 0
+	}
+	ratio := weightedDone / weightTotal
+	if ratio < 0 {
+		ratio = 0
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
+	pct := int(math.Round(ratio * 85.0))
+	if pct >= 85 && !allPullDone {
+		pct = 84
+	}
+	return downloadedBytes, totalBytes, pct
+}
+
+type composeLayerMeta struct {
+	cached    bool
+	dlCurrent int64
+	dlTotal   int64
+}
+
 // ComposeStreamParser 解析 docker compose pull / up -d 或群晖 build_stream 的实时流式输出，
 // 维护有序镜像层进度切片、阶段状态与致命错误检测，同时保留未修改的原始终端块供 @xterm/xterm 渲染。
 type ComposeStreamParser struct {
 	pending    string
 	order      []string
 	layers     map[string]*LayerProgress
+	meta       map[string]*composeLayerMeta
+	layerSizes map[string]int64
 	phase      string
 	statusText string
 	fatalErr   string
@@ -33,8 +192,15 @@ type ComposeStreamParser struct {
 
 // NewComposeStreamParser 创建流式输出解析器。
 func NewComposeStreamParser() *ComposeStreamParser {
+	return NewComposeStreamParserWithSizes(nil)
+}
+
+// NewComposeStreamParserWithSizes 创建携带预读镜像层真实体积字典的流式输出解析器。
+func NewComposeStreamParserWithSizes(layerSizes map[string]int64) *ComposeStreamParser {
 	return &ComposeStreamParser{
 		layers:     make(map[string]*LayerProgress),
+		meta:       make(map[string]*composeLayerMeta),
+		layerSizes: layerSizes,
 		phase:      "pulling",
 		statusText: "Pulling images",
 	}
@@ -75,41 +241,34 @@ func (p *ComposeStreamParser) FatalError() string {
 func (p *ComposeStreamParser) Snapshot(rawChunk string) PullProgress {
 	totalLayers := len(p.order)
 	completedLayers := 0
-	var downloadedBytes, totalBytes int64
-	var fracSum float64
 
 	layersOut := make([]LayerProgress, 0, totalLayers)
+	inputs := make([]WeightedLayerInput, 0, totalLayers)
 	for _, id := range p.order {
 		lp := p.layers[id]
 		if lp == nil {
 			continue
 		}
 		layersOut = append(layersOut, *lp)
-		downloadedBytes += lp.Current
-		totalBytes += lp.Total
-		switch lp.Status {
-		case "done":
+		if lp.Status == "done" {
 			completedLayers++
-			fracSum += 1.0
-		case "extracting":
-			fracSum += 0.55 + 0.40*(float64(lp.Percent)/100.0)
-		case "downloading":
-			fracSum += 0.55 * (float64(lp.Percent) / 100.0)
 		}
+		mt := p.meta[id]
+		if mt == nil {
+			mt = &composeLayerMeta{dlCurrent: lp.Current, dlTotal: lp.Total}
+		}
+		inputs = append(inputs, WeightedLayerInput{
+			Status:    lp.Status,
+			Cached:    mt.cached,
+			DLCurrent: mt.dlCurrent,
+			DLTotal:   mt.dlTotal,
+			StagePct:  lp.Percent,
+		})
 	}
 
-	pct := 10
+	downloadedBytes, totalBytes, pct := ComputeWeightedPullProgress(inputs)
 	if p.phase == "recreating" {
-		pct = 85
-	} else if totalLayers > 0 {
-		ratio := fracSum / float64(totalLayers)
-		if ratio < 0 {
-			ratio = 0
-		}
-		if ratio > 1 {
-			ratio = 1
-		}
-		pct = 10 + int(math.Round(ratio*70.0)) // pulling 区间映射到 10%..80%
+		pct = 90
 	}
 
 	return PullProgress{
@@ -176,6 +335,9 @@ func (p *ComposeStreamParser) parseLine(rawLine string) {
 				}
 				lp.Percent = 100
 			}
+			if mt := p.meta[id]; mt != nil && !mt.cached && mt.dlTotal > 0 {
+				mt.dlCurrent = mt.dlTotal
+			}
 		}
 		return
 	}
@@ -188,6 +350,7 @@ func (p *ComposeStreamParser) parseLine(rawLine string) {
 func (p *ComposeStreamParser) applyLayerUpdate(id, rest string) bool {
 	rl := strings.ToLower(rest)
 	var status string
+	isCached := false
 	switch {
 	case strings.HasPrefix(rl, "waiting"), strings.HasPrefix(rl, "pulling fs layer"):
 		status = "waiting"
@@ -197,7 +360,10 @@ func (p *ComposeStreamParser) applyLayerUpdate(id, rest string) bool {
 		status = "downloading"
 	case strings.HasPrefix(rl, "extracting"):
 		status = "extracting"
-	case strings.HasPrefix(rl, "pull complete"), strings.HasPrefix(rl, "already exists"), strings.HasPrefix(rl, "pulled"):
+	case strings.HasPrefix(rl, "already exists"):
+		status = "done"
+		isCached = true
+	case strings.HasPrefix(rl, "pull complete"), strings.HasPrefix(rl, "pulled"):
 		status = "done"
 	default:
 		return false
@@ -205,20 +371,19 @@ func (p *ComposeStreamParser) applyLayerUpdate(id, rest string) bool {
 
 	lp, exists := p.layers[id]
 	if !exists {
-		lp = &LayerProgress{ID: id, Status: "waiting"}
+		knownSz := LookupLayerSize(p.layerSizes, id)
+		lp = &LayerProgress{ID: id, Status: "waiting", Total: knownSz}
 		p.layers[id] = lp
+		p.meta[id] = &composeLayerMeta{dlTotal: knownSz}
 		p.order = append(p.order, id)
+	}
+	mt := p.meta[id]
+	if mt == nil {
+		mt = &composeLayerMeta{dlTotal: lp.Total}
+		p.meta[id] = mt
 	}
 
 	cur, tot, hasBytes := parseByteProgress(rest)
-	if hasBytes {
-		if tot > lp.Total {
-			lp.Total = tot
-		}
-		if cur > lp.Current || status != lp.Status {
-			lp.Current = cur
-		}
-	}
 
 	switch status {
 	case "waiting":
@@ -229,13 +394,24 @@ func (p *ComposeStreamParser) applyLayerUpdate(id, rest string) bool {
 	case "downloading":
 		if lp.Status != "done" && lp.Status != "extracting" {
 			lp.Status = "downloading"
+			if hasBytes {
+				if tot > mt.dlTotal {
+					mt.dlTotal = tot
+				}
+				if cur > mt.dlCurrent {
+					mt.dlCurrent = cur
+				}
+				lp.Total = mt.dlTotal
+				lp.Current = mt.dlCurrent
+			}
 			if strings.HasPrefix(rl, "verifying checksum") || strings.HasPrefix(rl, "download complete") {
-				if lp.Total > 0 {
-					lp.Current = lp.Total
+				if mt.dlTotal > 0 {
+					mt.dlCurrent = mt.dlTotal
+					lp.Current = mt.dlTotal
 				}
 				lp.Percent = 100
-			} else if lp.Total > 0 {
-				pct := int(lp.Current * 100 / lp.Total)
+			} else if mt.dlTotal > 0 {
+				pct := int(mt.dlCurrent * 100 / mt.dlTotal)
 				if pct > 99 {
 					pct = 99
 				}
@@ -248,7 +424,12 @@ func (p *ComposeStreamParser) applyLayerUpdate(id, rest string) bool {
 		if lp.Status != "done" {
 			prevStatus := lp.Status
 			lp.Status = "extracting"
+			if mt.dlTotal > 0 {
+				mt.dlCurrent = mt.dlTotal
+			}
 			if hasBytes && tot > 0 {
+				lp.Current = cur
+				lp.Total = tot
 				pct := int(cur * 100 / tot)
 				if pct > 99 {
 					pct = 99
@@ -260,8 +441,20 @@ func (p *ComposeStreamParser) applyLayerUpdate(id, rest string) bool {
 		}
 	case "done":
 		lp.Status = "done"
-		if lp.Total > 0 {
-			lp.Current = lp.Total
+		if isCached {
+			mt.cached = true
+			mt.dlCurrent = 0
+			mt.dlTotal = 0
+			lp.Current = 0
+			lp.Total = 0
+		} else {
+			if mt.dlTotal > 0 {
+				mt.dlCurrent = mt.dlTotal
+				lp.Total = mt.dlTotal
+				lp.Current = mt.dlTotal
+			} else if lp.Total > 0 {
+				lp.Current = lp.Total
+			}
 		}
 		lp.Percent = 100
 	}

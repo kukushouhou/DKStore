@@ -206,7 +206,7 @@ func (a *Adapter) UpdateService(
 	emit(platform.PullProgress{
 		Phase:      "precheck",
 		StatusText: "Prechecking DSM Container Manager state",
-		Percent:    5,
+		Percent:    0,
 		LogChunk:   "Prechecking DSM Container Manager state...\r\n",
 	})
 
@@ -238,7 +238,7 @@ func (a *Adapter) UpdateService(
 				emit(platform.PullProgress{
 					Phase:      "pulling",
 					StatusText: "Fallback to native Docker Compose build_stream",
-					Percent:    15,
+					Percent:    0,
 					LogChunk:   fmt.Sprintf("DSM Image API returned code %d, delegating pull to native Compose build_stream...\r\n", de.Code),
 				})
 			}
@@ -320,11 +320,11 @@ func (a *Adapter) updateProjectService(
 		}
 	}
 
-	parser := platform.NewComposeStreamParser()
+	parser := platform.NewComposeStreamParserWithSizes(req.LayerSizes)
 	emit(platform.PullProgress{
 		Phase:      "pulling",
 		StatusText: "Updating DSM Project YAML & streaming Docker Compose build",
-		Percent:    10,
+		Percent:    0,
 		LogChunk:   fmt.Sprintf("==> Updating DSM Project %s (service %s -> %s)\r\n", req.Project.Name, req.ServiceName, req.TargetImageRef),
 	})
 	if err := a.dsmCli.UpdateAndBuildProjectStream(ctx, projectID, string(afterBytes), func(chunk string) {
@@ -443,7 +443,7 @@ func (a *Adapter) upgradeStandalone(ctx context.Context, req platform.UpdateRequ
 	if oldImageID == "" {
 		oldImageID = req.ExpectedImageID
 	}
-	emit(platform.PullProgress{Phase: "recreating", StatusText: "Upgrading container via DSM WebAPI", Percent: 85})
+	emit(platform.PullProgress{Phase: "recreating", StatusText: "Upgrading container via DSM WebAPI", Percent: 90})
 	if err := a.dsmCli.UpgradeByRepository(ctx, repo); err != nil {
 		return nil, &platform.UpdateError{Code: "recreate_failed", Message: biErr(err)}
 	}
@@ -573,7 +573,7 @@ func (a *Adapter) recreateStandalone(
 	emit(platform.PullProgress{
 		Phase:      "recreating",
 		StatusText: "Recreating standalone container via DSM WebAPI",
-		Percent:    85,
+		Percent:    90,
 		LogChunk:   fmt.Sprintf("Recreating standalone container %s via DSM WebAPI...\r\n", cName),
 	})
 	if wasRunning {
@@ -747,7 +747,7 @@ func (a *Adapter) UpdateStandaloneConfig(
 	emit(platform.PullProgress{
 		Phase:      "precheck",
 		StatusText: "Prechecking standalone container configuration",
-		Percent:    5,
+		Percent:    0,
 		LogChunk:   "Prechecking DSM standalone container configuration...\r\n",
 	})
 
@@ -1391,15 +1391,15 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 	emit(platform.PullProgress{
 		Phase:      "precheck",
 		StatusText: "Prechecking DSM project compose update",
-		Percent:    5,
+		Percent:    0,
 		LogChunk:   fmt.Sprintf("==> Preparing DSM Project %s compose configuration update...\r\n", project.Name),
 	})
 
-	parser := platform.NewComposeStreamParser()
+	parser := platform.NewComposeStreamParserWithSizes(opts.LayerSizes)
 	emit(platform.PullProgress{
 		Phase:      "pulling",
 		StatusText: "Updating DSM project compose.yaml & streaming Docker Compose build",
-		Percent:    10,
+		Percent:    0,
 		LogChunk:   "Writing updated compose.yaml and starting native Docker Compose build_stream...\r\n",
 	})
 	if err := a.dsmCli.UpdateAndBuildProjectStream(ctx, project.DSMProjectID, newYAML, func(chunk string) {

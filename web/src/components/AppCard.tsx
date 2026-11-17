@@ -194,7 +194,9 @@ export default function AppCard({
       case 'precheck':
         return t.home.phasePrecheck
       case 'pulling':
-        return t.home.phasePulling
+        return (job.progress?.totalLayers ?? 0) === 0 && (job.progress?.downloadedBytes ?? 0) === 0
+          ? t.home.phaseFetchingLayers
+          : t.home.phasePulling
       case 'recreating':
         return t.home.phaseRecreating
       case 'verifying':

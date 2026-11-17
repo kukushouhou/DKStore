@@ -506,7 +506,7 @@ func (s *Service) prepareUpgradeJob(ctx context.Context, item UpdateItemRequest,
 		Source:             source,
 		Status:             "running",
 		Phase:              "precheck",
-		Progress:           platform.PullProgress{Phase: "precheck", StatusText: "Preparing update", Percent: 5},
+		Progress:           platform.PullProgress{Phase: "precheck", StatusText: "Preparing update", Percent: 0},
 		OldImageRef:        oldImageRef,
 		OldImageID:         oldImageID,
 		OldRepoDigest:      oldRepoDigest,
@@ -863,7 +863,7 @@ func (s *Service) StartComposeUpdate(ctx context.Context, req ComposeUpdateReque
 		Source:             source,
 		Status:             "running",
 		Phase:              "precheck",
-		Progress:           platform.PullProgress{Phase: "precheck", StatusText: "Preparing Compose config update", Percent: 5},
+		Progress:           platform.PullProgress{Phase: "precheck", StatusText: "Preparing Compose config update", Percent: 0},
 		OldImageRef:        oldImageRef,
 		OldImageID:         oldImageID,
 		OldRepoDigest:      oldRepoDigest,
@@ -1078,9 +1078,9 @@ func newJobProgressTracker(s *Service, j *Job) *jobProgressTracker {
 		prevPercent: j.Progress.Percent,
 		prevPhase:   j.Phase,
 	}
-	if t.prevPercent < 5 {
-		t.prevPercent = 5
-		j.Progress.Percent = 5
+	if t.prevPercent < 0 {
+		t.prevPercent = 0
+		j.Progress.Percent = 0
 	}
 	if j.Logs != "" {
 		t.logBuf.WriteString(j.Logs)
@@ -1216,6 +1216,60 @@ func (t *jobProgressTracker) succeed(j *Job, extraLogs []string) {
 	j.LogOffset = t.logBuf.Len()
 }
 
+func (s *Service) resolveServicePlatform(ctx context.Context, serviceKey string, h *host.Host) string {
+	if s.st != nil && s.st.DB != nil && strings.TrimSpace(serviceKey) != "" {
+		var plat string
+		if s.st.DB.QueryRowContext(ctx, `SELECT COALESCE(platform,'') FROM service WHERE key=?`, serviceKey).Scan(&plat) == nil {
+			plat = strings.TrimSpace(plat)
+			if plat != "" {
+				return plat
+			}
+		}
+	}
+	if h != nil && h.Info != nil && strings.TrimSpace(h.Info.Arch) != "" {
+		osName := strings.TrimSpace(h.Info.OS)
+		if osName == "" {
+			osName = "linux"
+		}
+		plat := osName + "/" + strings.TrimSpace(h.Info.Arch)
+		if v := strings.TrimSpace(h.Info.Variant); v != "" {
+			plat += "/" + v
+		}
+		return plat
+	}
+	return ""
+}
+
+func (s *Service) prefetchLayerSizes(ctx context.Context, serviceKey string, h *host.Host, imageRefs ...string) map[string]int64 {
+	if s == nil || s.reg == nil || len(imageRefs) == 0 {
+		return nil
+	}
+	plat := s.resolveServicePlatform(ctx, serviceKey, h)
+	pCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+
+	var merged map[string]int64
+	seen := make(map[string]bool, len(imageRefs))
+	for _, rawRef := range imageRefs {
+		rawRef = strings.TrimSpace(rawRef)
+		if rawRef == "" || seen[rawRef] {
+			continue
+		}
+		seen[rawRef] = true
+		sizes := s.reg.FetchImageLayerSizes(pCtx, rawRef, plat)
+		if len(sizes) == 0 {
+			continue
+		}
+		if merged == nil {
+			merged = make(map[string]int64, len(sizes))
+		}
+		for k, v := range sizes {
+			merged[k] = v
+		}
+	}
+	return merged
+}
+
 func (s *Service) executeJob(j Job) {
 	tracker := newJobProgressTracker(s, &j)
 	defer func() {
@@ -1259,9 +1313,12 @@ func (s *Service) executeJob(j Job) {
 	}
 
 	var regAuth string
-	if pr, err := version.ParseImageRef(j.TargetImageRef); err == nil {
-		regAuth = s.reg.DockerAuthHeader(ctx, pr.Registry)
+	if s.reg != nil {
+		if pr, err := version.ParseImageRef(j.TargetImageRef); err == nil {
+			regAuth = s.reg.DockerAuthHeader(ctx, pr.Registry)
+		}
 	}
+	layerSizes := s.prefetchLayerSizes(ctx, j.ServiceKey, h, j.TargetImageRef)
 
 	res, err := upAd.UpdateService(ctx, platform.UpdateRequest{
 		AppName:         j.AppName,
@@ -1272,6 +1329,7 @@ func (s *Service) executeJob(j Job) {
 		OldImageRef:     j.OldImageRef,
 		TargetImageRef:  j.TargetImageRef,
 		RegistryAuthB64: regAuth,
+		LayerSizes:      layerSizes,
 	}, func(p platform.PullProgress) {
 		tracker.handleProgress(ctx, &j, p)
 	})
@@ -1315,6 +1373,14 @@ func (s *Service) executeComposeJob(j Job, proj platform.ProjectInfo, newYAML st
 		return
 	}
 	defer ad.Close()
+
+	if svcImgs, vErr := docker.ValidateComposeYAML(newYAML); vErr == nil && len(svcImgs) > 0 {
+		refs := make([]string, 0, len(svcImgs))
+		for _, r := range svcImgs {
+			refs = append(refs, r)
+		}
+		opts.LayerSizes = s.prefetchLayerSizes(ctx, j.ServiceKey, h, refs...)
+	}
 
 	var runErr error
 	if cuAd, ok := ad.(platform.ComposeUpdateAdapter); ok {
@@ -1407,9 +1473,12 @@ func (s *Service) executeStandaloneConfigJob(j Job, env []platform.EnvVar, ports
 	}
 
 	var regAuth string
-	if pr, err := version.ParseImageRef(j.TargetImageRef); err == nil {
-		regAuth = s.reg.DockerAuthHeader(ctx, pr.Registry)
+	if s.reg != nil {
+		if pr, err := version.ParseImageRef(j.TargetImageRef); err == nil {
+			regAuth = s.reg.DockerAuthHeader(ctx, pr.Registry)
+		}
 	}
+	layerSizes := s.prefetchLayerSizes(ctx, j.ServiceKey, h, j.TargetImageRef)
 
 	res, err := scAd.UpdateStandaloneConfig(ctx, platform.StandaloneUpdateRequest{
 		AppName:         j.AppName,
@@ -1418,6 +1487,7 @@ func (s *Service) executeStandaloneConfigJob(j Job, env []platform.EnvVar, ports
 		OldImageRef:     j.OldImageRef,
 		TargetImageRef:  j.TargetImageRef,
 		RegistryAuthB64: regAuth,
+		LayerSizes:      layerSizes,
 		Env:             env,
 		Ports:           ports,
 	}, func(p platform.PullProgress) {

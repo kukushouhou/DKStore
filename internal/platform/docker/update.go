@@ -66,7 +66,7 @@ func (a *Adapter) UpdateService(
 	emit(platform.PullProgress{
 		Phase:      "precheck",
 		StatusText: "Checking target container & configuration for conflicts",
-		Percent:    5,
+		Percent:    0,
 		LogChunk:   "Checking target container & configuration for conflicts...\r\n",
 	})
 	targetContainerID, rawInspect, wasRunning, err := a.findTargetContainer(ctx, req)
@@ -125,11 +125,11 @@ func (a *Adapter) UpdateService(
 	emit(platform.PullProgress{
 		Phase:      "pulling",
 		StatusText: "Pulling image " + req.TargetImageRef,
-		Percent:    10,
+		Percent:    0,
 		LogChunk:   fmt.Sprintf("Pulling image %s ...\r\n", req.TargetImageRef),
 	})
 	addLog("pulling image: %s", req.TargetImageRef)
-	newImageID, newRepoDigest, err := a.pullImageStream(ctx, execTr, req.TargetImageRef, req.RegistryAuthB64, emit)
+	newImageID, newRepoDigest, err := a.pullImageStreamWithSizes(ctx, execTr, req.TargetImageRef, req.RegistryAuthB64, req.LayerSizes, emit)
 	if err != nil {
 		return nil, &platform.UpdateError{Code: "pull_failed", Message: i18n.DetailOf(err)}
 	}
@@ -139,7 +139,7 @@ func (a *Adapter) UpdateService(
 	emit(platform.PullProgress{
 		Phase:      "recreating",
 		StatusText: "Recreating service " + req.ServiceName,
-		Percent:    85,
+		Percent:    88,
 		LogChunk:   fmt.Sprintf("Recreating service %s ...\r\n", req.ServiceName),
 	})
 
@@ -261,8 +261,11 @@ type layerStat struct {
 	id         string
 	status     string // waiting | downloading | extracting | done
 	lastRawSt  string
-	current    int64
-	total      int64
+	cached     bool  // 本地已缓存层（Already exists），无需网络下载
+	dlCurrent  int64 // 已下载压缩字节数
+	dlTotal    int64 // 真实压缩总体积（来自 Manifest 预读或 Downloading 事件）
+	current    int64 // 单层当前阶段展示字节数
+	total      int64 // 单层当前阶段展示总字节数
 	pct        int
 	done       bool
 }
@@ -328,8 +331,30 @@ func (a *Adapter) pullImageStream(
 	registryAuthB64 string,
 	emit func(platform.PullProgress),
 ) (imageID, repoDigest string, err error) {
+	return a.pullImageStreamWithSizes(ctx, execTr, targetRef, registryAuthB64, nil, emit)
+}
+
+func (a *Adapter) pullImageStreamWithSizes(
+	ctx context.Context,
+	execTr transport.ExecutableTransport,
+	targetRef string,
+	registryAuthB64 string,
+	layerSizes map[string]int64,
+	emit func(platform.PullProgress),
+) (imageID, repoDigest string, err error) {
+	var layerOrder []string
+	layers := make(map[string]*layerStat)
+	lastPct := 0
+	wrappedEmit := func(p platform.PullProgress) {
+		if p.Percent > lastPct {
+			lastPct = p.Percent
+		}
+		if emit != nil {
+			emit(p)
+		}
+	}
 	for attempt := 1; attempt <= maxPullStreamAttempts; attempt++ {
-		imageID, repoDigest, err = a.pullImageStreamOnce(ctx, execTr, targetRef, registryAuthB64, emit)
+		imageID, repoDigest, err = a.pullImageStreamOnce(ctx, execTr, targetRef, registryAuthB64, layerSizes, &layerOrder, layers, wrappedEmit)
 		if err == nil {
 			return imageID, repoDigest, nil
 		}
@@ -337,10 +362,10 @@ func (a *Adapter) pullImageStream(
 			return "", "", err
 		}
 		delay := pullRetryBaseDelay * time.Duration(attempt)
-		emit(platform.PullProgress{
+		wrappedEmit(platform.PullProgress{
 			Phase:      "pulling",
 			StatusText: fmt.Sprintf("Retrying image download (%d/%d)", attempt+1, maxPullStreamAttempts),
-			Percent:    12,
+			Percent:    lastPct,
 			LogChunk:   fmt.Sprintf("\r\n\x1b[33m↻ 网络连接中断，正在自动接着下载剩余镜像层（第 %d/%d 次）...\x1b[0m\r\n", attempt+1, maxPullStreamAttempts),
 		})
 		timer := time.NewTimer(delay)
@@ -359,6 +384,9 @@ func (a *Adapter) pullImageStreamOnce(
 	execTr transport.ExecutableTransport,
 	targetRef string,
 	registryAuthB64 string,
+	layerSizes map[string]int64,
+	layerOrder *[]string,
+	layers map[string]*layerStat,
 	emit func(platform.PullProgress),
 ) (imageID, repoDigest string, err error) {
 	fromImg, tag := splitPullImageAndTag(targetRef)
@@ -381,8 +409,6 @@ func (a *Adapter) pullImageStreamOnce(
 		return "", "", i18n.NewEngineError(i18n.MsgDockerPullFailed, dockerHTTPErr(resp.StatusCode, strings.TrimSpace(string(body))))
 	}
 
-	var layerOrder []string
-	layers := make(map[string]*layerStat)
 	prevWasOverwrite := false
 	dec := json.NewDecoder(resp.Body)
 	for {
@@ -421,22 +447,43 @@ func (a *Adapter) pullImageStreamOnce(
 		if isLayerEv {
 			ls, ok := layers[ev.ID]
 			if !ok {
-				ls = &layerStat{id: ev.ID, status: "waiting"}
+				knownSz := platform.LookupLayerSize(layerSizes, ev.ID)
+				ls = &layerStat{
+					id:      ev.ID,
+					status:  "waiting",
+					dlTotal: knownSz,
+					total:   knownSz,
+				}
 				layers[ev.ID] = ls
-				layerOrder = append(layerOrder, ev.ID)
-			}
-			if ev.ProgressDetail.Total > ls.total {
-				ls.total = ev.ProgressDetail.Total
-			}
-			if ev.ProgressDetail.Current > ls.current {
-				ls.current = ev.ProgressDetail.Current
+				*layerOrder = append(*layerOrder, ev.ID)
 			}
 
 			switch {
-			case strings.Contains(stLower, "pull complete") || strings.Contains(stLower, "already exists"):
+			case strings.Contains(stLower, "already exists"):
 				ls.status = "done"
 				ls.done = true
-				if ls.total > 0 {
+				ls.cached = true
+				ls.dlCurrent = 0
+				ls.dlTotal = 0
+				ls.current = 0
+				ls.total = 0
+				ls.pct = 100
+				prefix := ""
+				if prevWasOverwrite {
+					prefix = "\r\x1b[2K"
+					prevWasOverwrite = false
+				}
+				if ls.lastRawSt != ev.Status {
+					logChunk = fmt.Sprintf("%s\x1b[32m✔\x1b[0m \x1b[36m%s\x1b[0m: %s\r\n", prefix, ev.ID, ev.Status)
+				}
+			case strings.Contains(stLower, "pull complete"):
+				ls.status = "done"
+				ls.done = true
+				if ls.dlTotal > 0 {
+					ls.dlCurrent = ls.dlTotal
+					ls.total = ls.dlTotal
+					ls.current = ls.dlTotal
+				} else if ls.total > 0 {
 					ls.current = ls.total
 				}
 				ls.pct = 100
@@ -455,8 +502,14 @@ func (a *Adapter) pullImageStreamOnce(
 				}
 			case strings.Contains(stLower, "extracting"):
 				if !ls.done {
+					prevSt := ls.status
 					ls.status = "extracting"
+					if ls.dlTotal > 0 {
+						ls.dlCurrent = ls.dlTotal
+					}
 					if ev.ProgressDetail.Total > 0 {
+						ls.current = ev.ProgressDetail.Current
+						ls.total = ev.ProgressDetail.Total
 						p := int(ev.ProgressDetail.Current * 100 / ev.ProgressDetail.Total)
 						if p > 99 {
 							p = 99
@@ -464,16 +517,25 @@ func (a *Adapter) pullImageStreamOnce(
 						ls.pct = p
 						logChunk = fmt.Sprintf("\r\x1b[2K\x1b[36m%s\x1b[0m: Extracting %s / %s (%d%%)", ev.ID, formatBytesShort(ev.ProgressDetail.Current), formatBytesShort(ev.ProgressDetail.Total), p)
 						prevWasOverwrite = true
-					} else if ls.pct < 50 {
+					} else if prevSt != "extracting" || ls.pct < 50 {
 						ls.pct = 50
 					}
 				}
 			case strings.Contains(stLower, "downloading") || strings.Contains(stLower, "verifying") || strings.Contains(stLower, "download complete"):
 				if !ls.done && ls.status != "extracting" {
 					ls.status = "downloading"
+					if ev.ProgressDetail.Total > ls.dlTotal {
+						ls.dlTotal = ev.ProgressDetail.Total
+					}
+					if ev.ProgressDetail.Current > ls.dlCurrent {
+						ls.dlCurrent = ev.ProgressDetail.Current
+					}
+					ls.total = ls.dlTotal
+					ls.current = ls.dlCurrent
 					if strings.Contains(stLower, "download complete") || strings.Contains(stLower, "verifying") {
-						if ls.total > 0 {
-							ls.current = ls.total
+						if ls.dlTotal > 0 {
+							ls.dlCurrent = ls.dlTotal
+							ls.current = ls.dlTotal
 						}
 						ls.pct = 100
 						if ls.lastRawSt != ev.Status {
@@ -484,15 +546,15 @@ func (a *Adapter) pullImageStreamOnce(
 							}
 							logChunk = fmt.Sprintf("%s\x1b[36m%s\x1b[0m: %s\r\n", prefix, ev.ID, ev.Status)
 						}
-					} else if ls.total > 0 {
-						p := int(ls.current * 100 / ls.total)
+					} else if ls.dlTotal > 0 {
+						p := int(ls.dlCurrent * 100 / ls.dlTotal)
 						if p > 99 {
 							p = 99
 						}
 						if p > ls.pct {
 							ls.pct = p
 						}
-						logChunk = fmt.Sprintf("\r\x1b[2K\x1b[36m%s\x1b[0m: Downloading %s / %s (%d%%)", ev.ID, formatBytesShort(ls.current), formatBytesShort(ls.total), ls.pct)
+						logChunk = fmt.Sprintf("\r\x1b[2K\x1b[36m%s\x1b[0m: Downloading %s / %s (%d%%)", ev.ID, formatBytesShort(ls.dlCurrent), formatBytesShort(ls.dlTotal), ls.pct)
 						prevWasOverwrite = true
 					}
 				}
@@ -520,17 +582,15 @@ func (a *Adapter) pullImageStreamOnce(
 			}
 		}
 
-		totalLayers := len(layerOrder)
+		totalLayers := len(*layerOrder)
 		completedLayers := 0
-		var downloadedBytes, totalBytes int64
 		layersOut := make([]platform.LayerProgress, 0, totalLayers)
-		for _, id := range layerOrder {
+		inputs := make([]platform.WeightedLayerInput, 0, totalLayers)
+		for _, id := range *layerOrder {
 			l := layers[id]
 			if l.done {
 				completedLayers++
 			}
-			downloadedBytes += l.current
-			totalBytes += l.total
 			layersOut = append(layersOut, platform.LayerProgress{
 				ID:      l.id,
 				Status:  l.status,
@@ -538,21 +598,16 @@ func (a *Adapter) pullImageStreamOnce(
 				Total:   l.total,
 				Percent: l.pct,
 			})
+			inputs = append(inputs, platform.WeightedLayerInput{
+				Status:    l.status,
+				Cached:    l.cached,
+				DLCurrent: l.dlCurrent,
+				DLTotal:   l.dlTotal,
+				StagePct:  l.pct,
+			})
 		}
 
-		rawPct := 0
-		if totalBytes > 0 {
-			rawPct = int(downloadedBytes * 100 / totalBytes)
-		} else if totalLayers > 0 {
-			rawPct = completedLayers * 100 / totalLayers
-		}
-		if rawPct > 100 {
-			rawPct = 100
-		}
-		pct := 10 + rawPct*70/100
-		if pct > 80 {
-			pct = 80
-		}
+		downloadedBytes, totalBytes, pct := platform.ComputeWeightedPullProgress(inputs)
 		emit(platform.PullProgress{
 			Phase:           "pulling",
 			StatusText:      ev.Status,
@@ -1125,7 +1180,7 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 	emit(platform.PullProgress{
 		Phase:      "precheck",
 		StatusText: "Writing updated compose configuration",
-		Percent:    5,
+		Percent:    0,
 		LogChunk:   fmt.Sprintf("Writing updated Compose configuration to %s ...\r\n", composePath),
 	})
 
@@ -1156,11 +1211,11 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 		cmdDesc = "Running docker compose pull & up -d --remove-orphans ...\r\n"
 	}
 
-	parser := platform.NewComposeStreamParser()
+	parser := platform.NewComposeStreamParserWithSizes(opts.LayerSizes)
 	emit(platform.PullProgress{
 		Phase:      "pulling",
 		StatusText: "Pulling images and recreating Compose project",
-		Percent:    10,
+		Percent:    0,
 		LogChunk:   cmdDesc,
 	})
 

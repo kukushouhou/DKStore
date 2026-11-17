@@ -33,6 +33,18 @@ import { api, showApiError, type UpdateJobItem } from '../api/client'
 import { useI18n } from '../i18n'
 import { useUIStore } from '../store/ui'
 
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let val = bytes
+  let idx = 0
+  while (val >= 1024 && idx < units.length - 1) {
+    val /= 1024
+    idx++
+  }
+  return `${val.toFixed(idx > 1 ? 1 : 0)} ${units[idx]}`
+}
+
 export default function HistoryPage() {
   const { locale, t } = useI18n()
   const { token } = theme.useToken()
@@ -54,9 +66,56 @@ export default function HistoryPage() {
   })
   const runsQuery = useQuery({ queryKey: ['check-runs', locale], queryFn: api.checkRuns })
 
-  const updateItems = updatesQuery.data?.items ?? []
   const scanItems = runsQuery.data?.items ?? []
   const activeUpdateJobs = useUIStore((s) => s.activeUpdateJobs)
+  const updateQueueJobs = useUIStore((s) => s.updateQueueJobs)
+
+  // 将 SSE 实时进度合并进历史列表，消除 4 秒轮询滞后
+  const updateItems = useMemo(() => {
+    const raw = updatesQuery.data?.items ?? []
+    const seen = new Set<string>()
+    const merged: UpdateJobItem[] = raw.map((item) => {
+      seen.add(item.id)
+      const live = updateQueueJobs[item.id]
+      if (!live) return item
+      return {
+        ...item,
+        ...live,
+        logs: item.logs || live.logs,
+      }
+    })
+    const liveExtras: UpdateJobItem[] = []
+    for (const live of Object.values(updateQueueJobs)) {
+      if (!seen.has(live.id) && (live.status === 'queued' || live.status === 'running')) {
+        liveExtras.push(live)
+      }
+    }
+    if (liveExtras.length > 0) {
+      liveExtras.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0))
+      return [...liveExtras, ...merged]
+    }
+    return merged
+  }, [updatesQuery.data?.items, updateQueueJobs])
+
+  const formatPhaseText = (job: UpdateJobItem): string => {
+    if (job.status === 'queued') return t.queue.statusQueued
+    switch (job.phase || job.progress?.phase) {
+      case 'precheck':
+        return t.home.phasePrecheck
+      case 'pulling':
+        return (job.progress?.totalLayers ?? 0) === 0 && (job.progress?.downloadedBytes ?? 0) === 0
+          ? t.home.phaseFetchingLayers
+          : t.home.phasePulling
+      case 'recreating':
+        return t.home.phaseRecreating
+      case 'verifying':
+        return t.home.phaseVerifying
+      case 'done':
+        return t.home.phaseDone
+      default:
+        return job.progress?.statusText || job.phase
+    }
+  }
 
   // 同一项目/容器仅在其“最新一条记录仍是失败”且当前未在执行更新时才展示「重试」按钮
   const retryableJobIds = useMemo(() => {
@@ -373,9 +432,32 @@ export default function HistoryPage() {
 
                   {job.status !== 'succeeded' && job.status !== 'failed' && (
                     <div>
-                      <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-                        {job.progress?.statusText || job.phase}
-                      </Typography.Text>
+                      <Flex justify="space-between" align="center" gap={8}>
+                        <Typography.Text
+                          type="secondary"
+                          ellipsis
+                          style={{ fontSize: token.fontSizeSM, flex: 1, minWidth: 0 }}
+                        >
+                          {formatPhaseText(job)}
+                        </Typography.Text>
+                        {(job.progress?.totalLayers ?? 0) > 0 && (
+                          <Typography.Text
+                            type="secondary"
+                            style={{
+                              fontSize: token.fontSizeSM,
+                              fontVariantNumeric: 'tabular-nums',
+                              flexShrink: 0,
+                            }}
+                          >
+                            {t.home.layerStat
+                              .replace('{done}', String(job.progress?.completedLayers ?? 0))
+                              .replace('{total}', String(job.progress?.totalLayers ?? 0))}
+                            {(job.progress?.totalBytes ?? 0) > 0
+                              ? ` (${formatBytes(job.progress?.downloadedBytes ?? 0)} / ${formatBytes(job.progress?.totalBytes ?? 0)})`
+                              : ''}
+                          </Typography.Text>
+                        )}
+                      </Flex>
                       <Progress percent={job.progress?.percent ?? 0} size="small" status="active" />
                     </div>
                   )}

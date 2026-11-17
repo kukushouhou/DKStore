@@ -110,7 +110,9 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
       case 'precheck':
         return t.home.phasePrecheck
       case 'pulling':
-        return t.home.phasePulling
+        return (job.progress?.totalLayers ?? 0) === 0 && (job.progress?.downloadedBytes ?? 0) === 0
+          ? t.home.phaseFetchingLayers
+          : t.home.phasePulling
       case 'recreating':
         return t.home.phaseRecreating
       case 'verifying':
@@ -305,10 +307,7 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
           const unifiedPct =
             job.status === 'succeeded'
               ? 100
-              : Math.max(
-                  0,
-                  Math.min(100, job.progress?.percent ?? (job.status === 'running' ? 5 : 0)),
-                )
+              : Math.max(0, Math.min(100, job.progress?.percent ?? 0))
           const phaseText = formatPhaseText(job)
           const hasBytes =
             job.status === 'running' && (job.progress?.totalBytes ?? 0) > 0
@@ -408,6 +407,7 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
                       type="secondary"
                       style={{
                         fontFamily: token.fontFamilyCode,
+                        fontVariantNumeric: 'tabular-nums',
                         fontSize: 11,
                         flexShrink: 0,
                       }}
@@ -485,6 +485,7 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
                     type="secondary"
                     style={{
                       fontFamily: token.fontFamilyCode,
+                      fontVariantNumeric: 'tabular-nums',
                       fontSize: 11,
                       flexShrink: 0,
                     }}

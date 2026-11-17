@@ -261,6 +261,211 @@ func (c *Client) CheckManifestEx(ctx context.Context, ref version.ParsedRef, opt
 	return res, nil
 }
 
+// FetchImageLayerSizes 预读目标镜像（按目标宿主机架构匹配子 Manifest）全部层的真实压缩体积，
+// 返回以层 Digest 十六进制全称及前 12 位短 ID 为键的字节数映射（失败或超时时返回 nil，不阻塞拉取）。
+func (c *Client) FetchImageLayerSizes(ctx context.Context, rawImageRef, hostPlatform string) map[string]int64 {
+	if c == nil || strings.TrimSpace(rawImageRef) == "" {
+		return nil
+	}
+	ref, err := version.ParseImageRef(rawImageRef)
+	if err != nil {
+		return nil
+	}
+	tag := ref.Tag
+	if tag == "" {
+		tag = ref.Digest
+	}
+	if tag == "" {
+		return nil
+	}
+
+	cacheKey := fmt.Sprintf("layersizes:%s/%s:%s@%s", ref.Registry, ref.Repository, tag, hostPlatform)
+	if b, ok := c.getCache(ctx, cacheKey); ok {
+		var cached map[string]int64
+		if json.Unmarshal(b, &cached) == nil && len(cached) > 0 {
+			return cached
+		}
+	}
+
+	var sizes map[string]int64
+
+	// 1. 若镜像引用显式配置了加速镜像域名（如 docker.1ms.run/...），优先直连该加速源读取 Manifest
+	if rawHost, rawRepo := extractExplicitMirrorHostRepo(rawImageRef); rawHost != "" &&
+		rawHost != ref.Registry && rawHost != "index.docker.io" && rawHost != "registry-1.docker.io" {
+		sizes = c.fetchOCIManifestLayerSizes(ctx, rawHost, rawRepo, tag, hostPlatform)
+	}
+
+	// 2. Docker Hub 镜像优先走网页端 /tags/{tag}/images 接口（0 拉取配额）
+	if len(sizes) == 0 && ref.Registry == "docker.io" && !strings.HasPrefix(tag, "sha256:") {
+		sizes = c.fetchDockerHubTagLayerSizes(ctx, ref.Repository, tag, hostPlatform)
+	}
+
+	// 3. 标准 OCI / Registry v2 Manifest 接口（支持 GHCR / LSCR / 私有仓库鉴权与多架构 Index 解析）
+	if len(sizes) == 0 {
+		sizes = c.fetchOCIManifestLayerSizes(ctx, ref.Registry, ref.Repository, tag, hostPlatform)
+	}
+
+	if len(sizes) > 0 {
+		if b, err := json.Marshal(sizes); err == nil {
+			c.putCache(ctx, cacheKey, b, 30*time.Minute)
+		}
+	}
+	return sizes
+}
+
+func extractExplicitMirrorHostRepo(raw string) (host, repo string) {
+	s := strings.TrimSpace(raw)
+	if at := strings.Index(s, "@"); at >= 0 {
+		s = s[:at]
+	}
+	first, rest, ok := strings.Cut(s, "/")
+	if !ok || rest == "" {
+		return "", ""
+	}
+	if !strings.ContainsAny(first, ".:") && !strings.EqualFold(first, "localhost") {
+		return "", ""
+	}
+	lastSlash := strings.LastIndex(rest, "/")
+	colon := strings.LastIndex(rest, ":")
+	if colon > lastSlash {
+		rest = rest[:colon]
+	}
+	if !strings.Contains(rest, "/") && strings.Contains(strings.ToLower(first), "docker") {
+		rest = "library/" + rest
+	}
+	return strings.ToLower(first), rest
+}
+
+func recordLayerDigestSize(out map[string]int64, digest string, size int64) {
+	if size <= 0 {
+		return
+	}
+	norm := NormalizeDigest(digest)
+	hexDig := strings.ToLower(strings.TrimPrefix(norm, "sha256:"))
+	if len(hexDig) < 12 {
+		return
+	}
+	out[hexDig] = size
+	out[hexDig[:12]] = size
+}
+
+func parseManifestBodyLayerSizes(body []byte) map[string]int64 {
+	var mf struct {
+		Layers []struct {
+			Digest string `json:"digest"`
+			Size   int64  `json:"size"`
+		} `json:"layers"`
+	}
+	if json.Unmarshal(body, &mf) != nil || len(mf.Layers) == 0 {
+		return nil
+	}
+	out := make(map[string]int64, len(mf.Layers)*2)
+	for _, l := range mf.Layers {
+		recordLayerDigestSize(out, l.Digest, l.Size)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (c *Client) fetchOCIManifestLayerSizes(ctx context.Context, reg, repo, tag, hostPlatform string) map[string]int64 {
+	baseURL := c.registryAPIBase(reg)
+	manifestURL := fmt.Sprintf("%s/v2/%s/manifests/%s", baseURL, repo, url.PathEscape(tag))
+	resp, body, err := c.doRegistryRequest(ctx, reg, repo, http.MethodGet, manifestURL, acceptManifestHeaders)
+	if err != nil {
+		return nil
+	}
+	ct := strings.ToLower(resp.Header.Get("Content-Type"))
+	if strings.Contains(ct, "manifest.list") || strings.Contains(ct, "image.index") {
+		var idx struct {
+			Manifests []struct {
+				Digest   string `json:"digest"`
+				Platform struct {
+					OS      string `json:"os"`
+					Arch    string `json:"architecture"`
+					Variant string `json:"variant"`
+				} `json:"platform"`
+			} `json:"manifests"`
+		}
+		if json.Unmarshal(body, &idx) != nil || len(idx.Manifests) == 0 {
+			return nil
+		}
+		pickedDigest := ""
+		if hostPlatform != "" {
+			plats := make([]string, len(idx.Manifests))
+			for i, m := range idx.Manifests {
+				plats[i] = formatPlatform(m.Platform.OS, m.Platform.Arch, m.Platform.Variant)
+			}
+			if i := selectPlatformIndex(hostPlatform, plats); i >= 0 {
+				pickedDigest = NormalizeDigest(idx.Manifests[i].Digest)
+			}
+		} else if len(idx.Manifests) == 1 {
+			pickedDigest = NormalizeDigest(idx.Manifests[0].Digest)
+		}
+		if pickedDigest == "" {
+			return nil
+		}
+		pURL := fmt.Sprintf("%s/v2/%s/manifests/%s", baseURL, repo, pickedDigest)
+		_, pBody, pErr := c.doRegistryRequest(ctx, reg, repo, http.MethodGet, pURL, acceptManifestHeaders)
+		if pErr != nil {
+			return nil
+		}
+		return parseManifestBodyLayerSizes(pBody)
+	}
+	return parseManifestBodyLayerSizes(body)
+}
+
+func (c *Client) fetchDockerHubTagLayerSizes(ctx context.Context, repository, tag, hostPlatform string) map[string]int64 {
+	u := fmt.Sprintf("%s/v2/repositories/%s/tags/%s/images", c.hubAPIBase(), repository, url.PathEscape(tag))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var images []struct {
+		OS      string `json:"os"`
+		Arch    string `json:"architecture"`
+		Variant string `json:"variant"`
+		Layers  []struct {
+			Digest string `json:"digest"`
+			Size   int64  `json:"size"`
+		} `json:"layers"`
+	}
+	if json.Unmarshal(body, &images) != nil || len(images) == 0 {
+		return nil
+	}
+	picked := -1
+	if hostPlatform != "" {
+		plats := make([]string, len(images))
+		for i, im := range images {
+			plats[i] = formatPlatform(im.OS, im.Arch, im.Variant)
+		}
+		picked = selectPlatformIndex(hostPlatform, plats)
+	} else if len(images) == 1 {
+		picked = 0
+	}
+	if picked < 0 {
+		return nil
+	}
+	out := make(map[string]int64, len(images[picked].Layers)*2)
+	for _, l := range images[picked].Layers {
+		recordLayerDigestSize(out, l.Digest, l.Size)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // FetchRecentTags 按实施文档 §5.4 的有限策略获取候选标签列表（含可用 Digest 与更新时间）。
 // Docker Hub 最多拉取 maxPages（默认 3，每页 100）按更新时间倒序的标签。
 func (c *Client) FetchRecentTags(ctx context.Context, ref version.ParsedRef, maxPages int, bypassCache bool) ([]TagDigestEntry, error) {
