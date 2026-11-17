@@ -968,6 +968,65 @@ func ParseComposeServiceMounts(yamlBytes []byte, workDir, projectName string, en
 	return out
 }
 
+// ComposeHasInvalidVolumeTarget 检查 Compose YAML 自身是否显式声明了非绝对路径的非法容器挂载目标。
+func ComposeHasInvalidVolumeTarget(yamlBytes []byte) bool {
+	var doc struct {
+		Services map[string]struct {
+			Volumes []any `yaml:"volumes"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(yamlBytes, &doc); err != nil || len(doc.Services) == 0 {
+		return false
+	}
+	checkTarget := func(tgt string) bool {
+		t := strings.TrimSpace(tgt)
+		if t == "" || strings.HasPrefix(t, "$") {
+			return false
+		}
+		return !IsValidContainerMountPath(t)
+	}
+	for _, svc := range doc.Services {
+		for _, entry := range svc.Volumes {
+			switch v := entry.(type) {
+			case string:
+				s := strings.TrimSpace(v)
+				if s == "" {
+					continue
+				}
+				searchFrom := 0
+				if len(s) >= 3 && s[1] == ':' && (s[2] == '/' || s[2] == '\\') {
+					searchFrom = 2
+				}
+				relColon := strings.Index(s[searchFrom:], ":")
+				if relColon < 0 {
+					if checkTarget(s) {
+						return true
+					}
+					continue
+				}
+				rest := s[searchFrom+relColon+1:]
+				tgtSearch := 0
+				if len(rest) >= 3 && rest[1] == ':' && (rest[2] == '/' || rest[2] == '\\') {
+					tgtSearch = 2
+				}
+				modeColon := strings.Index(rest[tgtSearch:], ":")
+				target := rest
+				if modeColon >= 0 {
+					target = rest[:tgtSearch+modeColon]
+				}
+				if checkTarget(target) {
+					return true
+				}
+			case map[string]any:
+				if tgt, ok := v["target"].(string); ok && checkTarget(tgt) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func unionOrderedStrings(groups ...[]string) []string {
 	var out []string
 	seen := make(map[string]bool)

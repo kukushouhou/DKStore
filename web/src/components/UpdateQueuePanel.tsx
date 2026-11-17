@@ -69,6 +69,7 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
   const upsertUpdateJob = useUIStore((s) => s.upsertUpdateJob)
   const clearFinishedQueueJobs = useUIStore((s) => s.clearFinishedQueueJobs)
   const [retryingId, setRetryingId] = useState<string | null>(null)
+  const [expandedErrIds, setExpandedErrIds] = useState<Record<string, boolean>>({})
 
   if (jobs.length === 0) return null
 
@@ -379,19 +380,39 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
                 </div>
               )}
 
-              {/* 第三行：阶段文案 / 字节进度 / 失败完整说明（失败时自然换行完整展示，不截断） */}
+              {/* 第三行：阶段文案 / 字节进度 / 失败说明（超长报错默认展示 3 行摘要，可展开全文） */}
               {job.status === 'failed' ? (
-                <Typography.Text
-                  type="danger"
-                  strong
-                  style={{
-                    fontSize: token.fontSizeSM,
-                    lineHeight: 1.5,
-                    wordBreak: 'break-word',
-                  }}
-                >
-                  {phaseText}
-                </Typography.Text>
+                <div>
+                  <div
+                    style={{
+                      fontSize: token.fontSizeSM,
+                      fontWeight: 600,
+                      color: token.colorError,
+                      lineHeight: 1.5,
+                      wordBreak: 'break-word',
+                      ...(expandedErrIds[job.id]
+                        ? {}
+                        : {
+                            display: '-webkit-box',
+                            WebkitLineClamp: 3,
+                            WebkitBoxOrient: 'vertical',
+                            overflow: 'hidden',
+                          }),
+                    }}
+                  >
+                    {phaseText}
+                  </div>
+                  {phaseText.length > 90 && (
+                    <Typography.Link
+                      onClick={() =>
+                        setExpandedErrIds((prev) => ({ ...prev, [job.id]: !prev[job.id] }))
+                      }
+                      style={{ fontSize: 12, color: token.colorTextSecondary }}
+                    >
+                      {expandedErrIds[job.id] ? t.home.collapseError : t.home.expandError}
+                    </Typography.Link>
+                  )}
+                </div>
               ) : (
                 <Flex align="center" justify="space-between" gap={8}>
                   <Typography.Text

@@ -75,3 +75,26 @@ func TestFormatUpdateError_HumanizedPlainLanguage(t *testing.T) {
 		t.Fatalf("expected humanized registry network error, got %q", regMsg)
 	}
 }
+
+func TestBilingualAndLegacyStrip(t *testing.T) {
+	msg := Bilingual("群晖项目重建失败：invalid mount path", "Synology Project rebuild failed: invalid mount path") +
+		" | " + Bilingual("已写回原 YAML", "original YAML restored")
+	zh := FormatUpdateError(ZhCN, "recreate_failed", msg)
+	en := FormatUpdateError(EnUS, "recreate_failed", msg)
+	if strings.Contains(zh, "Synology Project") || strings.Contains(zh, "original YAML") || !strings.Contains(zh, "群晖项目重建失败") {
+		t.Fatalf("unexpected ZhCN output: %q", zh)
+	}
+	if strings.Contains(en, "群晖") || strings.Contains(en, "已写回") || !strings.Contains(en, "Synology Project rebuild failed") {
+		t.Fatalf("unexpected EnUS output: %q", en)
+	}
+
+	legacy := "群晖 Project 重建失败: Error response from daemon: invalid mount path: '--net=host' / Synology Project rebuild failed: Error response from daemon: invalid mount path: '--net=host' | 已写回原 YAML / original YAML restored"
+	lzh := FormatUpdateError(ZhCN, "recreate_failed", legacy)
+	lenOut := FormatUpdateError(EnUS, "recreate_failed", legacy)
+	if strings.Contains(lzh, "Synology Project") || strings.Contains(lzh, "original YAML") {
+		t.Fatalf("expected legacy English half stripped for ZhCN, got %q", lzh)
+	}
+	if strings.Contains(lenOut, "群晖") || strings.Contains(lenOut, "已写回") {
+		t.Fatalf("expected legacy Chinese half stripped for EnUS, got %q", lenOut)
+	}
+}

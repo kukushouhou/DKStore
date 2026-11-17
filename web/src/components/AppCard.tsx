@@ -19,6 +19,7 @@ import {
 } from 'antd'
 import {
   ArrowRightOutlined,
+  CloseCircleFilled,
   DownOutlined,
   EditOutlined,
   ExportOutlined,
@@ -106,6 +107,7 @@ export default function AppCard({
   const [lifecycleSubmitting, setLifecycleSubmitting] = useState(false)
   const [updatingSvcKey, setUpdatingSvcKey] = useState('')
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null)
+  const [expandedErrIds, setExpandedErrIds] = useState<Record<string, boolean>>({})
   const [restoring, setRestoring] = useState(false)
 
   const isNoUpdate =
@@ -540,14 +542,12 @@ export default function AppCard({
         styles={{
           body: {
             padding: '16px 18px',
-            height: '100%',
             display: 'flex',
             flexDirection: 'column',
             justifyContent: 'space-between',
           },
         }}
         style={{
-          height: '100%',
           borderColor: isCaution && !isChecking ? token.colorWarningBorder : undefined,
         }}
       >
@@ -804,38 +804,89 @@ export default function AppCard({
             </div>
           ))}
 
-          {failedJobsForApp.map((job) => (
-            <Alert
-              key={job.id}
-              type="error"
-              showIcon
-              action={
-                <Space size={8} align="center">
-                  <Typography.Link
-                    onClick={() => setActiveLogJobId(job.id)}
-                    style={{ fontSize: token.fontSizeSM, whiteSpace: 'nowrap' }}
-                  >
-                    {t.home.viewLogs}
-                  </Typography.Link>
-                  <Button
-                    size="small"
-                    type="primary"
-                    loading={retryingJobId === job.id}
-                    onClick={() => handleRetryFailedJob(job.id)}
-                  >
-                    {t.queue.retryBtn}
-                  </Button>
-                </Space>
-              }
-              title={
-                <Typography.Text style={{ fontSize: token.fontSizeSM, wordBreak: 'break-word' }}>
-                  {t.home.updateFailed}
-                  {job.errorMsg || job.errorCode}
-                </Typography.Text>
-              }
-              style={{ marginTop: 10, padding: '6px 10px' }}
-            />
-          ))}
+          {failedJobsForApp.map((job) => {
+            const errBody = job.errorMsg || job.errorCode || ''
+            const isLongErr = errBody.length > 68
+            const isExpanded = Boolean(expandedErrIds[job.id])
+            return (
+              <div
+                key={job.id}
+                style={{
+                  marginTop: 10,
+                  padding: '8px 10px',
+                  borderRadius: token.borderRadius,
+                  border: `1px solid ${token.colorErrorBorder}`,
+                  background: token.colorErrorBg,
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: token.fontSizeSM,
+                    lineHeight: 1.5,
+                    color: token.colorText,
+                    wordBreak: 'break-word',
+                    ...(isExpanded
+                      ? {}
+                      : {
+                          display: '-webkit-box',
+                          WebkitLineClamp: 2,
+                          WebkitBoxOrient: 'vertical',
+                          overflow: 'hidden',
+                        }),
+                  }}
+                >
+                  <CloseCircleFilled
+                    style={{ color: token.colorError, marginRight: 6, fontSize: 13 }}
+                  />
+                  <Typography.Text strong style={{ fontSize: token.fontSizeSM, color: token.colorError }}>
+                    {t.home.updateFailed}
+                  </Typography.Text>
+                  {errBody}
+                </div>
+
+                <Flex
+                  align="center"
+                  justify="space-between"
+                  gap={8}
+                  style={{
+                    marginTop: 6,
+                    paddingTop: 6,
+                    borderTop: `1px solid ${token.colorErrorBorder}`,
+                  }}
+                >
+                  {isLongErr ? (
+                    <Typography.Link
+                      onClick={() =>
+                        setExpandedErrIds((prev) => ({ ...prev, [job.id]: !prev[job.id] }))
+                      }
+                      style={{ fontSize: 12, color: token.colorTextSecondary }}
+                    >
+                      {isExpanded ? t.home.collapseError : t.home.expandError}
+                    </Typography.Link>
+                  ) : (
+                    <span />
+                  )}
+
+                  <Space size={8} align="center">
+                    <Typography.Link
+                      onClick={() => setActiveLogJobId(job.id)}
+                      style={{ fontSize: token.fontSizeSM, whiteSpace: 'nowrap' }}
+                    >
+                      {t.home.viewLogs}
+                    </Typography.Link>
+                    <Button
+                      size="small"
+                      type="primary"
+                      loading={retryingJobId === job.id}
+                      onClick={() => handleRetryFailedJob(job.id)}
+                    >
+                      {t.queue.retryBtn}
+                    </Button>
+                  </Space>
+                </Flex>
+              </div>
+            )
+          })}
 
           {/* 底部对齐操作栏 */}
         <Flex

@@ -863,3 +863,81 @@ func TestDSMGetHostMetrics_UtilizationAndVolumes(t *testing.T) {
 		t.Fatalf("unexpected free bytes: %+v", st.Disks)
 	}
 }
+
+func TestDSMProjectUpdate_AutoCleansLegacyInvalidVolumeContainer(t *testing.T) {
+	oldTimeout, oldInterval := verifyTimeout, verifyInterval
+	verifyTimeout, verifyInterval = 200*time.Millisecond, 20*time.Millisecond
+	defer func() { verifyTimeout, verifyInterval = oldTimeout, oldInterval }()
+
+	curYAML := "version: '3'\nservices:\n  gewe:\n    container_name: gewe\n    image: registry.cn-hangzhou.aliyuncs.com/gewe/gewe:latest\n    volumes:\n      - /volume1/docker/gewechat/data:/root/temp\n"
+	curImgID := "sha256:3d9048"
+	oldDeleted := false
+	stoppedCalled := false
+
+	f := &fakeDSM{}
+	f.rawHandler = func(w http.ResponseWriter, api, method string) bool {
+		if api == "SYNO.Docker.Project" && method == "build_stream" {
+			if !oldDeleted {
+				_, _ = w.Write([]byte("Error response from daemon: invalid mount config for type \"volume\": invalid mount path: '--net=host' mount path must be absolute\r\n"))
+				return true
+			}
+			_, _ = w.Write([]byte(" Container gewe  Created\r\n Container gewe  Started\r\n"))
+			curImgID = "sha256:d57da5"
+			return true
+		}
+		return false
+	}
+	f.handler = func(api, method string, form map[string]string, sid string) (any, int) {
+		switch api + "." + method {
+		case "SYNO.Docker.Image.pull_start":
+			return nil, 1202
+		case "SYNO.Docker.Project.get":
+			return map[string]any{
+				"id": "p-gewe", "name": "gewechat", "path": "/volume1/docker/gewechat", "content": curYAML,
+				"containers": []any{map[string]any{
+					"Id": "93c454abe41c", "Name": "/gewe", "Image": curImgID,
+					"Config": map[string]any{
+						"Image":   "registry.cn-hangzhou.aliyuncs.com/gewe/gewe:latest",
+						"Labels":  map[string]string{"com.docker.compose.service": "gewe"},
+						"Volumes": map[string]any{"--net=host": map[string]any{}},
+					},
+					"State": map[string]any{"Status": "running", "Running": true},
+				}},
+			}, 0
+		case "SYNO.Docker.Project.update":
+			_ = json.Unmarshal([]byte(form["content"]), &curYAML)
+			return map[string]any{}, 0
+		case "SYNO.Docker.Container.stop":
+			stoppedCalled = true
+			return map[string]any{}, 0
+		case "SYNO.Docker.Container.delete":
+			oldDeleted = true
+			return map[string]any{}, 0
+		case "SYNO.Docker.Image.list":
+			return map[string]any{"images": []any{
+				map[string]any{"id": "sha256:d57da5", "repository": "registry.cn-hangzhou.aliyuncs.com/gewe/gewe", "tags": []string{"latest"}},
+			}}, 0
+		}
+		return map[string]any{}, 0
+	}
+
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	ad := New("h-gewe", nil, DSMConfig{URL: srv.URL, Username: "admin", Secret: "x"})
+	defer ad.Close()
+
+	res, err := ad.UpdateService(context.Background(), platform.UpdateRequest{
+		AppName:        "gewechat",
+		ServiceName:    "gewe",
+		Source:         platform.SourceDSMProject,
+		Project:        &platform.ProjectInfo{Name: "gewechat", DSMProjectID: "p-gewe"},
+		OldImageRef:    "registry.cn-hangzhou.aliyuncs.com/gewe/gewe:latest",
+		TargetImageRef: "registry.cn-hangzhou.aliyuncs.com/gewe/gewe:latest",
+	}, nil)
+	if err != nil {
+		t.Fatalf("expected auto-clean rebuild to succeed, got err: %v", err)
+	}
+	if !stoppedCalled || !oldDeleted || res.NewImageID != "sha256:d57da5" {
+		t.Fatalf("unexpected state stopped=%v deleted=%v res=%+v", stoppedCalled, oldDeleted, res)
+	}
+}

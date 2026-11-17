@@ -88,6 +88,7 @@ func buildCreatePayload(oldID string, rawInspect map[string]any, imageCfg map[st
 	if imageCfg != nil {
 		diffConfigAgainstImage(payload, imageCfg)
 	}
+	sanitizePayloadVolumes(payload)
 
 	if hostCfg, ok := rawInspect["HostConfig"].(map[string]any); ok && hostCfg != nil {
 		hc := make(map[string]any, len(hostCfg)+1)
@@ -201,7 +202,7 @@ func volumeBindsFromMounts(binds []string, hcMounts any, mounts any) []string {
 		typ, _ := mm["Type"].(string)
 		name, _ := mm["Name"].(string)
 		dest, _ := mm["Destination"].(string)
-		if typ != "volume" || name == "" || dest == "" || declared[dest] {
+		if typ != "volume" || name == "" || dest == "" || !IsValidContainerMountPath(dest) || declared[dest] {
 			continue
 		}
 		spec := name + ":" + dest
@@ -212,6 +213,36 @@ func volumeBindsFromMounts(binds []string, hcMounts any, mounts any) []string {
 		declared[dest] = true
 	}
 	return extra
+}
+
+// IsValidContainerMountPath 判断容器内挂载目标路径是否为合法绝对路径（排除上游脏镜像遗留的 "--net=host" 等非法 VOLUME 项）。
+func IsValidContainerMountPath(dest string) bool {
+	s := strings.TrimSpace(dest)
+	if s == "" {
+		return false
+	}
+	if strings.HasPrefix(s, "/") {
+		return true
+	}
+	return len(s) >= 3 && ((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= 'A' && s[0] <= 'Z')) && s[1] == ':' && (s[2] == '/' || s[2] == '\\')
+}
+
+func sanitizePayloadVolumes(payload map[string]any) {
+	vols, ok := payload["Volumes"].(map[string]any)
+	if !ok {
+		return
+	}
+	keep := make(map[string]any, len(vols))
+	for k, v := range vols {
+		if IsValidContainerMountPath(k) {
+			keep[k] = v
+		}
+	}
+	if len(keep) == 0 {
+		delete(payload, "Volumes")
+	} else {
+		payload["Volumes"] = keep
+	}
 }
 
 func toStringSlice(v any) []string {

@@ -621,7 +621,13 @@ type dsmContainerDetailed struct {
 		Image        string            `json:"Image"`
 		Labels       map[string]string `json:"Labels"`
 		ExposedPorts map[string]any    `json:"ExposedPorts"`
+		Volumes      map[string]any    `json:"Volumes"`
 	} `json:"Config"`
+	Mounts []struct {
+		Type        string `json:"Type"`
+		Name        string `json:"Name"`
+		Destination string `json:"Destination"`
+	} `json:"Mounts"`
 	HostConfig      map[string]any `json:"HostConfig"`
 	NetworkSettings struct {
 		Ports map[string]any `json:"Ports"`
@@ -1285,6 +1291,15 @@ func (c *dsmClient) DeleteContainer(ctx context.Context, name string) error {
 	return c.call(ctx, "SYNO.Docker.Container", "1", "delete", map[string]string{
 		"name":             jsonParam(name),
 		"force":            "false",
+		"preserve_profile": "false",
+	}, nil)
+}
+
+// DeleteContainerForce 强制删除指定名称的容器（用于清理带非法匿名卷的阻塞旧容器）。
+func (c *dsmClient) DeleteContainerForce(ctx context.Context, name string) error {
+	return c.call(ctx, "SYNO.Docker.Container", "1", "delete", map[string]string{
+		"name":             jsonParam(name),
+		"force":            "true",
 		"preserve_profile": "false",
 	}, nil)
 }

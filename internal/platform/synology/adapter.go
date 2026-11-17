@@ -167,7 +167,7 @@ func (a *Adapter) HasLocalImage(ctx context.Context, imageIDOrRef string) bool {
 }
 
 // bi 生成中英双语文案（UpdateError 不携带语言，由前端/上层原样展示）。
-func bi(zh, en string) string { return zh + " / " + en }
+func bi(zh, en string) string { return i18n.Bilingual(zh, en) }
 
 func biErr(err error) string {
 	return bi(i18n.LocalizeErr(i18n.ZhCN, err), i18n.LocalizeErr(i18n.EnUS, err))
@@ -342,17 +342,24 @@ func (a *Adapter) updateProjectService(
 		Percent:    0,
 		LogChunk:   fmt.Sprintf("==> Updating DSM Project %s (service %s -> %s)\r\n", req.Project.Name, req.ServiceName, req.TargetImageRef),
 	})
-	if err := a.dsmCli.UpdateAndBuildProjectStream(ctx, projectID, string(afterBytes), func(chunk string) {
+	streamChunk := func(chunk string) {
 		emit(parser.Feed(chunk))
-	}); err != nil {
+	}
+	buildErr := a.dsmCli.UpdateAndBuildProjectStream(ctx, projectID, string(afterBytes), streamChunk)
+	if buildErr != nil && isInvalidVolumeMountPathErr(buildErr) && !docker.ComposeHasInvalidVolumeTarget(afterBytes) {
+		if a.removeLegacyInvalidVolumeContainers(ctx, detail, req.ServiceName, emit) {
+			buildErr = a.dsmCli.buildProjectWithStream(ctx, projectID, streamChunk)
+		}
+	}
+	if buildErr != nil {
 		var pbe *ProjectBuildError
 		restoreNote := ""
-		if errors.As(err, &pbe) && pbe.YAMLWritten {
+		if !errors.As(buildErr, &pbe) || pbe.YAMLWritten {
 			restoreNote = a.restoreProjectYAML(ctx, projectID, beforeYAML)
 		}
 		return nil, &platform.UpdateError{
 			Code:    "recreate_failed",
-			Message: biErr(err) + restoreNote,
+			Message: biErr(buildErr) + restoreNote,
 		}
 	}
 	parser.Flush()
@@ -473,6 +480,101 @@ func (a *Adapter) restoreProjectYAML(ctx context.Context, projectID, beforeYAML 
 			"original YAML restored, but rebuilding with it failed; please build it manually in Container Manager")
 	}
 	return " | " + bi("已写回原 YAML", "original YAML restored")
+}
+
+func isInvalidVolumeMountPathErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "mount path must be absolute") ||
+		(strings.Contains(lower, "invalid mount config") && strings.Contains(lower, "invalid mount path"))
+}
+
+func containerHasInvalidVolume(c dsmContainerDetailed) bool {
+	for k := range c.Config.Volumes {
+		if strings.TrimSpace(k) != "" && !docker.IsValidContainerMountPath(k) {
+			return true
+		}
+	}
+	for _, m := range c.Mounts {
+		if strings.EqualFold(strings.TrimSpace(m.Type), "volume") &&
+			strings.TrimSpace(m.Destination) != "" &&
+			!docker.IsValidContainerMountPath(m.Destination) {
+			return true
+		}
+	}
+	return false
+}
+
+// removeLegacyInvalidVolumeContainers 移除项目内携带非法匿名卷挂载（如 "--net=host"）的旧容器实例，
+// 使随后执行的 SYNO.Docker.Project build_stream 按全新容器重建而不再继承旧容器脏匿名卷。
+func (a *Adapter) removeLegacyInvalidVolumeContainers(
+	ctx context.Context,
+	detail *dsmProjectDetail,
+	targetService string,
+	emit func(platform.PullProgress),
+) bool {
+	if a.dsmCli == nil || detail == nil || len(detail.Containers) == 0 {
+		return false
+	}
+	type cand struct {
+		name    string
+		running bool
+	}
+	var targets []cand
+	seen := make(map[string]bool)
+	addCand := func(c dsmContainerDetailed) {
+		n := strings.TrimPrefix(strings.TrimSpace(c.Name), "/")
+		if n == "" || seen[n] {
+			return
+		}
+		seen[n] = true
+		running := c.State.Running || strings.EqualFold(c.State.Status, "running")
+		targets = append(targets, cand{name: n, running: running})
+	}
+
+	for _, c := range detail.Containers {
+		if containerHasInvalidVolume(c) {
+			addCand(c)
+		}
+	}
+	if len(targets) == 0 && targetService != "" {
+		if c := findProjectServiceContainer(detail, targetService); c != nil {
+			addCand(*c)
+		}
+	}
+	if len(targets) == 0 {
+		return false
+	}
+
+	var names []string
+	for _, t := range targets {
+		names = append(names, t.name)
+	}
+	if emit != nil {
+		emit(platform.PullProgress{
+			Phase:      "recreating",
+			StatusText: "Cleaning legacy invalid anonymous volume mount before rebuild",
+			Percent:    85,
+			LogChunk:   fmt.Sprintf("==> Detected legacy invalid anonymous volume mount on [%s], removing old container instance before clean rebuild...\r\n", strings.Join(names, ", ")),
+		})
+	}
+
+	removedAny := false
+	for _, t := range targets {
+		if t.running {
+			_ = a.dsmCli.StopContainer(ctx, t.name)
+		}
+		if err := a.dsmCli.DeleteContainer(ctx, t.name); err != nil {
+			if fErr := a.dsmCli.DeleteContainerForce(ctx, t.name); fErr == nil {
+				removedAny = true
+			}
+		} else {
+			removedAny = true
+		}
+	}
+	return removedAny
 }
 
 func (a *Adapter) upgradeStandalone(ctx context.Context, req platform.UpdateRequest, repo, expectedID string, before *dsmContainerListItem, emit func(platform.PullProgress)) (*platform.UpdateResult, error) {
@@ -1468,17 +1570,24 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 		Percent:    0,
 		LogChunk:   "Writing updated compose.yaml and starting native Docker Compose build_stream...\r\n",
 	})
-	if err := a.dsmCli.UpdateAndBuildProjectStream(ctx, project.DSMProjectID, newYAML, func(chunk string) {
+	streamChunk := func(chunk string) {
 		emit(parser.Feed(chunk))
-	}); err != nil {
+	}
+	buildErr := a.dsmCli.UpdateAndBuildProjectStream(ctx, project.DSMProjectID, newYAML, streamChunk)
+	if buildErr != nil && isInvalidVolumeMountPathErr(buildErr) && !docker.ComposeHasInvalidVolumeTarget([]byte(newYAML)) {
+		if a.removeLegacyInvalidVolumeContainers(ctx, detail, "", emit) {
+			buildErr = a.dsmCli.buildProjectWithStream(ctx, project.DSMProjectID, streamChunk)
+		}
+	}
+	if buildErr != nil {
 		var pbe *ProjectBuildError
 		restoreNote := ""
-		if !errors.As(err, &pbe) || pbe.YAMLWritten {
+		if !errors.As(buildErr, &pbe) || pbe.YAMLWritten {
 			restoreNote = a.restoreProjectYAML(ctx, project.DSMProjectID, beforeYAML)
 		}
 		return &platform.UpdateError{
 			Code:    "recreate_failed",
-			Message: biErr(err) + restoreNote,
+			Message: biErr(buildErr) + restoreNote,
 		}
 	}
 	parser.Flush()

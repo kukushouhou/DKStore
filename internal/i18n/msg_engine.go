@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 // 本文件提供更新执行、检测与注册表等“引擎层”返回给用户的可本地化错误码与中英文文案（审计 I1）。
@@ -197,11 +198,30 @@ func (e *EngineError) Localize(lang Lang) string { return EngineMessage(lang, e.
 // Detail 返回可落库的编码字符串。
 func (e *EngineError) Detail() string { return EngineDetail(e.Key, e.Args...) }
 
-const detailPrefix = "@msg:"
+const (
+	detailPrefix = "@msg:"
+	biOpen       = "«@bi:"
+	biClose      = "»"
+)
 
 type encodedDetail struct {
 	K string   `json:"k"`
 	A []string `json:"a,omitempty"`
+}
+
+type encodedBilingual struct {
+	Z string `json:"z"`
+	E string `json:"e"`
+}
+
+// Bilingual 将中英文双语文案编码为可内联拼接的字符串片段，读取展示时由 LocalizeDetail 按请求语言还原为单语。
+func Bilingual(zh, en string) string {
+	if zh == en {
+		return zh
+	}
+	b, _ := json.Marshal(encodedBilingual{Z: zh, E: en})
+	safe := strings.ReplaceAll(string(b), biClose, `\u00bb`)
+	return biOpen + safe + biClose
 }
 
 // EngineDetail 将消息键与参数编码为可存储字符串，读取时通过 LocalizeDetail 按语言还原。
@@ -222,16 +242,98 @@ func DetailOf(err error) string {
 	return err.Error()
 }
 
-// LocalizeDetail 将 EngineDetail 编码的字符串按语言还原；普通字符串原样返回。
+// LocalizeDetail 将 EngineDetail / Bilingual 编码的字符串按语言还原，并兼容清理历史双语拼接串。
 func LocalizeDetail(lang Lang, s string) string {
-	if !strings.HasPrefix(s, detailPrefix) {
+	if strings.Contains(s, biOpen) {
+		s = resolveInlineBilingual(lang, s)
+	}
+	if strings.HasPrefix(s, detailPrefix) {
+		var d encodedDetail
+		if err := json.Unmarshal([]byte(s[len(detailPrefix):]), &d); err == nil && d.K != "" {
+			return EngineMessage(lang, d.K, d.A...)
+		}
+	}
+	return stripLegacyBilingual(lang, s)
+}
+
+func resolveInlineBilingual(lang Lang, s string) string {
+	for range 16 {
+		start := strings.Index(s, biOpen)
+		if start < 0 {
+			break
+		}
+		rest := s[start+len(biOpen):]
+		end := strings.Index(rest, biClose)
+		if end < 0 {
+			break
+		}
+		var b encodedBilingual
+		if err := json.Unmarshal([]byte(rest[:end]), &b); err != nil {
+			break
+		}
+		picked := b.Z
+		if lang == EnUS && b.E != "" {
+			picked = b.E
+		}
+		s = s[:start] + picked + rest[end+len(biClose):]
+	}
+	return s
+}
+
+func stripLegacyBilingual(lang Lang, s string) string {
+	if !strings.Contains(s, " / ") {
 		return s
 	}
-	var d encodedDetail
-	if err := json.Unmarshal([]byte(s[len(detailPrefix):]), &d); err != nil || d.K == "" {
+	parts := strings.Split(s, " | ")
+	changed := false
+	for i, seg := range parts {
+		if !strings.Contains(seg, " / ") {
+			continue
+		}
+		searchFrom := 0
+		for {
+			idx := strings.Index(seg[searchFrom:], " / ")
+			if idx < 0 {
+				break
+			}
+			pos := searchFrom + idx
+			left := strings.TrimSpace(seg[:pos])
+			right := strings.TrimSpace(seg[pos+3:])
+			if containsHan(left) && !containsHan(right) && containsASCIIAlpha(right) {
+				if lang == EnUS {
+					parts[i] = right
+				} else {
+					parts[i] = left
+				}
+				changed = true
+				break
+			}
+			searchFrom = pos + 3
+		}
+	}
+	if !changed {
 		return s
 	}
-	return EngineMessage(lang, d.K, d.A...)
+	return strings.Join(parts, " | ")
+}
+
+func containsHan(s string) bool {
+	for _, r := range s {
+		if unicode.Is(unicode.Han, r) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsASCIIAlpha(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			return true
+		}
+	}
+	return false
 }
 
 // LocalizeError 按语言渲染任意 error（EngineError 与编码字符串按语言还原，其余原样）。

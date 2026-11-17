@@ -36,7 +36,7 @@ var hostMessages = map[string]hostMsg{
 	"dsm.api_failed":          {"调用群晖接口 %s.%s 失败（错误码 %d）", "Synology API %s.%s failed (error code %d)"},
 	"dsm.no_container_mgr":    {"无法访问群晖 Container Manager 项目接口（请确认已安装 Container Manager 且账号具备管理员权限）", "Cannot access the Synology Container Manager project API (make sure Container Manager is installed and the account is an administrator)"},
 	"dsm.task_failed":         {"群晖任务 %s 执行失败：%s", "Synology task %s failed: %s"},
-	"dsm.build_failed":        {"群晖 Project 重建失败（build_stream 与 build 均失败）", "Synology Project rebuild failed (both build_stream and build failed)"},
+	"dsm.build_failed":        {"群晖项目重建失败", "Synology Project rebuild failed"},
 	"dsm.project_update_fail": {"写入群晖 Project 配置失败", "Failed to write Synology Project configuration"},
 	"dsm.synowebapi_failed":   {"synowebapi 返回失败", "synowebapi returned failure"},
 }

@@ -371,14 +371,13 @@ export default function HomePage() {
       )
     }
     return (
-      <Row gutter={[16, 16]} align="stretch">
+      <Row gutter={[16, 16]} align="top">
         {items.map((item) => (
           <Col
             key={`${item.group}-${item.key}`}
             xs={24}
             md={12}
             lg={8}
-            style={{ display: 'flex' }}
           >
             <div style={{ width: '100%' }}>
               <AppCard
