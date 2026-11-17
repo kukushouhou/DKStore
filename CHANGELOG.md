@@ -6,6 +6,14 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+### 问题修复
+- **应用卡片更新进度排版修复**：将应用卡片的版本号行固定在标题正下方保持同行水平对称，并在执行更新时将底部操作栏直接切换为等高的实时进度、百分比与「查看日志」入口，消除更新过程中卡片增高及同行卡片拉伸错位的问题 ([`8a98302`](https://github.com/kukushouhou/DKStore/commit/8a98302))
+
+---
+
+### Fixes
+- **App Card Update Progress Layout Fix**: Anchored the version row directly below the card header for horizontal alignment across cards in the same row, and switched the bottom action bar in place to an equal-height live progress and `View Log` bar while updating so cards no longer grow taller or distort sibling cards ([`8a98302`](https://github.com/kukushouhou/DKStore/commit/8a98302))
+
 ## [v0.6.1] - 2026-11-17
 
 ### 问题修复
