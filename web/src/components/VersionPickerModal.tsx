@@ -207,7 +207,8 @@ export default function VersionPickerModal(props: VersionPickerModalProps) {
       open={props.open}
       onCancel={props.onClose}
       footer={null}
-      width={screens.md ? 760 : '95vw'}
+      width={screens.md ? 880 : '95vw'}
+      style={{ maxWidth: '94vw' }}
       destroyOnHidden
       styles={{ body: { paddingTop: 4 } }}
       title={null}
@@ -1039,25 +1040,27 @@ function VersionPickerModalBody({
               margin: 0,
               padding: '3px 10px',
               display: 'inline-flex',
-              alignItems: 'center',
+              flexWrap: 'wrap',
+              alignItems: 'baseline',
               gap: 6,
               maxWidth: '100%',
+              whiteSpace: 'normal',
             }}
           >
             <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}>
               {t.versionPicker.targetImage}
             </Typography.Text>
-            <Typography.Text
-              strong
-              ellipsis
+            <span
               style={{
                 fontFamily: token.fontFamilyCode,
                 fontSize: token.fontSizeSM,
+                fontWeight: 600,
                 color: token.colorPrimary,
+                wordBreak: 'break-all',
               }}
             >
               {shortRepo}:{selectedTag}
-            </Typography.Text>
+            </span>
             {tab === 'config' && (
               <Typography.Link
                 onClick={() => setTab('version')}
@@ -1072,9 +1075,9 @@ function VersionPickerModalBody({
 
       {tab === 'version' ? (
         <>
-          {/* 双栏主体：桌面左右 11:13，移动端上下叠放 */}
+          {/* 双栏主体：桌面左宽右精 14:10，移动端上下叠放 */}
           <Row gutter={[20, 16]} align="stretch">
-            <Col xs={24} md={11} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <Col xs={24} md={14} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {/* 组合式搜索框（输入仅过滤本地列表，回车/点搜索请求远端） */}
               <Space.Compact style={{ width: '100%' }}>
                 <Input
@@ -1187,9 +1190,9 @@ function VersionPickerModalBody({
                           role="option"
                           aria-selected={active}
                           tabIndex={0}
-                          align="center"
+                          align="flex-start"
                           justify="space-between"
-                          gap={8}
+                          gap={10}
                           onClick={() => applyTagSelection(item.tag, highestTag)}
                           onKeyDown={(e) => {
                             if (e.key === 'Enter' || e.key === ' ') {
@@ -1208,61 +1211,76 @@ function VersionPickerModalBody({
                             transition: 'background-color 0.15s ease',
                           }}
                         >
-                          <Flex align="center" gap={6} style={{ minWidth: 0, flex: 1 }}>
+                          <Flex align="flex-start" gap={6} style={{ minWidth: 0, flex: 1 }}>
                             <CheckOutlined
                               style={{
                                 fontSize: 12,
+                                marginTop: 4,
                                 color: token.colorPrimary,
                                 visibility: active ? 'visible' : 'hidden',
                                 flexShrink: 0,
                               }}
                             />
-                            <span
-                              title={item.aliasOf ? `${item.tag} (${item.aliasOf})` : item.tag}
+                            <div
                               style={{
-                                overflow: 'hidden',
-                                textOverflow: 'ellipsis',
-                                whiteSpace: 'nowrap',
+                                display: 'flex',
+                                flexWrap: 'wrap',
+                                alignItems: 'center',
+                                columnGap: 6,
+                                rowGap: 2,
                                 minWidth: 0,
-                                fontFamily: token.fontFamilyCode,
-                                fontSize: token.fontSizeSM,
-                                fontWeight: active ? 600 : 400,
-                                color: active ? token.colorPrimary : token.colorText,
+                                flex: 1,
                               }}
                             >
-                              {item.tag}
-                              {item.aliasOf && (
-                                <span
-                                  style={{
-                                    marginLeft: 5,
-                                    fontSize: 11,
-                                    fontWeight: 400,
-                                    color: token.colorTextSecondary,
-                                  }}
-                                >
-                                  ({item.aliasOf})
-                                </span>
-                              )}
-                            </span>
-                            {isPre && (
-                              <Tag
-                                color="warning"
+                              <span
                                 style={{
-                                  margin: 0,
-                                  fontSize: 11,
-                                  lineHeight: '16px',
-                                  paddingInline: 5,
-                                  flexShrink: 0,
+                                  wordBreak: 'break-all',
+                                  fontFamily: token.fontFamilyCode,
+                                  fontSize: token.fontSizeSM,
+                                  lineHeight: '20px',
+                                  fontWeight: active ? 600 : 400,
+                                  color: active ? token.colorPrimary : token.colorText,
                                 }}
                               >
-                                {t.versionPicker.prereleaseBadge}
-                              </Tag>
-                            )}
+                                {item.tag}
+                                {item.aliasOf && (
+                                  <span
+                                    style={{
+                                      marginLeft: 5,
+                                      fontSize: 11,
+                                      fontWeight: 400,
+                                      color: token.colorTextSecondary,
+                                    }}
+                                  >
+                                    ({item.aliasOf})
+                                  </span>
+                                )}
+                              </span>
+                              {isPre && (
+                                <Tag
+                                  color="warning"
+                                  style={{
+                                    margin: 0,
+                                    fontSize: 11,
+                                    lineHeight: '16px',
+                                    paddingInline: 5,
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  {t.versionPicker.prereleaseBadge}
+                                </Tag>
+                              )}
+                            </div>
                           </Flex>
                           {timeStr && (
                             <Typography.Text
                               type="secondary"
-                              style={{ fontSize: 11, flexShrink: 0 }}
+                              style={{
+                                fontSize: 11,
+                                lineHeight: '20px',
+                                fontFamily: token.fontFamilyCode,
+                                flexShrink: 0,
+                              }}
                             >
                               {timeStr}
                             </Typography.Text>
@@ -1340,7 +1358,7 @@ function VersionPickerModalBody({
             {/* 右栏：更新完成后的提醒设置 */}
             <Col
               xs={24}
-              md={13}
+              md={10}
               style={{
                 borderLeft: screens.md ? `1px solid ${token.colorSplit}` : 'none',
                 paddingLeft: screens.md ? 20 : 10,
