@@ -6,12 +6,24 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+## [v0.7.0] - 2026-11-18
+
+### 新功能
+- **按配置更新与详情页操作完善**：统一全站文案为「按配置更新」，为项目模式（`compose.yaml`）与独立容器模式（默认展示当前生效的 `docker run` 命令）提供与上方文本实时双向同步的可视化表单（支持网络、重启策略、运行用户、特权模式、环境变量、端口映射、目录挂载与硬件设备直通）；当个性化配置值发生变动时展示黄色「恢复个性化配置」按钮及 `!` 三分类悬停对比说明（仅还原同名被改值的项并保留当前镜像版本号与新增项，同时提示新增与缺少的配置项）；在详情抽屉顶栏补齐「立即更新」主按钮，并结合容器/镜像标签与内置规则自动识别展示发行说明、源码仓库、官方网站、官方文档及镜像仓库链接 ([`cdaa7ca`](https://github.com/kukushouhou/DKStore/commit/cdaa7ca))
+- **版本选择预发布开关与排序搜索优化**：将选择版本弹窗扩宽为左宽右精布局并支持超长版本号完整折行展示（不再截断末尾变体后缀），新增「预发布」开关（当前已运行 `alpha / beta / rc` 等预发布版本或预发布通道时自动默认开启）与「按版本号 / 按更新时间」排序切换，将 `latest` 固定置顶并标注滚动通道对应的具体版本号；打开弹窗后自动在后台同步云端最新标签，点击「搜索」时对所有镜像仓库强制绕过缓存直连云端拉取并按版本前缀优先排列结果，同时打通从预发布版升级到更新预发布版及正式版的检测提醒 ([`7d018ae`](https://github.com/kukushouhou/DKStore/commit/7d018ae), [`7ba454a`](https://github.com/kukushouhou/DKStore/commit/7ba454a))
+
 ### 问题修复
+- **原配置文件缺失或无权限时的按配置更新**：当项目原 `compose.yaml` 文件已不存在或当前账号无读写权限时（同时补齐 SSH 普通账号读写受限文件时的自动 `sudo` 提权），不再直接报错，自动根据运行中的容器生成等效配置，并提供「按原位置保存」与可视化「选择保存文件夹」弹窗（支持远程与本机目录浏览、安全英文目录新建、按项目名建子文件夹，选定已有 `compose.yaml` 的目录时自动区分同项目、未运行容器与正在运行的容器并禁止覆盖运行中容器的配置，换目录另存时自动将相对挂载路径转为绝对路径） ([`75759b8`](https://github.com/kukushouhou/DKStore/commit/75759b8))
 - **应用卡片更新进度排版修复**：将应用卡片的版本号行固定在标题正下方保持同行水平对称，并在执行更新时将底部操作栏直接切换为等高的实时进度、百分比与「查看日志」入口，消除更新过程中卡片增高及同行卡片拉伸错位的问题 ([`8a98302`](https://github.com/kukushouhou/DKStore/commit/8a98302))
 
 ---
 
+### Features
+- **Update with Config & Details Drawer Actions**: Unified UI wording to `Update with Config`, providing a visual form bidirectionally synced in real time with the top `compose.yaml` (project mode) or reconstructed `docker run` command (standalone mode) covering network, restart policy, user, privileged mode, environment variables, ports, volume mounts, and hardware devices; added a warning-yellow `Restore Custom Values` button (shown only when matching values change) with a 3-category `!` diff popover that restores only modified values while preserving the image tag and newly added items and listing added/missing entries; added a primary `Update Now` button to the details drawer header and enriched `Related Links` (Release Notes, Source Repo, Website, Docs, and Image Registry) from OCI image labels and built-in rules ([`cdaa7ca`](https://github.com/kukushouhou/DKStore/commit/cdaa7ca))
+- **Version Picker Pre-release Toggle, Sorting & Search**: Widened the version picker modal with a wider version-list column and full multi-line wrapping for long tags (without truncating trailing variant suffixes), added a `Pre-release` toggle (enabled by default when the container already runs an `alpha / beta / rc` or pre-release channel tag) and a `By Version / By Time` sort switch, and pinned `latest` at the top while showing the concrete version behind rolling channels; opening the modal syncs the latest cloud tags in the background while clicking `Search` bypasses local cache across all registries with prefix-first ranking, and supports seamless update detection from pre-release tags to newer pre-releases and stable releases ([`7d018ae`](https://github.com/kukushouhou/DKStore/commit/7d018ae), [`7ba454a`](https://github.com/kukushouhou/DKStore/commit/7ba454a))
+
 ### Fixes
+- **Update with Config When Original File Is Missing or Read-Only**: Instead of failing with a file read error when a project's original `compose.yaml` no longer exists or lacks read/write permission (also adding automatic `sudo` elevation fallback for SSH file access), DKStore now reconstructs an equivalent `compose.yaml` from the live containers and offers `Save to Original Location` alongside a visual `Choose Save Folder` picker (supporting remote/local directory browsing, ASCII-safe folder creation, optional project-named subfolder, 3-way existing `compose.yaml` ownership check that blocks overwriting running containers, and automatic conversion of relative mount paths when relocating) ([`75759b8`](https://github.com/kukushouhou/DKStore/commit/75759b8))
 - **App Card Update Progress Layout Fix**: Anchored the version row directly below the card header for horizontal alignment across cards in the same row, and switched the bottom action bar in place to an equal-height live progress and `View Log` bar while updating so cards no longer grow taller or distort sibling cards ([`8a98302`](https://github.com/kukushouhou/DKStore/commit/8a98302))
 
 ## [v0.6.1] - 2026-11-17
