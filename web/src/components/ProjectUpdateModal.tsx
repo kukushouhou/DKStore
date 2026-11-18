@@ -18,10 +18,18 @@ import {
   theme,
 } from 'antd'
 import { ArrowRightOutlined, DownOutlined } from '@ant-design/icons'
-import { ApiError, api, showApiError, type AppCardItem, type ServiceItem } from '../api/client'
+import {
+  ApiError,
+  api,
+  showApiError,
+  type AppCardItem,
+  type ServiceItem,
+  type SuggestedComposeDir,
+} from '../api/client'
 import { useI18n } from '../i18n'
 import { useUIStore } from '../store/ui'
 import { detectComposeOverwriteRisks } from './composeGuard'
+import ComposeSaveLocationBar, { type ComposeSaveMode } from './ComposeSaveLocationBar'
 import ConfigVisualEditor from './ConfigVisualEditor'
 import { parseComposeServices, patchComposeServiceInYaml } from './configSync'
 import DeleteAppModal from './DeleteAppModal'
@@ -112,6 +120,15 @@ function ProjectUpdateModalBody({
   const [yamlReason, setYamlReason] = useState('')
   const [origYaml, setOrigYaml] = useState('')
   const [yamlText, setYamlText] = useState('')
+  const [yamlComposePath, setYamlComposePath] = useState('')
+  const [yamlProjectName, setYamlProjectName] = useState('')
+  const [yamlHostName, setYamlHostName] = useState('')
+  const [yamlPathMissing, setYamlPathMissing] = useState(false)
+  const [yamlPathReadOnly, setYamlPathReadOnly] = useState(false)
+  const [yamlOrigWritable, setYamlOrigWritable] = useState(true)
+  const [yamlSuggestedDirs, setYamlSuggestedDirs] = useState<SuggestedComposeDir[]>([])
+  const [yamlSaveMode, setYamlSaveMode] = useState<ComposeSaveMode>('orig')
+  const [yamlPickedNewFile, setYamlPickedNewFile] = useState('')
   const [effectiveOrigServices, setEffectiveOrigServices] = useState<string[]>([])
   const [extraFileServices, setExtraFileServices] = useState<string[]>([])
   const [submittingYaml, setSubmittingYaml] = useState(false)
@@ -145,6 +162,17 @@ function ProjectUpdateModalBody({
         setYamlReason(res.reason || '')
         setOrigYaml(res.content || '')
         setYamlText(res.content || '')
+        setYamlComposePath(res.composePath || '')
+        setYamlProjectName(res.projectName || app.projectName || app.name)
+        setYamlHostName(res.hostName || app.hostName)
+        const pMissing = Boolean(res.pathMissing)
+        const pReadOnly = Boolean(res.pathReadOnly)
+        const oWritable = res.origWritable !== false && Boolean(res.composePath)
+        setYamlPathMissing(pMissing)
+        setYamlPathReadOnly(pReadOnly)
+        setYamlOrigWritable(oWritable)
+        setYamlSuggestedDirs(res.suggestedDirs ?? [])
+        setYamlSaveMode((pMissing || pReadOnly) && !oWritable ? 'new' : 'orig')
         setEffectiveOrigServices(res.effectiveServices ?? [])
         setExtraFileServices(res.extraFileServices ?? [])
         setYamlLoaded(true)
@@ -159,7 +187,7 @@ function ProjectUpdateModalBody({
     return () => {
       cancelled = true
     }
-  }, [tab, yamlLoaded, app.key])
+  }, [tab, yamlLoaded, app.key, app.projectName, app.hostName, app.name])
 
   const updatableServices = useMemo(
     () => services.filter((s) => isServiceUpdatable(s)),
@@ -259,6 +287,15 @@ function ProjectUpdateModalBody({
     [effectiveOrigServices, extraFileServices, origYaml, yamlText],
   )
 
+  const needYamlSaveChoice = yamlPathMissing || yamlPathReadOnly
+  const effectiveYamlTargetFile = needYamlSaveChoice
+    ? yamlSaveMode === 'orig'
+      ? yamlOrigWritable
+        ? yamlComposePath
+        : ''
+      : yamlPickedNewFile
+    : ''
+
   const submitComposeWithOptions = async (opts?: {
     confirmRemoveServices?: boolean
     deleteRemovedImages?: boolean
@@ -268,6 +305,7 @@ function ProjectUpdateModalBody({
     const res = await api.updateAppCompose({
       appKey: app.key,
       content: yamlText,
+      targetComposePath: needYamlSaveChoice ? effectiveYamlTargetFile || undefined : undefined,
       confirmRemoveServices: opts?.confirmRemoveServices,
       deleteRemovedImages: opts?.deleteRemovedImages,
       deleteRemovedFileIds: opts?.deleteRemovedFileIds,
@@ -655,6 +693,23 @@ function ProjectUpdateModalBody({
               />
             ) : (
               <>
+                {needYamlSaveChoice && (
+                  <ComposeSaveLocationBar
+                    appKey={app.key}
+                    hostName={yamlHostName || app.hostName}
+                    projectName={yamlProjectName || app.projectName || app.name}
+                    composePath={yamlComposePath}
+                    pathMissing={yamlPathMissing}
+                    pathReadOnly={yamlPathReadOnly}
+                    origWritable={yamlOrigWritable}
+                    suggestedDirs={yamlSuggestedDirs}
+                    saveMode={yamlSaveMode}
+                    pickedNewFile={yamlPickedNewFile}
+                    onChangeSaveMode={setYamlSaveMode}
+                    onSelectNewFile={setYamlPickedNewFile}
+                  />
+                )}
+
                 <ConfigVisualEditor
                   mode="yaml"
                   textValue={yamlText}
@@ -728,8 +783,18 @@ function ProjectUpdateModalBody({
                 borderTop: `1px solid ${token.colorSplit}`,
               }}
             >
-              <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-                {t.projectUpdate.autoRollbackNote}
+              <Typography.Text
+                type={needYamlSaveChoice && !effectiveYamlTargetFile ? 'warning' : 'secondary'}
+                style={{ fontSize: token.fontSizeSM }}
+              >
+                {needYamlSaveChoice
+                  ? effectiveYamlTargetFile
+                    ? t.composeSaveLocation.willSaveToHint.replace(
+                        '{path}',
+                        effectiveYamlTargetFile,
+                      )
+                    : t.composeSaveLocation.mustPickHint
+                  : t.projectUpdate.autoRollbackNote}
               </Typography.Text>
               <Space size={8}>
                 {totalCount >= 2 && initialTab !== 'yaml' ? (
@@ -741,7 +806,12 @@ function ProjectUpdateModalBody({
                 )}
                 <Button
                   type="primary"
-                  disabled={!yamlEditable || loadingYaml || !yamlText.trim()}
+                  disabled={
+                    !yamlEditable ||
+                    loadingYaml ||
+                    !yamlText.trim() ||
+                    (needYamlSaveChoice && !effectiveYamlTargetFile)
+                  }
                   loading={submittingYaml}
                   onClick={handleYamlSubmit}
                 >

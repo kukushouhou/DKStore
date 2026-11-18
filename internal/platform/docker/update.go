@@ -1136,19 +1136,22 @@ func (a *Adapter) listLiveComposeServiceNames(ctx context.Context, projName stri
 
 // InspectProjectComposeServices 返回当前 Compose 项目的组合生效服务集合与附加文件保留服务集合。
 func (a *Adapter) InspectProjectComposeServices(ctx context.Context, project *platform.ProjectInfo) (*platform.ComposeServiceSetSummary, error) {
-	_, origBytes, err := a.readPrimaryComposeBytes(ctx, project)
-	if err != nil {
-		return nil, err
+	var primarySvcs []string
+	if _, origBytes, err := a.readPrimaryComposeBytes(ctx, project); err == nil {
+		primarySvcs, _ = ParseComposeServiceNames(string(origBytes))
 	}
-	primarySvcs, _ := ParseComposeServiceNames(string(origBytes))
 	extraSvcs := a.readExtraComposeServiceNames(ctx, project)
 	var projName string
 	if project != nil {
 		projName = project.Name
 	}
 	liveSvcs := a.listLiveComposeServiceNames(ctx, projName)
+	eff := unionOrderedStrings(primarySvcs, extraSvcs, liveSvcs)
+	if len(eff) == 0 {
+		return nil, i18n.NewEngineError(i18n.MsgComposeNotEditable)
+	}
 	return &platform.ComposeServiceSetSummary{
-		EffectiveServices: unionOrderedStrings(primarySvcs, extraSvcs, liveSvcs),
+		EffectiveServices: eff,
 		ExtraFileServices: extraSvcs,
 	}, nil
 }
@@ -1199,18 +1202,56 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 	if project == nil {
 		return i18n.NewEngineError(i18n.MsgComposeNotEditable)
 	}
-	composePath, origBytes, err := a.readPrimaryComposeBytes(ctx, project)
-	if err != nil {
-		return err
-	}
 
 	projName := project.Name
 	if projName == "" {
 		projName = appName
 	}
 
-	origPrimarySvcs, _ := ParseComposeServiceNames(string(origBytes))
-	extraSvcs := a.readExtraComposeServiceNames(ctx, project)
+	origComposePath, origBytes, origReadErr := a.readPrimaryComposeBytes(ctx, project)
+	customTarget := strings.TrimSpace(opts.TargetComposePath)
+	relocated := false
+	composePath := origComposePath
+
+	if customTarget != "" {
+		normTarget := normalizeComposePosixPath(customTarget)
+		if normTarget == "" || normTarget == "/" || platform.IsProtectedHostPath(posixDirOf(normTarget)) {
+			return i18n.NewEngineError(i18n.MsgTransportInvalidPath)
+		}
+		if origComposePath == "" || normTarget != normalizeComposePosixPath(origComposePath) {
+			relocated = true
+		}
+		composePath = normTarget
+		// 服务端二次校验：严禁覆盖其他正在运行中容器使用的配置目录
+		if chk, cErr := a.CheckComposeSaveDir(ctx, appName, project, posixDirOf(normTarget), ""); cErr == nil && chk != nil && chk.ExistKind == "other_running" {
+			return &platform.UpdateError{
+				Code:    "external_conflict",
+				Message: i18n.EngineDetail(i18n.MsgComposeTargetInUse, chk.Owner),
+			}
+		}
+	} else if composePath == "" {
+		composePath = resolvePrimaryComposeFile(project)
+	}
+	if composePath == "" {
+		return i18n.NewEngineError(i18n.MsgComposeNotEditable)
+	}
+
+	effectiveWorkDir := project.WorkingDir
+	if relocated || strings.TrimSpace(effectiveWorkDir) == "" || origReadErr != nil {
+		effectiveWorkDir = posixDirOf(composePath)
+	}
+	if relocated && strings.TrimSpace(project.WorkingDir) != "" {
+		newYAML = RelocateComposeRelativePaths(newYAML, project.WorkingDir, effectiveWorkDir)
+	}
+
+	var origPrimarySvcs []string
+	if origReadErr == nil {
+		origPrimarySvcs, _ = ParseComposeServiceNames(string(origBytes))
+	}
+	var extraSvcs []string
+	if !relocated {
+		extraSvcs = a.readExtraComposeServiceNames(ctx, project)
+	}
 	liveSvcs := a.listLiveComposeServiceNames(ctx, projName)
 	effectiveBefore := unionOrderedStrings(origPrimarySvcs, extraSvcs, liveSvcs)
 	effectiveAfter := unionOrderedStrings(newPrimarySvcs, extraSvcs)
@@ -1228,8 +1269,19 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 		removalPlan, _ = a.inspectComposeServiceRemovalPlan(ctx, appName, project, newYAML, removedSvcs)
 	}
 
-	origSum := sha256.Sum256(origBytes)
-	origSHA := hex.EncodeToString(origSum[:])
+	// 检查实际写入目标文件在本次写入前的状态，用于冲突保护或失败回滚还原
+	var prevTargetBytes []byte
+	targetExistedBefore := false
+	expectedSHA := ""
+	if !relocated && origReadErr == nil {
+		prevTargetBytes = origBytes
+		targetExistedBefore = true
+		origSum := sha256.Sum256(origBytes)
+		expectedSHA = hex.EncodeToString(origSum[:])
+	} else if b, rErr := a.tr.ReadFile(ctx, composePath); rErr == nil {
+		prevTargetBytes = b
+		targetExistedBefore = true
+	}
 
 	lastPhase := "precheck"
 	emit := func(p platform.PullProgress) {
@@ -1248,7 +1300,7 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 	})
 
 	newBytes := []byte(newYAML)
-	if err := execTr.WriteFileAtomic(ctx, composePath, newBytes, origSHA); err != nil {
+	if err := execTr.WriteFileAtomic(ctx, composePath, newBytes, expectedSHA); err != nil {
 		if errors.Is(err, transport.ErrFileConflict) {
 			return &platform.UpdateError{
 				Code:    "external_conflict",
@@ -1264,8 +1316,21 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 	writtenSHA := hex.EncodeToString(writtenSum[:])
 
 	cfgFiles := project.ConfigFiles
-	if len(cfgFiles) == 0 {
+	envFiles := project.EnvFiles
+	if relocated || origReadErr != nil || len(cfgFiles) == 0 {
 		cfgFiles = []string{composePath}
+		if relocated {
+			var validEnv []string
+			for _, ef := range envFiles {
+				fullEnv := resolvePath(project.WorkingDir, ef)
+				if _, eErr := a.tr.ReadFile(ctx, fullEnv); eErr == nil {
+					validEnv = append(validEnv, fullEnv)
+				}
+			}
+			envFiles = validEnv
+		} else {
+			envFiles = nil
+		}
 	}
 
 	removeOrphans := len(removedSvcs) > 0 && opts.ConfirmRemoveServices
@@ -1294,7 +1359,7 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 	if preserveStopped {
 		if lcTr, ok := execTr.(transport.ComposeLifecycleTransport); ok {
 			handledNoStart = true
-			_, runErr = lcTr.ExecComposeProjectNoStart(ctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, true, removeOrphans, beforeRunningSvcs, func(chunk string) {
+			_, runErr = lcTr.ExecComposeProjectNoStart(ctx, effectiveWorkDir, cfgFiles, envFiles, projName, true, removeOrphans, beforeRunningSvcs, func(chunk string) {
 				emit(parser.Feed(chunk))
 			})
 			parser.Flush()
@@ -1302,18 +1367,18 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 	}
 	if !handledNoStart {
 		if optsTr, ok := execTr.(transport.ComposeProjectOptionsTransport); ok {
-			_, runErr = optsTr.ExecComposeProjectWithOptions(ctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, true, removeOrphans, func(chunk string) {
+			_, runErr = optsTr.ExecComposeProjectWithOptions(ctx, effectiveWorkDir, cfgFiles, envFiles, projName, true, removeOrphans, func(chunk string) {
 				emit(parser.Feed(chunk))
 			})
 			parser.Flush()
 		} else if streamTr, ok := execTr.(transport.StreamingComposeTransport); ok {
-			_, runErr = streamTr.ExecComposeProjectStream(ctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, removeOrphans, func(chunk string) {
+			_, runErr = streamTr.ExecComposeProjectStream(ctx, effectiveWorkDir, cfgFiles, envFiles, projName, removeOrphans, func(chunk string) {
 				emit(parser.Feed(chunk))
 			})
 			parser.Flush()
 		} else {
 			var out string
-			out, runErr = execTr.ExecComposeProject(ctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, true)
+			out, runErr = execTr.ExecComposeProject(ctx, effectiveWorkDir, cfgFiles, envFiles, projName, true)
 			if out != "" {
 				emit(parser.Feed(out + "\r\n"))
 				parser.Flush()
@@ -1323,37 +1388,59 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 	if runErr != nil {
 		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), restoreTimeout)
 		defer cancel()
-		if rErr := execTr.WriteFileAtomic(rctx, composePath, origBytes, writtenSHA); rErr != nil {
-			return &platform.UpdateError{
-				Code:    "recreate_failed",
-				Message: i18n.EngineDetail(i18n.MsgDockerComposeRestoreErr, runErr.Error(), rErr.Error()),
-			}
-		}
-		var rbErr error
-		if preserveStopped {
-			if lcTr, ok := execTr.(transport.ComposeLifecycleTransport); ok {
-				_, rbErr = lcTr.ExecComposeProjectNoStart(rctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, false, false, beforeRunningSvcs, nil)
-			} else {
-				_, rbErr = execTr.ExecComposeProject(rctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, false)
-			}
-		} else {
-			_, rbErr = execTr.ExecComposeProject(rctx, project.WorkingDir, cfgFiles, project.EnvFiles, projName, false)
-		}
-		if rbErr != nil {
-			return &platform.UpdateError{
-				Code:    "recreate_failed",
-				Message: i18n.EngineDetail(i18n.MsgDockerComposeRebuildErr, runErr.Error(), rbErr.Error()),
-			}
-		}
 		errCode := "recreate_failed"
 		if lastPhase == "pulling" || strings.Contains(strings.ToLower(runErr.Error()), "compose pull:") {
 			errCode = "pull_failed"
 		}
+
+		if targetExistedBefore {
+			if rErr := execTr.WriteFileAtomic(rctx, composePath, prevTargetBytes, writtenSHA); rErr != nil {
+				return &platform.UpdateError{
+					Code:    "recreate_failed",
+					Message: i18n.EngineDetail(i18n.MsgDockerComposeRestoreErr, runErr.Error(), rErr.Error()),
+				}
+			}
+		} else if cleanTr, ok := execTr.(transport.CleanupTransport); ok {
+			_ = cleanTr.RemoveHostPaths(rctx, []string{composePath})
+		}
+
+		if origReadErr == nil {
+			rbWorkDir := project.WorkingDir
+			rbCfgFiles := project.ConfigFiles
+			if len(rbCfgFiles) == 0 {
+				rbCfgFiles = []string{origComposePath}
+			}
+			var rbErr error
+			if preserveStopped {
+				if lcTr, ok := execTr.(transport.ComposeLifecycleTransport); ok {
+					_, rbErr = lcTr.ExecComposeProjectNoStart(rctx, rbWorkDir, rbCfgFiles, project.EnvFiles, projName, false, false, beforeRunningSvcs, nil)
+				} else {
+					_, rbErr = execTr.ExecComposeProject(rctx, rbWorkDir, rbCfgFiles, project.EnvFiles, projName, false)
+				}
+			} else {
+				_, rbErr = execTr.ExecComposeProject(rctx, rbWorkDir, rbCfgFiles, project.EnvFiles, projName, false)
+			}
+			if rbErr != nil {
+				return &platform.UpdateError{
+					Code:    "recreate_failed",
+					Message: i18n.EngineDetail(i18n.MsgDockerComposeRebuildErr, runErr.Error(), rbErr.Error()),
+				}
+			}
+			return &platform.UpdateError{
+				Code:    errCode,
+				Message: i18n.EngineDetail(i18n.MsgDockerComposeRestored, runErr.Error()),
+			}
+		}
 		return &platform.UpdateError{
 			Code:    errCode,
-			Message: i18n.EngineDetail(i18n.MsgDockerComposeRestored, runErr.Error()),
+			Message: runErr.Error(),
 		}
 	}
+
+	project.WorkingDir = effectiveWorkDir
+	project.ConfigFiles = cfgFiles
+	project.EnvFiles = envFiles
+	project.SourceReadable = true
 
 	if removeOrphans {
 		a.ensureRemovedComposeServicesDeleted(ctx, execTr, projName, removedSvcs)

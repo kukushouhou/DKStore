@@ -477,17 +477,44 @@ export interface AppLifecyclePayload {
   action: LifecycleAction
 }
 
+export interface SuggestedComposeDir {
+  kind: 'data_parent' | 'opt' | 'home' | string
+  path: string
+}
+
 export interface AppComposeResponse {
   editable: boolean
   content: string
+  composePath?: string
+  projectName?: string
+  hostName?: string
+  pathMissing?: boolean
+  pathReadOnly?: boolean
+  origWritable?: boolean
+  suggestedDirs?: SuggestedComposeDir[]
   reason?: string
   effectiveServices?: string[]
   extraFileServices?: string[]
 }
 
+export interface ComposeHostDirListResponse {
+  path: string
+  dirs: string[]
+  writable: boolean
+  homeDir?: string
+}
+
+export interface ComposeDirCheckResponse {
+  targetFile: string
+  writable: boolean
+  existKind: 'none' | 'same' | 'other_stopped' | 'other_running' | 'other_untracked'
+  owner?: string
+}
+
 export interface UpdateAppComposePayload {
   appKey: string
   content: string
+  targetComposePath?: string
   serviceKey?: string
   policyMode?: string
   policyPrefix?: string
@@ -814,6 +841,20 @@ export const api = {
 
   getAppCompose: (appKey: string) =>
     request<AppComposeResponse>(`/apps/compose?key=${encodeURIComponent(appKey)}`),
+  listAppComposeDirs: (appKey: string, dirPath = '/') =>
+    request<ComposeHostDirListResponse>(
+      `/apps/compose-dirs?key=${encodeURIComponent(appKey)}&path=${encodeURIComponent(dirPath)}`,
+    ),
+  createAppComposeDir: (appKey: string, parentPath: string, name: string) =>
+    request<{ ok: boolean; path: string }>('/apps/compose-mkdir', {
+      method: 'POST',
+      body: JSON.stringify({ appKey, parentPath, name }),
+    }),
+  checkAppComposeDir: (appKey: string, path: string, subFolder = '') =>
+    request<ComposeDirCheckResponse>('/apps/compose-check-dir', {
+      method: 'POST',
+      body: JSON.stringify({ appKey, path, subFolder }),
+    }),
   updateAppCompose: (payload: UpdateAppComposePayload) =>
     request<{ ok: boolean; job?: UpdateJobItem; items?: UpdateJobItem[] }>('/apps/compose-update', {
       method: 'POST',

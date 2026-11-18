@@ -1449,6 +1449,66 @@ func (a *Adapter) InspectProjectComposeServices(ctx context.Context, project *pl
 	}, nil
 }
 
+// InspectProjectComposeEdit 在群晖 SSH 模式下复用 Docker 适配器的文件权限预检与运行容器反推能力；纯 DSM API 模式直接读取套件 Project 配置。
+func (a *Adapter) InspectProjectComposeEdit(ctx context.Context, appName string, project *platform.ProjectInfo) (*platform.ProjectComposeInspection, error) {
+	if a.dock != nil {
+		if project == nil || strings.TrimSpace(project.DSMProjectID) == "" {
+			return a.dock.InspectProjectComposeEdit(ctx, appName, project)
+		}
+		if res, err := a.dock.InspectProjectComposeEdit(ctx, appName, project); err == nil {
+			return res, nil
+		}
+	}
+	content, err := a.GetProjectCompose(ctx, project)
+	if err != nil {
+		return nil, err
+	}
+	projName := appName
+	composePath := ""
+	if project != nil {
+		if strings.TrimSpace(project.Name) != "" {
+			projName = strings.TrimSpace(project.Name)
+		}
+		if len(project.ConfigFiles) > 0 {
+			composePath = project.ConfigFiles[0]
+		} else if project.WorkingDir != "" {
+			composePath = strings.TrimRight(project.WorkingDir, "/") + "/compose.yaml"
+		}
+	}
+	var eff []string
+	if sum, sErr := a.InspectProjectComposeServices(ctx, project); sErr == nil && sum != nil {
+		eff = sum.EffectiveServices
+	}
+	return &platform.ProjectComposeInspection{
+		ComposePath:       composePath,
+		ProjectName:       projName,
+		Content:           content,
+		OrigWritable:      true,
+		EffectiveServices: eff,
+	}, nil
+}
+
+func (a *Adapter) ListComposeHostDirs(ctx context.Context, dirPath string) (*platform.ComposeHostDirList, error) {
+	if a.dock == nil {
+		return nil, i18n.NewEngineError(i18n.MsgComposeNotEditable)
+	}
+	return a.dock.ListComposeHostDirs(ctx, dirPath)
+}
+
+func (a *Adapter) CreateComposeHostDir(ctx context.Context, parentDir, name string) (string, error) {
+	if a.dock == nil {
+		return "", i18n.NewEngineError(i18n.MsgComposeNotEditable)
+	}
+	return a.dock.CreateComposeHostDir(ctx, parentDir, name)
+}
+
+func (a *Adapter) CheckComposeSaveDir(ctx context.Context, appName string, project *platform.ProjectInfo, dirPath, subFolder string) (*platform.ComposeDirCheckResult, error) {
+	if a.dock == nil {
+		return nil, i18n.NewEngineError(i18n.MsgComposeNotEditable)
+	}
+	return a.dock.CheckComposeSaveDir(ctx, appName, project, dirPath, subFolder)
+}
+
 // UpdateProjectCompose 按新版完整 YAML 更新群晖项目：校验 services、备份原配置、写入新版 YAML 并流式执行 build_stream 拉取与重建；
 // 若移除了原有服务但未确认则直接拒绝，失败自动写回原 YAML 并恢复（附录 D.4 / 附录 E.1）。
 func (a *Adapter) UpdateProjectCompose(

@@ -35,6 +35,7 @@ import {
   type ServicePortItem,
   type ServiceTagItem,
   type ServiceVolumeItem,
+  type SuggestedComposeDir,
   type TagSortMode,
   type UpdatePolicyMode,
   type UpdateServiceConfigPayload,
@@ -42,6 +43,7 @@ import {
 import { useI18n } from '../i18n'
 import { useUIStore } from '../store/ui'
 import { detectComposeOverwriteRisks, replaceComposeImageTag } from './composeGuard'
+import ComposeSaveLocationBar, { type ComposeSaveMode } from './ComposeSaveLocationBar'
 import ConfigVisualEditor from './ConfigVisualEditor'
 import {
   buildDockerRunCommand,
@@ -297,6 +299,15 @@ function VersionPickerModalBody({
   const [yamlReason, setYamlReason] = useState('')
   const [origYaml, setOrigYaml] = useState('')
   const [yamlText, setYamlText] = useState('')
+  const [yamlComposePath, setYamlComposePath] = useState('')
+  const [yamlProjectName, setYamlProjectName] = useState('')
+  const [yamlHostName, setYamlHostName] = useState('')
+  const [yamlPathMissing, setYamlPathMissing] = useState(false)
+  const [yamlPathReadOnly, setYamlPathReadOnly] = useState(false)
+  const [yamlOrigWritable, setYamlOrigWritable] = useState(true)
+  const [yamlSuggestedDirs, setYamlSuggestedDirs] = useState<SuggestedComposeDir[]>([])
+  const [yamlSaveMode, setYamlSaveMode] = useState<ComposeSaveMode>('orig')
+  const [yamlPickedNewFile, setYamlPickedNewFile] = useState('')
   const [effectiveOrigServices, setEffectiveOrigServices] = useState<string[]>([])
   const [extraFileServices, setExtraFileServices] = useState<string[]>([])
   const [pendingRemovalConfirm, setPendingRemovalConfirm] = useState<{
@@ -542,6 +553,17 @@ function VersionPickerModalBody({
         setYamlReason(res.reason || '')
         const raw = res.content || ''
         setOrigYaml(raw)
+        setYamlComposePath(res.composePath || '')
+        setYamlProjectName(res.projectName || app.projectName || app.name)
+        setYamlHostName(res.hostName || app.hostName)
+        const pMissing = Boolean(res.pathMissing)
+        const pReadOnly = Boolean(res.pathReadOnly)
+        const oWritable = res.origWritable !== false && Boolean(res.composePath)
+        setYamlPathMissing(pMissing)
+        setYamlPathReadOnly(pReadOnly)
+        setYamlOrigWritable(oWritable)
+        setYamlSuggestedDirs(res.suggestedDirs ?? [])
+        setYamlSaveMode((pMissing || pReadOnly) && !oWritable ? 'new' : 'orig')
         setEffectiveOrigServices(res.effectiveServices ?? [])
         setExtraFileServices(res.extraFileServices ?? [])
         const initialYaml = userPickedVersionRef.current
@@ -795,6 +817,15 @@ function VersionPickerModalBody({
     void doSubmitVersion()
   }
 
+  const needYamlSaveChoice = !isStandaloneConfigMode && (yamlPathMissing || yamlPathReadOnly)
+  const effectiveYamlTargetFile = needYamlSaveChoice
+    ? yamlSaveMode === 'orig'
+      ? yamlOrigWritable
+        ? yamlComposePath
+        : ''
+      : yamlPickedNewFile
+    : ''
+
   const submitYamlConfigWithOptions = async (opts?: {
     confirmRemoveServices?: boolean
     deleteRemovedImages?: boolean
@@ -807,6 +838,7 @@ function VersionPickerModalBody({
     const res = await api.updateAppCompose({
       appKey: app.key,
       content: yamlText,
+      targetComposePath: needYamlSaveChoice ? effectiveYamlTargetFile || undefined : undefined,
       serviceKey: service.key,
       policyMode: policy,
       policyPrefix: policyPrefixVal,
@@ -1536,6 +1568,23 @@ function VersionPickerModalBody({
           ) : !isStandaloneConfigMode ? (
             /* Case A：单容器 YAML 项目（上方 compose.yaml 与下方表单实时双向同步） */
             <>
+              {app && needYamlSaveChoice && (
+                <ComposeSaveLocationBar
+                  appKey={app.key}
+                  hostName={yamlHostName || app.hostName}
+                  projectName={yamlProjectName || app.projectName || app.name}
+                  composePath={yamlComposePath}
+                  pathMissing={yamlPathMissing}
+                  pathReadOnly={yamlPathReadOnly}
+                  origWritable={yamlOrigWritable}
+                  suggestedDirs={yamlSuggestedDirs}
+                  saveMode={yamlSaveMode}
+                  pickedNewFile={yamlPickedNewFile}
+                  onChangeSaveMode={setYamlSaveMode}
+                  onSelectNewFile={setYamlPickedNewFile}
+                />
+              )}
+
               <ConfigVisualEditor
                 mode="yaml"
                 textValue={yamlText}
@@ -1640,8 +1689,15 @@ function VersionPickerModalBody({
               borderTop: `1px solid ${token.colorSplit}`,
             }}
           >
-            <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-              {t.projectUpdate.autoRollbackNote}
+            <Typography.Text
+              type={needYamlSaveChoice && !effectiveYamlTargetFile ? 'warning' : 'secondary'}
+              style={{ fontSize: token.fontSizeSM }}
+            >
+              {needYamlSaveChoice
+                ? effectiveYamlTargetFile
+                  ? t.composeSaveLocation.willSaveToHint.replace('{path}', effectiveYamlTargetFile)
+                  : t.composeSaveLocation.mustPickHint
+                : t.projectUpdate.autoRollbackNote}
             </Typography.Text>
             <Space size={8}>
               <Button onClick={onClose}>{t.versionPicker.cancel}</Button>
@@ -1651,6 +1707,7 @@ function VersionPickerModalBody({
                   !configEditable ||
                   loadingConfig ||
                   (!isStandaloneConfigMode && !yamlText.trim()) ||
+                  (needYamlSaveChoice && !effectiveYamlTargetFile) ||
                   (isStandaloneConfigMode && !cmdText.trim())
                 }
                 loading={submittingConfig}

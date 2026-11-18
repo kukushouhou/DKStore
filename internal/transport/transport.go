@@ -203,6 +203,10 @@ func (l *LocalTransport) WriteFileAtomic(ctx context.Context, path string, data 
 	mode := os.FileMode(0o644)
 	if st, err := os.Stat(path); err == nil {
 		mode = st.Mode().Perm()
+	} else if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+			return mkErr
+		}
 	}
 	tmp := path + ".dkstore.tmp"
 	if err := os.WriteFile(tmp, data, mode); err != nil {
@@ -767,11 +771,31 @@ func (t *SSHTransport) ReadFile(ctx context.Context, path string) ([]byte, error
 }
 
 // writeFileScript 生成通过 stdin 接收文件内容并原子替换目标文件的 shell 脚本（全部路径经 shellQuote 处理）。
-// 先尝试 cp -p 复制原文件以保留权限与属主，再用 stdin 覆盖临时文件内容，最后 mv 原子替换。
+// 若目标父目录尚不存在先 mkdir -p 创建，再尝试 cp -p 复制原文件以保留权限与属主，最后用 stdin 写入临时文件并 mv 原子替换。
 func writeFileScript(path string) string {
 	tmpPath := path + ".dkstore.tmp"
-	return fmt.Sprintf("{ cp -p -- %s %s 2>/dev/null || :; } && cat > %s && mv -f -- %s %s",
-		shellQuote(path), shellQuote(tmpPath), shellQuote(tmpPath), shellQuote(tmpPath), shellQuote(path))
+	dir := posixParentDir(path)
+	mkdirPart := ""
+	if dir != "" && dir != "." && dir != "/" {
+		mkdirPart = "mkdir -p -- " + shellQuote(dir) + " && "
+	}
+	return fmt.Sprintf("%s{ cp -p -- %s %s 2>/dev/null || :; } && cat > %s && mv -f -- %s %s",
+		mkdirPart, shellQuote(path), shellQuote(tmpPath), shellQuote(tmpPath), shellQuote(tmpPath), shellQuote(path))
+}
+
+func posixParentDir(p string) string {
+	clean := strings.TrimRight(strings.ReplaceAll(strings.TrimSpace(p), "\\", "/"), "/")
+	if clean == "" {
+		return ""
+	}
+	idx := strings.LastIndex(clean, "/")
+	if idx < 0 {
+		return "."
+	}
+	if idx == 0 {
+		return "/"
+	}
+	return clean[:idx]
 }
 
 func (t *SSHTransport) WriteFileAtomic(ctx context.Context, path string, data []byte, expectedSHA256 string) error {
@@ -1081,6 +1105,14 @@ func sudoStdin(pass string, payload []byte) io.Reader {
 	return bytes.NewReader(b)
 }
 
+func isShellPermissionDenied(err error, out []byte) bool {
+	s := strings.ToLower(string(out))
+	if err != nil {
+		s += " " + strings.ToLower(err.Error())
+	}
+	return strings.Contains(s, "permission denied") || strings.Contains(s, "operation not permitted")
+}
+
 func (t *SSHTransport) runReadOnlyCmd(ctx context.Context, baseCmd string, limit int64) ([]byte, error) {
 	out, err := t.runSession(ctx, baseCmd, nil, limit, false)
 	if err == nil {
@@ -1094,6 +1126,16 @@ func (t *SSHTransport) runReadOnlyCmd(ctx context.Context, baseCmd string, limit
 		return t.runSession(ctx, "sudo -n "+baseCmd, nil, limit, false)
 	case t.mode == ModeSudoPassStdio && t.cfg.Secret != "":
 		return t.runSession(ctx, "sudo -k -S -p '' "+baseCmd, sudoStdin(t.cfg.Secret, nil), limit, false)
+	case isShellPermissionDenied(err, out):
+		if sOut, sErr := t.runSession(ctx, "sudo -n "+baseCmd, nil, limit, false); sErr == nil {
+			return sOut, nil
+		}
+		if t.cfg.AuthType != "key" && t.cfg.Secret != "" {
+			if sOut, sErr := t.runSession(ctx, "sudo -k -S -p '' "+baseCmd, sudoStdin(t.cfg.Secret, nil), limit, false); sErr == nil {
+				return sOut, nil
+			}
+		}
+		return nil, err
 	default:
 		return nil, err
 	}
@@ -1104,17 +1146,30 @@ func (t *SSHTransport) runPrivilegedCmd(ctx context.Context, baseCmd string, pay
 }
 
 func (t *SSHTransport) runPrivilegedCmdStream(ctx context.Context, baseCmd string, payload []byte, onChunk func(string)) ([]byte, error) {
-	var plain io.Reader
-	if payload != nil {
-		plain = bytes.NewReader(payload)
+	newPlain := func() io.Reader {
+		if payload == nil {
+			return nil
+		}
+		return bytes.NewReader(payload)
 	}
 	if t.mode == ModeSudoStdio {
-		return t.runSessionStream(ctx, "sudo -n "+baseCmd, plain, 0, true, onChunk)
+		return t.runSessionStream(ctx, "sudo -n "+baseCmd, newPlain(), 0, true, onChunk)
 	}
 	if t.mode == ModeSudoPassStdio && t.cfg.Secret != "" {
 		return t.runSessionStream(ctx, "sudo -k -S -p '' "+baseCmd, sudoStdin(t.cfg.Secret, payload), 0, true, onChunk)
 	}
-	return t.runSessionStream(ctx, baseCmd, plain, 0, true, onChunk)
+	out, err := t.runSessionStream(ctx, baseCmd, newPlain(), 0, true, onChunk)
+	if err != nil && onChunk == nil && ctx.Err() == nil && !errors.Is(err, ErrTransportClosed) && isShellPermissionDenied(err, out) {
+		if sOut, sErr := t.runSessionStream(ctx, "sudo -n "+baseCmd, newPlain(), 0, true, nil); sErr == nil {
+			return sOut, nil
+		}
+		if t.cfg.AuthType != "key" && t.cfg.Secret != "" {
+			if sOut, sErr := t.runSessionStream(ctx, "sudo -k -S -p '' "+baseCmd, sudoStdin(t.cfg.Secret, payload), 0, true, nil); sErr == nil {
+				return sOut, nil
+			}
+		}
+	}
+	return out, err
 }
 
 // Close 关闭 SSH 连接并标记为已关闭；之后的任何请求都不会重新建立连接（审计 M8）。

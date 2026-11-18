@@ -102,6 +102,7 @@ type UpdateItemRequest struct {
 type ComposeUpdateRequest struct {
 	AppKey                string   `json:"appKey"`
 	Content               string   `json:"content"`
+	TargetComposePath     string   `json:"targetComposePath,omitempty"`
 	ServiceKey            string   `json:"serviceKey,omitempty"`
 	PolicyMode            string   `json:"policyMode,omitempty"`
 	PolicyPrefix          string   `json:"policyPrefix,omitempty"`
@@ -136,16 +137,22 @@ type StandaloneConfigUpdateRequest struct {
 
 // ComposeInfo 是 GET /api/v1/apps/compose 的返回体（附录 D.4）。
 type ComposeInfo struct {
-	Key               string   `json:"key"`
-	HostID            string   `json:"hostId,omitempty"`
-	Name              string   `json:"name,omitempty"`
-	Source            string   `json:"source,omitempty"`
-	ComposePath       string   `json:"composePath,omitempty"`
-	Editable          bool     `json:"editable"`
-	Content           string   `json:"content"`
-	Reason            string   `json:"reason,omitempty"`
-	EffectiveServices []string `json:"effectiveServices,omitempty"`
-	ExtraFileServices []string `json:"extraFileServices,omitempty"`
+	Key               string                         `json:"key"`
+	HostID            string                         `json:"hostId,omitempty"`
+	HostName          string                         `json:"hostName,omitempty"`
+	Name              string                         `json:"name,omitempty"`
+	ProjectName       string                         `json:"projectName,omitempty"`
+	Source            string                         `json:"source,omitempty"`
+	ComposePath       string                         `json:"composePath,omitempty"`
+	Editable          bool                           `json:"editable"`
+	PathMissing       bool                           `json:"pathMissing,omitempty"`
+	PathReadOnly      bool                           `json:"pathReadOnly,omitempty"`
+	OrigWritable      bool                           `json:"origWritable"`
+	SuggestedDirs     []platform.SuggestedComposeDir `json:"suggestedDirs,omitempty"`
+	Content           string                         `json:"content"`
+	Reason            string                         `json:"reason,omitempty"`
+	EffectiveServices []string                       `json:"effectiveServices,omitempty"`
+	ExtraFileServices []string                       `json:"extraFileServices,omitempty"`
 }
 
 // finalizeTimeout 是更新任务收尾写库使用的独立超时（审计 M6）。
@@ -551,13 +558,15 @@ func (s *Service) prepareUpgradeJob(ctx context.Context, item UpdateItemRequest,
 	return job, false, prevFindingVer, nil
 }
 
-// GetAppCompose 读取指定 App（Compose / DSM Project）当前生效的 compose.yaml 内容（附录 D.4）。
+// GetAppCompose 读取指定 App（Compose / DSM Project）当前生效的 compose.yaml 内容；若原文件缺失或无权限，返回容器反推配置与保存位置预检结果（附录 D.4）。
 func (s *Service) GetAppCompose(ctx context.Context, appKey string, lang i18n.Lang) (*ComposeInfo, error) {
-	var hostID, appName, source, projJSON string
+	var hostID, hostName, appName, source, projJSON string
 	err := s.st.DB.QueryRowContext(ctx, `
-		SELECT host_id, name, source, COALESCE(project_json,'')
-		FROM app WHERE key=? AND gone_at IS NULL`, strings.TrimSpace(appKey)).Scan(
-		&hostID, &appName, &source, &projJSON,
+		SELECT a.host_id, COALESCE(h.name,''), a.name, a.source, COALESCE(a.project_json,'')
+		FROM app a
+		LEFT JOIN host h ON a.host_id = h.id
+		WHERE a.key=? AND a.gone_at IS NULL`, strings.TrimSpace(appKey)).Scan(
+		&hostID, &hostName, &appName, &source, &projJSON,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, i18n.NewEngineError(i18n.MsgComposeNotEditable)
@@ -569,6 +578,7 @@ func (s *Service) GetAppCompose(ctx context.Context, appKey string, lang i18n.La
 		return &ComposeInfo{
 			Key:      appKey,
 			HostID:   hostID,
+			HostName: hostName,
 			Name:     appName,
 			Source:   source,
 			Editable: false,
@@ -587,25 +597,60 @@ func (s *Service) GetAppCompose(ctx context.Context, appKey string, lang i18n.La
 	ad, _, err := s.hosts.OpenAdapter(ctx, hostID)
 	if err != nil {
 		return &ComposeInfo{
-			Key:      appKey,
-			HostID:   hostID,
-			Name:     appName,
-			Source:   source,
-			Editable: false,
-			Reason:   i18n.LocalizeErr(lang, err),
+			Key:         appKey,
+			HostID:      hostID,
+			HostName:    hostName,
+			Name:        appName,
+			ProjectName: proj.Name,
+			Source:      source,
+			Editable:    false,
+			Reason:      i18n.LocalizeErr(lang, err),
 		}, nil
 	}
 	defer ad.Close()
 
+	dbServices := s.listIndexedProjectServiceNames(ctx, strings.TrimSpace(appKey))
+
+	if locAd, ok := ad.(platform.ComposeLocationAdapter); ok {
+		insp, iErr := locAd.InspectProjectComposeEdit(ctx, appName, &proj)
+		if iErr == nil && insp != nil {
+			eff := mergeUniqueStrings(insp.EffectiveServices, dbServices)
+			if len(eff) == 0 {
+				if parsed, pErr := docker.ParseComposeServiceNames(insp.Content); pErr == nil {
+					eff = mergeUniqueStrings(parsed, dbServices)
+				}
+			}
+			return &ComposeInfo{
+				Key:               appKey,
+				HostID:            hostID,
+				HostName:          hostName,
+				Name:              appName,
+				ProjectName:       insp.ProjectName,
+				Source:            source,
+				ComposePath:       insp.ComposePath,
+				Editable:          true,
+				PathMissing:       insp.PathMissing,
+				PathReadOnly:      insp.PathReadOnly,
+				OrigWritable:      insp.OrigWritable,
+				SuggestedDirs:     insp.SuggestedDirs,
+				Content:           insp.Content,
+				EffectiveServices: eff,
+				ExtraFileServices: insp.ExtraFileServices,
+			}, nil
+		}
+	}
+
 	content, err := ad.GetProjectCompose(ctx, &proj)
 	if err != nil {
 		return &ComposeInfo{
-			Key:      appKey,
-			HostID:   hostID,
-			Name:     appName,
-			Source:   source,
-			Editable: false,
-			Reason:   i18n.LocalizeErr(lang, err),
+			Key:         appKey,
+			HostID:      hostID,
+			HostName:    hostName,
+			Name:        appName,
+			ProjectName: proj.Name,
+			Source:      source,
+			Editable:    false,
+			Reason:      i18n.LocalizeErr(lang, err),
 		}, nil
 	}
 	composePath := ""
@@ -627,20 +672,87 @@ func (s *Service) GetAppCompose(ctx context.Context, appKey string, lang i18n.La
 			effectiveServices = append(effectiveServices, parsed...)
 		}
 	}
-	dbServices := s.listIndexedProjectServiceNames(ctx, strings.TrimSpace(appKey))
 	effectiveServices = mergeUniqueStrings(effectiveServices, dbServices)
 
 	return &ComposeInfo{
 		Key:               appKey,
 		HostID:            hostID,
+		HostName:          hostName,
 		Name:              appName,
+		ProjectName:       proj.Name,
 		Source:            source,
 		ComposePath:       composePath,
 		Editable:          true,
+		OrigWritable:      true,
 		Content:           content,
 		EffectiveServices: effectiveServices,
 		ExtraFileServices: extraFileServices,
 	}, nil
+}
+
+func (s *Service) openComposeLocationAdapter(ctx context.Context, appKey string) (platform.ComposeLocationAdapter, string, platform.ProjectInfo, error) {
+	var hostID, appName, source, projJSON string
+	err := s.st.DB.QueryRowContext(ctx, `
+		SELECT host_id, name, source, COALESCE(project_json,'')
+		FROM app WHERE key=? AND gone_at IS NULL`, strings.TrimSpace(appKey)).Scan(
+		&hostID, &appName, &source, &projJSON,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", platform.ProjectInfo{}, i18n.NewEngineError(i18n.MsgComposeNotEditable)
+	}
+	if err != nil {
+		return nil, "", platform.ProjectInfo{}, err
+	}
+	if source == string(platform.SourceVendorManaged) || source == string(platform.SourceStandalone) {
+		return nil, "", platform.ProjectInfo{}, i18n.NewEngineError(i18n.MsgComposeNotEditable)
+	}
+	var proj platform.ProjectInfo
+	if projJSON != "" {
+		_ = json.Unmarshal([]byte(projJSON), &proj)
+	}
+	if proj.Name == "" {
+		proj.Name = appName
+	}
+	ad, _, err := s.hosts.OpenAdapter(ctx, hostID)
+	if err != nil {
+		return nil, "", platform.ProjectInfo{}, err
+	}
+	locAd, ok := ad.(platform.ComposeLocationAdapter)
+	if !ok {
+		_ = ad.Close()
+		return nil, "", platform.ProjectInfo{}, i18n.NewEngineError(i18n.MsgComposeNotEditable)
+	}
+	return locAd, appName, proj, nil
+}
+
+// ListAppComposeDirs 列出目标应用所在宿主机指定路径下的子文件夹列表。
+func (s *Service) ListAppComposeDirs(ctx context.Context, appKey, dirPath string) (*platform.ComposeHostDirList, error) {
+	locAd, _, _, err := s.openComposeLocationAdapter(ctx, appKey)
+	if err != nil {
+		return nil, err
+	}
+	defer locAd.Close()
+	return locAd.ListComposeHostDirs(ctx, dirPath)
+}
+
+// CreateAppComposeDir 在目标应用所在宿主机的指定父目录下创建新文件夹。
+func (s *Service) CreateAppComposeDir(ctx context.Context, appKey, parentDir, name string) (string, error) {
+	locAd, _, _, err := s.openComposeLocationAdapter(ctx, appKey)
+	if err != nil {
+		return "", err
+	}
+	defer locAd.Close()
+	return locAd.CreateComposeHostDir(ctx, parentDir, name)
+}
+
+// CheckAppComposeDir 核验目标保存文件夹是否可写，以及是否存在同名 compose.yaml 归属与运行冲突。
+func (s *Service) CheckAppComposeDir(ctx context.Context, appKey, dirPath, subFolder string) (*platform.ComposeDirCheckResult, error) {
+	locAd, appName, proj, err := s.openComposeLocationAdapter(ctx, appKey)
+	if err != nil {
+		return nil, err
+	}
+	defer locAd.Close()
+	return locAd.CheckComposeSaveDir(ctx, appName, &proj, dirPath, subFolder)
 }
 
 func (s *Service) listIndexedProjectServiceNames(ctx context.Context, appKey string) []string {
@@ -909,6 +1021,7 @@ func (s *Service) StartComposeUpdate(ctx context.Context, req ComposeUpdateReque
 		DeleteRemovedImages:   req.DeleteRemovedImages,
 		DeleteRemovedFileIDs:  append([]string(nil), req.DeleteRemovedFileIDs...),
 		StartAfter:            req.StartAfter,
+		TargetComposePath:     strings.TrimSpace(req.TargetComposePath),
 	})
 	return &job, nil
 }
@@ -1442,6 +1555,13 @@ func (s *Service) executeComposeJob(j Job, proj platform.ProjectInfo, newYAML st
 
 	if s.inv != nil {
 		_, _, _ = s.inv.SyncHost(ctx, j.HostID)
+	}
+	if s.st != nil && s.st.DB != nil && proj.SourceReadable && len(proj.ConfigFiles) > 0 {
+		if pj, mErr := json.Marshal(proj); mErr == nil {
+			pCtx, pCancel := context.WithTimeout(context.Background(), finalizeTimeout)
+			_, _ = s.st.DB.ExecContext(pCtx, `UPDATE app SET project_json=? WHERE key=?`, string(pj), j.AppKey)
+			pCancel()
+		}
 	}
 	if opts.ConfirmRemoveServices && s.st != nil && s.st.DB != nil {
 		cCtx, cCancel := context.WithTimeout(context.Background(), finalizeTimeout)

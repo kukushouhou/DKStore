@@ -300,13 +300,58 @@ func (e *ComposeServicesRemovedError) Error() string {
 	return "compose configuration removes existing services: " + strings.Join(e.RemovedServices, ", ")
 }
 
-// ComposeUpdateOptions 控制整项目 Compose 配置更新时的服务移除确认与旧资源清理行为。
+// ComposeUpdateOptions 控制整项目 Compose 配置更新时的服务移除确认、目标配置文件路径与旧资源清理行为。
 type ComposeUpdateOptions struct {
 	ConfirmRemoveServices bool
 	DeleteRemovedImages   bool
 	DeleteRemovedFileIDs  []string
 	LayerSizes            map[string]int64
 	StartAfter            *bool
+	TargetComposePath     string
+}
+
+// SuggestedComposeDir 表示可供文件夹选择器快捷跳转的宿主机目录。
+type SuggestedComposeDir struct {
+	Kind string `json:"kind"` // data_parent | opt | home
+	Path string `json:"path"`
+}
+
+// ProjectComposeInspection 汇总 Compose 项目在打开「按配置更新」时的文件可读可写预检与内容结果。
+type ProjectComposeInspection struct {
+	ComposePath       string                `json:"composePath"`
+	ProjectName       string                `json:"projectName"`
+	Content           string                `json:"content"`
+	PathMissing       bool                  `json:"pathMissing"`
+	PathReadOnly      bool                  `json:"pathReadOnly"`
+	OrigWritable      bool                  `json:"origWritable"`
+	SuggestedDirs     []SuggestedComposeDir `json:"suggestedDirs,omitempty"`
+	EffectiveServices []string              `json:"effectiveServices,omitempty"`
+	ExtraFileServices []string              `json:"extraFileServices,omitempty"`
+}
+
+// ComposeHostDirList 描述远程或本机文件夹浏览器的单级目录返回体。
+type ComposeHostDirList struct {
+	Path     string   `json:"path"`
+	Dirs     []string `json:"dirs"`
+	Writable bool     `json:"writable"`
+	HomeDir  string   `json:"homeDir,omitempty"`
+}
+
+// ComposeDirCheckResult 描述用户在文件夹选择器点击「确定选择」时的权限与同名配置归属核验结果。
+type ComposeDirCheckResult struct {
+	TargetFile string `json:"targetFile"`
+	Writable   bool   `json:"writable"`
+	ExistKind  string `json:"existKind"` // none | same | other_stopped | other_running | other_untracked
+	Owner      string `json:"owner,omitempty"`
+}
+
+// ComposeLocationAdapter 扩展 Adapter，提供原配置文件缺失/无权时的反推预检、远端目录浏览、安全建目录与同名归属核验。
+type ComposeLocationAdapter interface {
+	Adapter
+	InspectProjectComposeEdit(ctx context.Context, appName string, project *ProjectInfo) (*ProjectComposeInspection, error)
+	ListComposeHostDirs(ctx context.Context, dirPath string) (*ComposeHostDirList, error)
+	CreateComposeHostDir(ctx context.Context, parentDir, name string) (string, error)
+	CheckComposeSaveDir(ctx context.Context, appName string, project *ProjectInfo, dirPath, subFolder string) (*ComposeDirCheckResult, error)
 }
 
 // ComposeServiceSetSummary 汇总 Compose 项目当前的生效服务名集合与附加覆盖文件保留服务名集合。

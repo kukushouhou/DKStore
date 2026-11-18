@@ -388,7 +388,7 @@ func isComposeEditable(appSource, hostTransport, projJSON string) bool {
 		return true
 	}
 	if appSource == string(platform.SourceCompose) && hostTransport != "dsm_api" {
-		return proj.SourceReadable || len(proj.ConfigFiles) > 0
+		return true
 	}
 	return false
 }

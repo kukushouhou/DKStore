@@ -1240,7 +1240,7 @@ export default function AppCard({
       {/* 双栏版本选择与按新版配置更新一体化弹窗 */}
       <VersionPickerModal
         open={Boolean(pickerSvc)}
-        appName={pickerSvc?.name || app.name}
+        appName={isMultiContainer ? pickerSvc?.name || displayTitle : displayTitle}
         subtitle={subtitle}
         service={pickerSvc}
         app={app}

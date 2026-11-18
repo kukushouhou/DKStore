@@ -88,6 +88,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/icons", s.requireAuth(s.handleGetIcon))
 	mux.HandleFunc("GET /api/v1/apps", s.requireAuth(s.handleGetApp))
 	mux.HandleFunc("GET /api/v1/apps/compose", s.requireAuth(s.handleGetAppCompose))
+	mux.HandleFunc("GET /api/v1/apps/compose-dirs", s.requireAuth(s.handleListAppComposeDirs))
+	mux.HandleFunc("POST /api/v1/apps/compose-mkdir", s.requireAuth(s.handleCreateAppComposeDir))
+	mux.HandleFunc("POST /api/v1/apps/compose-check-dir", s.requireAuth(s.handleCheckAppComposeDir))
 	mux.HandleFunc("POST /api/v1/apps/compose-update", s.requireAuth(s.handleUpdateAppCompose))
 	mux.HandleFunc("PUT /api/v1/apps/compose", s.requireAuth(s.handleUpdateAppCompose))
 	mux.HandleFunc("GET /api/v1/apps/delete-preview", s.requireAuth(s.handlePreviewDeleteApp))
@@ -854,6 +857,93 @@ func (s *Server) handleGetAppCompose(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, info)
 }
 
+func (s *Server) handleListAppComposeDirs(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
+	if s.d.Updater == nil {
+		writeError(w, lang, http.StatusInternalServerError, "updater_unavailable", "")
+		return
+	}
+	key := strings.TrimSpace(r.URL.Query().Get("key"))
+	if key == "" {
+		key = strings.TrimSpace(r.URL.Query().Get("appKey"))
+	}
+	dirPath := strings.TrimSpace(r.URL.Query().Get("path"))
+	if key == "" {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", "missing key")
+		return
+	}
+	res, err := s.d.Updater.ListAppComposeDirs(r.Context(), key, dirPath)
+	if err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleCreateAppComposeDir(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
+	if s.d.Updater == nil {
+		writeError(w, lang, http.StatusInternalServerError, "updater_unavailable", "")
+		return
+	}
+	var body struct {
+		Key        string `json:"key"`
+		AppKey     string `json:"appKey"`
+		ParentPath string `json:"parentPath"`
+		Name       string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	key := strings.TrimSpace(body.AppKey)
+	if key == "" {
+		key = strings.TrimSpace(body.Key)
+	}
+	if key == "" || strings.TrimSpace(body.Name) == "" {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", "missing key or name")
+		return
+	}
+	createdPath, err := s.d.Updater.CreateAppComposeDir(r.Context(), key, body.ParentPath, body.Name)
+	if err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "path": createdPath})
+}
+
+func (s *Server) handleCheckAppComposeDir(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
+	if s.d.Updater == nil {
+		writeError(w, lang, http.StatusInternalServerError, "updater_unavailable", "")
+		return
+	}
+	var body struct {
+		Key       string `json:"key"`
+		AppKey    string `json:"appKey"`
+		Path      string `json:"path"`
+		SubFolder string `json:"subFolder"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	key := strings.TrimSpace(body.AppKey)
+	if key == "" {
+		key = strings.TrimSpace(body.Key)
+	}
+	if key == "" {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", "missing key")
+		return
+	}
+	res, err := s.d.Updater.CheckAppComposeDir(r.Context(), key, body.Path, body.SubFolder)
+	if err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeError(lang, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
 func (s *Server) handleUpdateAppCompose(w http.ResponseWriter, r *http.Request) {
 	lang := s.langOf(r)
 	if s.d.Updater == nil {
@@ -865,6 +955,7 @@ func (s *Server) handleUpdateAppCompose(w http.ResponseWriter, r *http.Request) 
 		AppKey                string   `json:"appKey"`
 		Content               string   `json:"content"`
 		YAML                  string   `json:"yaml"`
+		TargetComposePath     string   `json:"targetComposePath"`
 		ServiceKey            string   `json:"serviceKey"`
 		PolicyMode            string   `json:"policyMode"`
 		PolicyPrefix          string   `json:"policyPrefix"`
@@ -896,6 +987,7 @@ func (s *Server) handleUpdateAppCompose(w http.ResponseWriter, r *http.Request) 
 	job, err := s.d.Updater.StartComposeUpdate(r.Context(), updater.ComposeUpdateRequest{
 		AppKey:                key,
 		Content:               yamlContent,
+		TargetComposePath:     body.TargetComposePath,
 		ServiceKey:            body.ServiceKey,
 		PolicyMode:            body.PolicyMode,
 		PolicyPrefix:          body.PolicyPrefix,
