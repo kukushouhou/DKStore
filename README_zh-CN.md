@@ -1,4 +1,4 @@
-# DKStore — 家庭 Docker 应用更新中心
+# DKStore — 直观省心的 Docker 应用更新工具
 
 <p>
   <a href="./README.md">English</a> · <strong>简体中文</strong> · <a href="./CHANGELOG.md">更新日志</a> · <a href="https://github.com/kukushouhou/DKStore/releases">下载安装包</a>
@@ -12,50 +12,38 @@
   <img src="https://img.shields.io/badge/Docker-amd64%20%7C%20arm64%20%7C%20armv7-2496ed?style=flat-square" alt="Docker Multi-Arch" />
 </p>
 
-**DKStore** 是专为家庭 NAS、软路由与个人服务器打造的跨平台 Docker 应用更新中心。只需在家中任意一台设备安装一次，即可像手机应用商店一样统一检查、一键安全升级、在线调整配置并在必要时一键回退家里所有设备上的 Docker 应用，同时与群晖 Container Manager、飞牛应用中心等系统原生管理器无感并存。
+**DKStore** 是一款可与群晖、飞牛等系统自带 Docker 管理器**无缝共存**的应用更新工具，提供群晖、飞牛、iStoreOS / OpenWrt 等各平台原生安装包。无需迁移原有容器即可看清 `latest` 真实版本、一键升级与回退，换新版配置时还能**一键恢复自己原有的目录、端口和密码**。
 
 ---
 
 ## 功能亮点
 
-- **应用商店式更新体验，告别盲目升级**
-  - 自动反查 `:latest` 等浮动标签背后的真实版本号（如 `latest (v1.4.1)`），直观对比当前运行版本与最新可用版本。
-  - 智能将待更新应用划分为 **「可更新」** 与 **「需谨慎更新」**（自动识别跨大版本升级、MySQL/PostgreSQL/Redis/MQ 等数据库与中间件组件），并附带官方更新说明与仓库直达链接。
-  - 灵活的提醒范围控制：支持 **锁定大版本前缀**（例如锁住 `0.5.x` 或 `v1.x` 不跨大版本提醒）、**仅跳过当前版本** 或 **不再提醒**。
-- **一处安装，统管全家设备（被管设备免装客户端）**
-  - 支持接入本机 Docker、**群晖 DSM WebAPI 免 SSH 连接**（支持两步验证 OTP 与设备信任令牌持久化）以及 **SSH 远程连接**（支持密码、PEM 私钥、一键生成密钥对及 `sudo` 提权），统一管理多台群晖 NAS、飞牛 fnOS、OpenWrt / iStoreOS 软路由与 Linux 主机。
-  - 自动识别群晖 Container Manager 原生项目、标准 Docker Compose 项目与独立容器；对系统套件托管容器自动设为只读保护，防止误操作破坏系统套件。
-- **单容器安全升级、在线改配置与流式日志**
-  - **不连带重启数据库**：升级多容器项目时仅替换目标容器镜像并独立重建，绝不误重启同项目下的数据库或其他关联服务，同时完整保留原 `docker-compose.yml` 注释与缩进，并自动保留原有的镜像加速源前缀。
-  - **网页端直接按新版配置更新**：当官方新版要求增改环境变量、端口或 YAML 配置时，可直接在更新弹窗内修改当前配置（内置文件夹路径与密码防误覆盖检测、一键恢复原配置，升级失败自动回滚原配置与运行状态）。
-  - **实时进度与终端日志**：实时展示镜像分层下载进度条与只读终端执行日志，多任务队列一目了然。
-- **更新历史记录与安全回退**
-  - 完整留存每次升级与回退前后的版本号、镜像摘要（Digest）及终端日志；回退前自动核验目标版本镜像可用性，确认安全后一键回退到升级前版本。
-- **树状容器监控、残留清理与定时推送**
-  - 树状分组展示各设备的项目与容器运行状态、运行时长、实时 CPU / 内存占用，支持一键移除容器或整个项目（可选一并清理镜像与项目目录）。
-  - 内置定时自动检查、Docker Hub / 私有仓库凭据原位配置，支持通过 **Telegram、Bark、企业微信、ntfy、Webhook** 推送新版本通知，全界面支持**中英双语**实时切换。
+- **各平台原生安装，与 NAS 自带 Docker 管理器无缝共存**  
+  提供群晖 `.spk`、飞牛 `.fpk`、iStoreOS `.run`、OpenWrt `.ipk`/`.apk` 原生安装包（及 Docker / Linux / Windows 版），装好后直接从系统桌面免二次密码打开。**无需迁移或重建现有项目**：群晖 Container Manager、飞牛 Docker 等自带管理器创建的容器可直接原地升级，升完在原管理器中依然正常受管（单更某容器时不连带重启同项目数据库，系统套件容器自动只读保护），同时支持**群晖免开 SSH 直连**与多设备 SSH 集中管理。
+  <p><a href="./assets/screenshots/hosts-zh.png"><img src="./assets/screenshots/hosts-zh.png" width="560" alt="原生安装与多设备管理" /></a></p>
 
----
+- **粘贴新版配置，一键「恢复个性化配置」**  
+  整段粘贴官方新版 `compose.yaml` 或 `docker run` 示例时无需逐行手抄旧配置：上方文本与下方表单实时双向同步，点一下 **「恢复个性化配置」** 即可还原被示例值覆盖的个人目录、端口和密码，同时保留新镜像版本与官方新增项；原配置文件缺失时还能从运行容器自动生成并选择保存目录。
+  <p><a href="./assets/screenshots/config-update-zh.png"><img src="./assets/screenshots/config-update-zh.png" width="560" alt="按配置更新与恢复个性化配置" /></a></p>
 
-## 界面预览
+- **看清真实版本号，自由选版与锁定前缀**  
+  自动查出 `latest` 背后的实际版本（如 `latest (v1.4.1)`），将常规更新与数据库等 **「需谨慎更新」** 分开展示并直达官方更新说明；选版弹窗支持切换 **「预发布」**、按版本号或更新时间排序，以及 **锁定前面的版本号**（如锁住 `2.x` 不跨大版本提醒）。
+  <p>
+    <a href="./assets/screenshots/updates-zh.png"><img src="./assets/screenshots/updates-zh.png" width="405" alt="应用更新首页" /></a>
+    <a href="./assets/screenshots/version-picker-zh.png"><img src="./assets/screenshots/version-picker-zh.png" width="405" alt="版本选择与前缀锁定" /></a>
+  </p>
 
-### 1. 应用更新中心（真实版本号反查与风险分级）
-![应用更新中心](./assets/screenshots/updates-zh.png)
+- **网页一键直达、容器启停与备注标签**  
+  点击应用图标即可直接打开容器网页后台；支持自定义中文备注名、访问网址与分类标签，在首页或容器列表可直接启动、停止、重启容器（更新未运行容器时可自由选择「仅更新不启动」或「更新并启动」）。
+  <p><a href="./assets/screenshots/containers-zh.png"><img src="./assets/screenshots/containers-zh.png" width="560" alt="容器列表与启停管理" /></a></p>
 
-### 2. 指定版本切换与版本号前缀锁定
-![版本选择与前缀锁定](./assets/screenshots/version-picker-zh.png)
+- **清晰报错提示、断流续传与一键回退**  
+  镜像下载遇网络波动自动断点续传；升级出错直接转为清晰原因（如网络超时、空间不足、端口占用）并提供一键 **「重试」**，新配置启动失败自动还原；每次升级留存版本与日志，新版不好用随时一键 **「回退版本」**。
+  <p><a href="./assets/screenshots/history-zh.png"><img src="./assets/screenshots/history-zh.png" width="560" alt="历史记录与版本回退" /></a></p>
 
-### 3. 按新版配置在线修改更新（防覆盖保护与失败自动还原）
-![按新版配置更新](./assets/screenshots/config-update-zh.png)
-
-### 4. 容器运行状态树状监控与清理
-![容器运行状态](./assets/screenshots/containers-zh.png)
-
-### 5. 多设备统一接入与管理
-![设备管理](./assets/screenshots/hosts-zh.png)
-
-### 6. 升级历史记录、执行日志与一键回退
-![历史记录与版本回退](./assets/screenshots/history-zh.png)
+- **新版本消息推送与 DKStore 自更新**  
+  支持定时检查并通过 **企业微信、Bark、Telegram、ntfy、Webhook** 推送更新提醒；DKStore 自身支持自动更新、仅推送提醒或手动在线 / 上传离线包一键升级，全平台保留原有设备配置与历史记录。
+  <p><a href="./assets/screenshots/settings-zh.png"><img src="./assets/screenshots/settings-zh.png" width="560" alt="DKStore 自更新与通知设置" /></a></p>
 
 ---
 
@@ -144,6 +132,6 @@ go run ./cmd/dkstore --listen :8090 --data ./data
 go vet ./... && go test ./...
 
 # 4. 一键打包全平台发行产物至 dist/
-go run ./tools/build_release.go -version v0.2.0
+go run ./tools/build_release.go -version v0.7.0
 ```
 

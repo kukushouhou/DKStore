@@ -1,4 +1,4 @@
-# DKStore — Home Docker App Update Center
+# DKStore — Intuitive, Hassle-Free Docker App Updater
 
 <p>
   <strong>English</strong> · <a href="./README_zh-CN.md">简体中文</a> · <a href="./CHANGELOG.md">Changelog</a> · <a href="https://github.com/kukushouhou/DKStore/releases">Releases</a>
@@ -12,50 +12,38 @@
   <img src="https://img.shields.io/badge/Docker-amd64%20%7C%20arm64%20%7C%20armv7-2496ed?style=flat-square" alt="Docker Multi-Arch" />
 </p>
 
-**DKStore** is an app-store-like Docker update center crafted for home NAS devices, OpenWrt / iStoreOS routers, and personal Linux servers. Install it once on any device in your home network to check updates, safely upgrade individual services, edit configurations in place, and roll back across all your Docker hosts — coexisting seamlessly with native managers like Synology Container Manager and fnOS App Center.
+**DKStore** is a Docker app updater that **coexists seamlessly with native NAS Docker managers** (such as Synology Container Manager and fnOS Docker), with native installer packages for Synology DSM, fnOS, and iStoreOS / OpenWrt. Check real version numbers behind `latest`, upgrade or roll back existing containers in place without migrating stacks, and **restore your own paths, ports, and passwords in one click** when pasting new upstream configs.
 
 ---
 
-## Key Features
+## Key Highlights
 
-- **App-Store Style Update Experience**
-  - Resolves real version numbers behind floating tags like `:latest` (e.g., `latest (v1.4.1)`) so you always know what version is running and what is available.
-  - Automatically separates **Available Updates** from **Caution Updates** (major version jumps and stateful components such as MySQL, PostgreSQL, Redis, and message queues), with direct links to upstream release notes.
-  - Flexible reminder rules: **lock leading version segments** (e.g., stay on `0.5.x` or `v1.x`), **skip a single release**, or **mute reminders**.
-- **Install Once, Manage Every Device (No Client Agents Needed)**
-  - Connects directly via local `docker.sock`, **SSH-free Synology DSM WebAPI** (supporting 2FA OTP and persistent device tokens), or **standard SSH** (password, PEM key, one-click keypair generation, and `sudo` elevation).
-  - Automatically discovers Synology Container Manager projects, Docker Compose stacks, and standalone containers while marking system-managed package containers as read-only so OS packages are never touched.
-- **Safe Single-Service Upgrades, In-Place Config Editing & Live Logs**
-  - **Zero collateral restarts**: Upgrading a service inside a multi-container Compose or DSM project updates only the target service (`--no-deps`), preserving YAML comments/indentation, custom registry mirrors, and sibling database uptime.
-  - **Update with New Config**: Modify Compose YAML or standalone container environment variables and ports directly in the browser when upstream release notes require new settings — complete with folder-path/password overwrite warnings, one-click original config restore, and automatic rollback if startup fails.
-  - **Real-time layer progress & `xterm` logs**: Stream per-layer download progress and live execution logs right in the web UI.
-- **Verified One-Click Rollbacks**
-  - Stores before/after versions, image digests, and full logs for every upgrade. Verifies image tag/digest availability before executing a safe one-click rollback.
-- **Container Resource Tree, Cleanup & Push Notifications**
-  - Hierarchical project/container monitor showing live CPU & memory usage, health status, uptime, device, and image, with one-click container or whole-project removal (optional image & directory cleanup).
-  - Scheduled background checks, inline private registry & Docker Hub credential setup, full **English / Simplified Chinese** UI, and push alerts via **Telegram, Bark, WeCom, ntfy, and Webhooks**.
+- **Native Platform Packages & Seamless NAS Manager Coexistence**  
+  Ships native installers for Synology DSM (`.spk`), fnOS (`.fpk`), iStoreOS (`.run`), and OpenWrt (`.ipk`/`.apk`) alongside Docker, Linux, and Windows builds — install from your system center and launch directly from the desktop without a second login. **No stack migration needed**: containers created in Synology Container Manager, fnOS Docker, or CLI upgrade in place while remaining fully managed in your native UI (single-service upgrades never restart sibling databases, and system package containers stay read-only), with **SSH-free Synology access** and multi-host SSH management built in.
+  <p><a href="./assets/screenshots/hosts-en.png"><img src="./assets/screenshots/hosts-en.png" width="560" alt="Native Install & Multi-Device Management" /></a></p>
 
----
+- **Paste New Configs & Click "Restore Personalized" in One Step**  
+  No more line-by-line copying when upstream releases change `compose.yaml` or `docker run` templates: the top config and bottom visual form stay in live two-way sync, and clicking **"Restore Personalized"** brings back your custom paths, ports, and passwords while keeping the new image version and newly added options. Missing original `compose.yaml` files are reconstructed automatically from running containers with a visual folder picker.
+  <p><a href="./assets/screenshots/config-update-en.png"><img src="./assets/screenshots/config-update-en.png" width="560" alt="Update with Config & Restore Personalized" /></a></p>
 
-## Screenshots
+- **See Real Versions, Pick Tags & Lock Version Prefixes**  
+  Looks up the real version behind `latest` (e.g., `latest (v1.4.1)`), separates routine updates from **Caution Updates** (major jumps and databases) with direct links to release notes, and offers a **Pre-release** toggle, **By Version / By Time** sorting, and **version prefix locking** (e.g., stay on `2.x`).
+  <p>
+    <a href="./assets/screenshots/updates-en.png"><img src="./assets/screenshots/updates-en.png" width="405" alt="App Updates Home" /></a>
+    <a href="./assets/screenshots/version-picker-en.png"><img src="./assets/screenshots/version-picker-en.png" width="405" alt="Version Picker" /></a>
+  </p>
 
-### 1. App Updates Center (Floating Tag Resolution & Risk Grouping)
-![App Updates](./assets/screenshots/updates-en.png)
+- **One-Click Web Access, Start/Stop Controls & Custom Labels**  
+  Click an app icon to open its web UI directly; set custom display names, external URLs, notes, and filterable tags, and start, stop, or restart containers from Home cards or the Containers list (updating a stopped container lets you choose **Update Only** or **Update & Start**).
+  <p><a href="./assets/screenshots/containers-en.png"><img src="./assets/screenshots/containers-en.png" width="560" alt="Containers List" /></a></p>
 
-### 2. Version Picker & Version Prefix Locking
-![Version Picker](./assets/screenshots/version-picker-en.png)
+- **Clear Error Reasons, Auto-Resume & One-Click Rollback**  
+  Resumes interrupted image downloads automatically; translates daemon errors into clear reasons (timeouts, full disk, port conflicts) with a one-click **Retry** button and automatic config restoration on startup failure; saves version history and logs for instant **Roll Back**.
+  <p><a href="./assets/screenshots/history-en.png"><img src="./assets/screenshots/history-en.png" width="560" alt="Update History & Rollback" /></a></p>
 
-### 3. In-Place Configuration Update (with Overwrite Protection)
-![Update with New Config](./assets/screenshots/config-update-en.png)
-
-### 4. Hierarchical Container Resource Monitor
-![Containers Monitor](./assets/screenshots/containers-en.png)
-
-### 5. Multi-Device Management
-![Devices Management](./assets/screenshots/hosts-en.png)
-
-### 6. Upgrade History, Execution Logs & One-Click Rollback
-![Update History](./assets/screenshots/history-en.png)
+- **Push Notifications & DKStore Self-Update**  
+  Supports scheduled checks and push alerts via **Telegram, Bark, WeCom, ntfy, and Webhooks**; DKStore itself supports Auto Update, Notify Only, or one-click online / offline package upgrades across all platforms with all data preserved.
+  <p><a href="./assets/screenshots/settings-en.png"><img src="./assets/screenshots/settings-en.png" width="560" alt="DKStore Self-Update & Settings" /></a></p>
 
 ---
 
@@ -144,6 +132,6 @@ go run ./cmd/dkstore --listen :8090 --data ./data
 go vet ./... && go test ./...
 
 # 4. Build all multi-platform release packages into dist/
-go run ./tools/build_release.go -version v0.2.0
+go run ./tools/build_release.go -version v0.7.0
 ```
 
