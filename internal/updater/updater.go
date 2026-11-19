@@ -61,7 +61,11 @@ type Job struct {
 	Retryable          bool                  `json:"retryable"`
 	ErrorCode          string                `json:"errorCode,omitempty"`
 	ErrorMsg           string                `json:"errorMsg,omitempty"`
+	ErrorTitle         string                `json:"errorTitle,omitempty"`
+	ErrorDetail        string                `json:"errorDetail,omitempty"`
+	ErrorAction        string                `json:"errorAction,omitempty"`
 	rawErrorMsg        string
+	configuredMirrors  []string
 	startAfter         *bool
 	Logs               string                `json:"logs,omitempty"`
 	LogChunk           string                `json:"logChunk,omitempty"`
@@ -78,6 +82,10 @@ func (j Job) LocalizeFor(lang i18n.Lang) Job {
 			raw = j.ErrorMsg
 		}
 		j.ErrorMsg = i18n.FormatUpdateError(lang, j.ErrorCode, raw)
+		st := i18n.FormatStructuredUpdateError(lang, j.ErrorCode, raw, j.HostName, j.Progress.DownloadedBytes, j.configuredMirrors)
+		j.ErrorTitle = st.Title
+		j.ErrorDetail = st.Detail
+		j.ErrorAction = st.Action
 	}
 	if j.RollbackReason != "" {
 		j.RollbackReasonText = i18n.FormatRollbackReason(lang, j.RollbackReason)
@@ -1327,7 +1335,16 @@ func (t *jobProgressTracker) handleProgress(ctx context.Context, j *Job, p platf
 
 func (t *jobProgressTracker) fail(j Job, code, msg string) {
 	displayErr := i18n.FormatUpdateError(i18n.ZhCN, code, msg)
-	errChunk := fmt.Sprintf("\r\n\x1b[31m✖ %s\x1b[0m\r\n", displayErr)
+	var extra strings.Builder
+	extra.WriteString("\r\n")
+	if code == "pull_failed" && len(j.configuredMirrors) > 0 {
+		extra.WriteString(fmt.Sprintf("\x1b[33m! 设备已配置镜像源: %s\x1b[0m\r\n", strings.Join(j.configuredMirrors, ", ")))
+	}
+	if rawPlain := strings.TrimSpace(i18n.LocalizeDetail(i18n.ZhCN, msg)); rawPlain != "" && rawPlain != displayErr {
+		extra.WriteString(fmt.Sprintf("\x1b[90m  ↳ %s\x1b[0m\r\n", rawPlain))
+	}
+	extra.WriteString(fmt.Sprintf("\x1b[31m✖ %s\x1b[0m\r\n", displayErr))
+	errChunk := extra.String()
 	t.logBuf.WriteString(errChunk)
 	j.LogChunk = errChunk
 	j.Logs = t.logBuf.String()
@@ -1460,6 +1477,8 @@ func (s *Service) executeJob(j Job) {
 			regAuth = s.reg.DockerAuthHeader(ctx, pr.Registry)
 		}
 	}
+	mirrorPairs := s.resolveHostMirrorPairs(ctx, j.HostID, ad)
+	j.configuredMirrors = matchingMirrorURLsForRef(mirrorPairs, j.TargetImageRef)
 	layerSizes := s.prefetchLayerSizes(ctx, j.ServiceKey, h, j.TargetImageRef)
 
 	res, err := upAd.UpdateService(ctx, platform.UpdateRequest{
@@ -1472,6 +1491,7 @@ func (s *Service) executeJob(j Job) {
 		TargetImageRef:  j.TargetImageRef,
 		RegistryAuthB64: regAuth,
 		LayerSizes:      layerSizes,
+		MirrorPairs:     mirrorPairs,
 		StartAfter:      j.startAfter,
 	}, func(p platform.PullProgress) {
 		tracker.handleProgress(ctx, &j, p)
@@ -1517,6 +1537,8 @@ func (s *Service) executeComposeJob(j Job, proj platform.ProjectInfo, newYAML st
 	}
 	defer ad.Close()
 
+	opts.MirrorPairs = s.resolveHostMirrorPairs(ctx, j.HostID, ad)
+	j.configuredMirrors = matchingMirrorURLsForRef(opts.MirrorPairs, j.TargetImageRef)
 	if svcImgs, vErr := docker.ValidateComposeYAML(newYAML); vErr == nil && len(svcImgs) > 0 {
 		refs := make([]string, 0, len(svcImgs))
 		for _, r := range svcImgs {
@@ -1671,6 +1693,8 @@ func (s *Service) executeStandaloneConfigJob(j Job, cfgReq StandaloneConfigUpdat
 			regAuth = s.reg.DockerAuthHeader(ctx, pr.Registry)
 		}
 	}
+	mirrorPairs := s.resolveHostMirrorPairs(ctx, j.HostID, ad)
+	j.configuredMirrors = matchingMirrorURLsForRef(mirrorPairs, j.TargetImageRef)
 	layerSizes := s.prefetchLayerSizes(ctx, j.ServiceKey, h, j.TargetImageRef)
 
 	res, err := scAd.UpdateStandaloneConfig(ctx, platform.StandaloneUpdateRequest{
@@ -1681,6 +1705,7 @@ func (s *Service) executeStandaloneConfigJob(j Job, cfgReq StandaloneConfigUpdat
 		TargetImageRef:  j.TargetImageRef,
 		RegistryAuthB64: regAuth,
 		LayerSizes:      layerSizes,
+		MirrorPairs:     mirrorPairs,
 		StartAfter:      j.startAfter,
 		Env:             cfgReq.Env,
 		Ports:           cfgReq.Ports,
@@ -2065,4 +2090,38 @@ func isDockerBeforeZstd(ver string) bool {
 		return false
 	}
 	return patch < 10
+}
+
+func (s *Service) resolveHostMirrorPairs(ctx context.Context, hostID string, ad platform.Adapter) []platform.MirrorPair {
+	var cached []platform.MirrorPair
+	if s.hosts != nil {
+		cached = s.hosts.LoadCachedHostMirrors(ctx, hostID)
+	}
+	if len(cached) == 0 && ad != nil {
+		if mAd, ok := ad.(platform.MirrorAdapter); ok {
+			pCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+			if urls, err := mAd.GetDockerHubMirrors(pCtx); err == nil && len(urls) > 0 {
+				cached = []platform.MirrorPair{{Source: "docker.io", URLs: urls}}
+			}
+			cancel()
+		}
+	}
+	return cached
+}
+
+func matchingMirrorURLsForRef(pairs []platform.MirrorPair, imageRef string) []string {
+	if len(pairs) == 0 {
+		return nil
+	}
+	regHost := "docker.io"
+	if pr, err := version.ParseImageRef(strings.TrimSpace(imageRef)); err == nil && pr.Registry != "" {
+		regHost = docker.NormalizeRegistrySource(pr.Registry)
+	}
+	var out []string
+	for _, p := range pairs {
+		if docker.NormalizeRegistrySource(p.Source) == regHost {
+			out = append(out, p.URLs...)
+		}
+	}
+	return out
 }

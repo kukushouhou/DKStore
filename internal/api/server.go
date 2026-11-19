@@ -116,6 +116,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/hosts", s.requireAuth(s.handleCreateHost))
 	mux.HandleFunc("PUT /api/v1/hosts/{id}", s.requireAuth(s.handleUpdateHost))
 	mux.HandleFunc("DELETE /api/v1/hosts/{id}", s.requireAuth(s.handleDeleteHost))
+	mux.HandleFunc("GET /api/v1/hosts/{id}/mirrors", s.requireAuth(s.handleGetHostMirrors))
+	mux.HandleFunc("PUT /api/v1/hosts/{id}/mirrors", s.requireAuth(s.handleSaveHostMirrors))
+	mux.HandleFunc("POST /api/v1/hosts/{id}/mirrors/test", s.requireAuth(s.handleTestHostMirrors))
 	mux.HandleFunc("POST /api/v1/hosts/test", s.requireAuth(s.handleTestHost))
 	mux.HandleFunc("POST /api/v1/hosts/keygen", s.requireAuth(s.handleKeygen))
 
@@ -604,6 +607,54 @@ func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleGetHostMirrors(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
+	id := strings.TrimSpace(r.PathValue("id"))
+	pairs, err := s.d.Hosts.GetHostMirrors(r.Context(), id)
+	if err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeErr(lang, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pairs": pairs})
+}
+
+func (s *Server) handleSaveHostMirrors(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
+	id := strings.TrimSpace(r.PathValue("id"))
+	var body struct {
+		Pairs            []platform.MirrorPair `json:"pairs"`
+		AlsoApplyHostIDs []string              `json:"alsoApplyHostIds"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	saved, err := s.d.Hosts.SaveHostMirrors(r.Context(), id, body.Pairs, body.AlsoApplyHostIDs)
+	if err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeErr(lang, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "pairs": saved})
+}
+
+func (s *Server) handleTestHostMirrors(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
+	id := strings.TrimSpace(r.PathValue("id"))
+	var body struct {
+		URLs []string `json:"urls"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	items, err := s.d.Hosts.TestHostMirrors(r.Context(), id, body.URLs, lang)
+	if err != nil {
+		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeErr(lang, err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
 func (s *Server) handleTestHost(w http.ResponseWriter, r *http.Request) {

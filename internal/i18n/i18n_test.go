@@ -45,6 +45,7 @@ func TestFormatUpdateError_HumanizedPlainLanguage(t *testing.T) {
 		{"pull_failed", "EOF", "网络连接中途断开，已下载的部分会保留", "network connection dropped"},
 		{"pull_failed", "homeassistant/home-assistant:latest — EOF", "网络连接中途断开，已下载的部分会保留", "network connection dropped"},
 		{"pull_failed", "unexpected EOF", "网络连接中途断开，已下载的部分会保留", "network connection dropped"},
+		{"pull_failed", "HTTP 500: {\"message\":\"Get \\\"https://registry-1.docker.io/v2/\\\": EOF\"}", "无法连接镜像源", "Cannot connect to image source"},
 		{"pull_failed", "Get \"https://registry-1.docker.io/v2/\": net/http: TLS handshake timeout", "下载新镜像超时", "Image download timed out"},
 		{"pull_failed", "toomanyrequests: You have reached your pull rate limit", "临时限流", "rate-limited"},
 		{"pull_failed", "unauthorized: authentication required", "需要登录或当前账号无访问权限", "authentication required"},
@@ -96,5 +97,29 @@ func TestBilingualAndLegacyStrip(t *testing.T) {
 	}
 	if strings.Contains(lenOut, "群晖") || strings.Contains(lenOut, "已写回") {
 		t.Fatalf("expected legacy Chinese half stripped for EnUS, got %q", lenOut)
+	}
+}
+
+func TestFormatStructuredUpdateError(t *testing.T) {
+	st := FormatStructuredUpdateError(
+		ZhCN,
+		"pull_failed",
+		`HTTP 500: {"message":"Get \"https://registry-1.docker.io/v2/\": EOF"}`,
+		"软路由模拟器",
+		0,
+		[]string{"https://docker.mirrors.ustc.edu.cn"},
+	)
+	if st.Title != "无法连接镜像源" || st.Action != "mirror" || !strings.Contains(st.Detail, "docker.mirrors.ustc.edu.cn") {
+		t.Fatalf("unexpected structured mirror error: %+v", st)
+	}
+
+	drop := FormatStructuredUpdateError(ZhCN, "pull_failed", "unexpected EOF", "软路由模拟器", 4096, nil)
+	if drop.Title != "镜像下载中断" || drop.Action != "" {
+		t.Fatalf("unexpected structured drop error: %+v", drop)
+	}
+
+	auth := FormatStructuredUpdateError(ZhCN, "pull_failed", "unauthorized: authentication required", "NAS", 0, nil)
+	if auth.Title != "仓库需要登录凭据" || auth.Action != "cred" {
+		t.Fatalf("unexpected structured auth error: %+v", auth)
 	}
 }

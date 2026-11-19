@@ -49,6 +49,7 @@ type Host struct {
 	DSMURL              string             `json:"dsmUrl,omitempty"`
 	DSMUser             string             `json:"dsmUser,omitempty"`
 	Info                *platform.HostInfo `json:"info,omitempty"`
+	MirrorCount         int                `json:"mirrorCount"`
 	Status              string             `json:"status"` // online | offline | unknown
 	LastSeenAt          int64              `json:"lastSeenAt,omitempty"`
 	Sort                int                `json:"sort"`
@@ -151,19 +152,21 @@ type Registry struct {
 	bgCtx         context.Context
 	bgCancel      context.CancelFunc
 	bgRefreshing  map[string]bool
+	mirrorSyncing map[string]bool
 	bgWg          sync.WaitGroup
 }
 
 // NewRegistry 创建主机注册表。
 func NewRegistry(st *store.Store, box *secret.Box) *Registry {
 	return &Registry{
-		st:           st,
-		box:          box,
-		tokens:       make(map[string]stashedToken),
-		rtPool:       make(map[string]*pooledRuntimeAdapter),
-		rtInflight:   make(map[string]*dialRuntimeCall),
-		infoProbeAt:  make(map[string]time.Time),
-		bgRefreshing: make(map[string]bool),
+		st:            st,
+		box:           box,
+		tokens:        make(map[string]stashedToken),
+		rtPool:        make(map[string]*pooledRuntimeAdapter),
+		rtInflight:    make(map[string]*dialRuntimeCall),
+		infoProbeAt:   make(map[string]time.Time),
+		bgRefreshing:  make(map[string]bool),
+		mirrorSyncing: make(map[string]bool),
 	}
 }
 
@@ -1207,7 +1210,11 @@ func (r *Registry) List(ctx context.Context) ([]Host, error) {
 		}
 		out = append(out, h)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	r.populateMirrorCounts(ctx, out)
+	return out, nil
 }
 
 // RefreshHostsInfo 并发重新探测所有在线设备的系统与 Docker 版本信息并写回数据库，返回最新设备列表（供设备页手动刷新使用）。
@@ -1260,6 +1267,7 @@ func (r *Registry) RefreshHostsInfo(ctx context.Context) ([]Host, error) {
 				_, _ = r.st.DB.ExecContext(wCtx, `UPDATE host SET info_json=?, status='online', last_seen_at=? WHERE id=?`, marshalInfo(info), now, item.ID)
 				wCancel()
 			}
+			_, _ = r.GetHostMirrors(hCtx, item.ID)
 		}(h)
 	}
 	wg.Wait()

@@ -33,6 +33,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ApiError, api, onUnauthorized, type AuthStatus } from '../api/client'
 import AuthToolbar from '../components/AuthToolbar'
 import DKStoreLogo from '../components/DKStoreLogo'
+import HostMirrorModal from '../components/HostMirrorModal'
 import UpdateLogModal from '../components/UpdateLogModal'
 import UpdateQueuePanel from '../components/UpdateQueuePanel'
 import { useEffectiveDark } from '../hooks/useEffectiveDark'
@@ -676,6 +677,7 @@ export default function AppLayout() {
 
       {/* 全局只读 xterm.js 实时原始日志终端弹窗 */}
       <UpdateLogModal />
+      <HostMirrorModal />
     </Layout>
   )
 }

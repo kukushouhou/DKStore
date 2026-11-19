@@ -331,20 +331,51 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
                   job.status === 'failed' ? token.colorErrorBorder : token.colorBorderSecondary,
               }}
             >
-              {/* 第一行：左侧容器名（超出单行省略 + 悬停全称），右侧固定按钮组（失败时详情在左、主按钮重试在最右） */}
+              {/* 第一行：左侧容器名（失败时同行附紧凑版本号），右侧操作组 */}
               <Flex align="center" justify="space-between" gap={8} style={{ minWidth: 0 }}>
-                <Typography.Text
-                  strong
-                  ellipsis={{ tooltip: `${displayName} (${job.hostName})` }}
-                  style={{ fontSize: token.fontSizeSM, minWidth: 0, flex: 1 }}
-                >
-                  {displayName}
-                </Typography.Text>
+                <Flex align="center" gap={6} style={{ minWidth: 0, flex: 1 }}>
+                  <Typography.Text
+                    strong
+                    ellipsis={{ tooltip: `${displayName} (${job.hostName})` }}
+                    style={{ fontSize: token.fontSizeSM, minWidth: 0 }}
+                  >
+                    {displayName}
+                  </Typography.Text>
+                  {job.status === 'failed' && verText && (
+                    <Tooltip title={verText.length > 24 ? verText : undefined}>
+                      <Tag
+                        variant="filled"
+                        style={{
+                          margin: 0,
+                          fontFamily: token.fontFamilyCode,
+                          fontSize: 11,
+                          lineHeight: '18px',
+                          paddingInline: 6,
+                          maxWidth: 140,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          flexShrink: 0,
+                        }}
+                      >
+                        {verText}
+                      </Tag>
+                    </Tooltip>
+                  )}
+                </Flex>
 
-                <Space size={6} style={{ flexShrink: 0 }}>
-                  <Button size="small" onClick={() => setActiveLogJobId(job.id)}>
-                    {t.queue.detailBtn}
-                  </Button>
+                <Space size={8} align="center" style={{ flexShrink: 0 }}>
+                  {job.status === 'failed' ? (
+                    <Typography.Link
+                      onClick={() => setActiveLogJobId(job.id)}
+                      style={{ fontSize: 12, whiteSpace: 'nowrap' }}
+                    >
+                      {t.home.errLinkLog}
+                    </Typography.Link>
+                  ) : (
+                    <Button size="small" onClick={() => setActiveLogJobId(job.id)}>
+                      {t.queue.detailBtn}
+                    </Button>
+                  )}
                   {job.status === 'failed' && (
                     <Button
                       size="small"
@@ -358,8 +389,8 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
                 </Space>
               </Flex>
 
-              {/* 第二行：版本号变化标签独占全宽（超长单行省略 + 悬停完整提示） */}
-              {verText && (
+              {/* 第二行：非失败状态下版本号变化标签独占全宽 */}
+              {job.status !== 'failed' && verText && (
                 <div style={{ minWidth: 0 }}>
                   <Tooltip title={verText.length > 28 ? verText : undefined}>
                     <Tag
@@ -380,39 +411,73 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
                 </div>
               )}
 
-              {/* 第三行：阶段文案 / 字节进度 / 失败说明（超长报错默认展示 3 行摘要，可展开全文） */}
+              {/* 第三行：阶段文案 / 字节进度 / 结构化失败说明 */}
               {job.status === 'failed' ? (
-                <div>
-                  <div
-                    style={{
-                      fontSize: token.fontSizeSM,
-                      fontWeight: 600,
-                      color: token.colorError,
-                      lineHeight: 1.5,
-                      wordBreak: 'break-word',
-                      ...(expandedErrIds[job.id]
-                        ? {}
-                        : {
-                            display: '-webkit-box',
-                            WebkitLineClamp: 3,
-                            WebkitBoxOrient: 'vertical',
-                            overflow: 'hidden',
-                          }),
-                    }}
-                  >
-                    {phaseText}
-                  </div>
-                  {phaseText.length > 90 && (
-                    <Typography.Link
-                      onClick={() =>
-                        setExpandedErrIds((prev) => ({ ...prev, [job.id]: !prev[job.id] }))
-                      }
-                      style={{ fontSize: 12, color: token.colorTextSecondary }}
+                (() => {
+                  const errTitle =
+                    job.errorTitle || t.queue.statusFailed
+                  const errDetail =
+                    job.errorTitle
+                      ? job.errorDetail || ''
+                      : phaseText
+                  return (
+                    <div
+                      style={{
+                        background: token.colorErrorBg,
+                        borderRadius: token.borderRadiusSM,
+                        padding: '6px 8px',
+                      }}
                     >
-                      {expandedErrIds[job.id] ? t.home.collapseError : t.home.expandError}
-                    </Typography.Link>
-                  )}
-                </div>
+                      <div
+                        style={{
+                          fontSize: token.fontSizeSM,
+                          fontWeight: 600,
+                          color: token.colorError,
+                          lineHeight: 1.4,
+                        }}
+                      >
+                        {errTitle}
+                      </div>
+                      {errDetail && (
+                        <div style={{ marginTop: 2 }}>
+                          <div
+                            style={{
+                              fontSize: 12,
+                              color: token.colorTextSecondary,
+                              lineHeight: 1.45,
+                              wordBreak: 'break-word',
+                              ...(expandedErrIds[job.id]
+                                ? {}
+                                : {
+                                    display: '-webkit-box',
+                                    WebkitLineClamp: 2,
+                                    WebkitBoxOrient: 'vertical',
+                                    overflow: 'hidden',
+                                  }),
+                            }}
+                          >
+                            {errDetail}
+                          </div>
+                          {errDetail.length > 90 && (
+                            <Typography.Link
+                              onClick={() =>
+                                setExpandedErrIds((prev) => ({
+                                  ...prev,
+                                  [job.id]: !prev[job.id],
+                                }))
+                              }
+                              style={{ fontSize: 12, color: token.colorTextSecondary }}
+                            >
+                              {expandedErrIds[job.id]
+                                ? t.home.collapseError
+                                : t.home.expandError}
+                            </Typography.Link>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })()
               ) : (
                 <Flex align="center" justify="space-between" gap={8}>
                   <Typography.Text
@@ -514,7 +579,7 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
                     {doneLayers}/{layers.length}
                   </Typography.Text>
                 </Flex>
-              ) : (
+              ) : job.status === 'failed' && Math.round(unifiedPct) <= 0 ? null : (
                 <Progress
                   size="small"
                   percent={Math.round(unifiedPct)}

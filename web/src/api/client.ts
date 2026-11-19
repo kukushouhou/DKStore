@@ -238,8 +238,21 @@ export interface HostItem {
   dsmUser?: string
   transportMode?: string
   info?: HostInfo
+  mirrorCount?: number
   status: 'online' | 'offline' | 'unknown'
   lastSeenAt?: number
+}
+
+export interface MirrorPair {
+  source: string
+  urls: string[]
+}
+
+export interface MirrorTestItem {
+  url: string
+  ok: boolean
+  latencyMs?: number
+  error?: string
 }
 
 export interface HostInput {
@@ -723,6 +736,9 @@ export interface UpdateJobItem {
   retryable?: boolean
   errorCode?: string
   errorMsg?: string
+  errorTitle?: string
+  errorDetail?: string
+  errorAction?: 'mirror' | 'cred' | string
   logChunk?: string
   logOffset?: number
   logs?: string
@@ -911,6 +927,18 @@ export const api = {
     request<HostItem>(`/hosts/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(input) }),
   deleteHost: (id: string) =>
     request<{ ok: boolean }>(`/hosts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  getHostMirrors: (id: string) =>
+    request<{ pairs: MirrorPair[] }>(`/hosts/${encodeURIComponent(id)}/mirrors`),
+  saveHostMirrors: (id: string, pairs: MirrorPair[], alsoApplyHostIds?: string[]) =>
+    request<{ ok: boolean; pairs: MirrorPair[] }>(`/hosts/${encodeURIComponent(id)}/mirrors`, {
+      method: 'PUT',
+      body: JSON.stringify({ pairs, alsoApplyHostIds: alsoApplyHostIds ?? [] }),
+    }),
+  testHostMirrors: (id: string, urls: string[]) =>
+    request<{ items: MirrorTestItem[] }>(`/hosts/${encodeURIComponent(id)}/mirrors/test`, {
+      method: 'POST',
+      body: JSON.stringify({ urls }),
+    }),
   testHost: (input: HostInput) =>
     request<HostTestResult>('/hosts/test', { method: 'POST', body: JSON.stringify(input) }),
   keygen: () => request<{ privateKey: string; authorizedKey: string }>('/hosts/keygen', { method: 'POST' }),

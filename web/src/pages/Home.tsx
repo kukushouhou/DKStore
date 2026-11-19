@@ -428,6 +428,7 @@ export default function HomePage() {
                 allTags={overview.data?.allTags}
                 activeTag={effectiveTagFilter}
                 onTagClick={(tg) => setTagFilter((prev) => (prev === tg ? '' : tg))}
+                onOpenRegCred={(reg) => openRegCredModal(reg)}
                 onChanged={() => qc.invalidateQueries({ queryKey: ['overview'] })}
               />
             </div>

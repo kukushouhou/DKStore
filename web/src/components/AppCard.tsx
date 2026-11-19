@@ -63,12 +63,63 @@ function formatBytes(bytes: number): string {
   return `${val.toFixed(idx > 1 ? 1 : 0)} ${units[idx]}`
 }
 
+function extractJobStructuredError(
+  job: UpdateJobItem,
+  fallbackTitle: string,
+): { title: string; detail: string; action: 'mirror' | 'cred' | '' } {
+  if (job.errorTitle) {
+    return {
+      title: job.errorTitle,
+      detail: job.errorDetail || '',
+      action: (job.errorAction as 'mirror' | 'cred' | '') || '',
+    }
+  }
+  const raw = (job.errorMsg || job.errorCode || '').trim()
+  const idxZh = raw.indexOf('：')
+  const idxEn = raw.indexOf(': ')
+  if (idxZh > 0 && idxZh <= 20) {
+    return {
+      title: raw.slice(0, idxZh).trim(),
+      detail: raw.slice(idxZh + 1).trim(),
+      action: '',
+    }
+  }
+  if (idxEn > 0 && idxEn <= 36) {
+    return {
+      title: raw.slice(0, idxEn).trim(),
+      detail: raw.slice(idxEn + 2).trim(),
+      action: '',
+    }
+  }
+  return { title: fallbackTitle.replace(/[:：\s]+$/, ''), detail: raw, action: '' }
+}
+
+function extractImageRegistryDomain(imageRef?: string): string {
+  const s = (imageRef || '').trim()
+  if (!s) return 'docker.io'
+  const slash = s.indexOf('/')
+  if (slash <= 0) return 'docker.io'
+  const first = s.slice(0, slash).toLowerCase()
+  if (first.includes('.') || first.includes(':') || first === 'localhost') {
+    if (
+      first === 'index.docker.io' ||
+      first === 'registry-1.docker.io' ||
+      first === 'registry.hub.docker.com'
+    ) {
+      return 'docker.io'
+    }
+    return first
+  }
+  return 'docker.io'
+}
+
 interface AppCardProps {
   app: AppCardItem
   isChecking?: boolean
   allTags?: string[]
   activeTag?: string
   onTagClick?: (tag: string) => void
+  onOpenRegCred?: (registry?: string) => void
   onChanged: () => void
 }
 
@@ -78,6 +129,7 @@ export default function AppCard({
   allTags = [],
   activeTag = '',
   onTagClick,
+  onOpenRegCred,
   onChanged,
 }: AppCardProps) {
   const { token } = theme.useToken()
@@ -90,6 +142,7 @@ export default function AppCard({
   const upsertUpdateJob = useUIStore((s) => s.upsertUpdateJob)
   const dismissQueueJob = useUIStore((s) => s.dismissQueueJob)
   const setActiveLogJobId = useUIStore((s) => s.setActiveLogJobId)
+  const setActiveMirrorHostId = useUIStore((s) => s.setActiveMirrorHostId)
 
   const [metaOpen, setMetaOpen] = useState(false)
   const [pickerSvc, setPickerSvc] = useState<ServiceItem | null>(null)
@@ -866,8 +919,8 @@ export default function AppCard({
 
         {!updatingNow &&
           failedJobsForApp.map((job) => {
-            const errBody = job.errorMsg || job.errorCode || ''
-            const isLongErr = errBody.length > 68
+            const errInfo = extractJobStructuredError(job, t.home.updateFailed)
+            const isLongErr = errInfo.detail.length > 84
             const isExpanded = Boolean(expandedErrIds[job.id])
             return (
               <div
@@ -880,71 +933,85 @@ export default function AppCard({
                   background: token.colorErrorBg,
                 }}
               >
-                <div
-                  style={{
-                    fontSize: token.fontSizeSM,
-                    lineHeight: 1.5,
-                    color: token.colorText,
-                    wordBreak: 'break-word',
-                    ...(isExpanded
-                      ? {}
-                      : {
-                          display: '-webkit-box',
-                          WebkitLineClamp: 2,
-                          WebkitBoxOrient: 'vertical',
-                          overflow: 'hidden',
-                        }),
-                  }}
-                >
-                  <CloseCircleFilled
-                    style={{ color: token.colorError, marginRight: 6, fontSize: 13 }}
-                  />
-                  <Typography.Text strong style={{ fontSize: token.fontSizeSM, color: token.colorError }}>
-                    {t.home.updateFailed}
-                  </Typography.Text>
-                  {errBody}
-                </div>
-
-                <Flex
-                  align="center"
-                  justify="space-between"
-                  gap={8}
-                  style={{
-                    marginTop: 6,
-                    paddingTop: 6,
-                    borderTop: `1px solid ${token.colorErrorBorder}`,
-                  }}
-                >
-                  {isLongErr ? (
-                    <Typography.Link
-                      onClick={() =>
-                        setExpandedErrIds((prev) => ({ ...prev, [job.id]: !prev[job.id] }))
-                      }
-                      style={{ fontSize: 12, color: token.colorTextSecondary }}
+                <Flex align="center" justify="space-between" gap={8}>
+                  <Flex align="center" gap={6} style={{ minWidth: 0, flex: 1 }}>
+                    <CloseCircleFilled
+                      style={{ color: token.colorError, fontSize: 13, flexShrink: 0 }}
+                    />
+                    <Typography.Text
+                      strong
+                      ellipsis={{ tooltip: errInfo.title }}
+                      style={{ fontSize: token.fontSizeSM, color: token.colorError }}
                     >
-                      {isExpanded ? t.home.collapseError : t.home.expandError}
-                    </Typography.Link>
-                  ) : (
-                    <span />
-                  )}
+                      {errInfo.title}
+                    </Typography.Text>
+                  </Flex>
 
-                  <Space size={8} align="center">
+                  <Space
+                    size={6}
+                    align="center"
+                    separator={<Typography.Text type="secondary">·</Typography.Text>}
+                    style={{ flexShrink: 0 }}
+                  >
+                    {errInfo.action === 'mirror' && job.hostId && (
+                      <Typography.Link
+                        onClick={() => setActiveMirrorHostId(job.hostId)}
+                        style={{ fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap' }}
+                      >
+                        {t.home.errLinkMirror}
+                      </Typography.Link>
+                    )}
+                    {errInfo.action === 'cred' && onOpenRegCred && (
+                      <Typography.Link
+                        onClick={() =>
+                          onOpenRegCred(extractImageRegistryDomain(job.targetImageRef))
+                        }
+                        style={{ fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap' }}
+                      >
+                        {t.home.errLinkCred}
+                      </Typography.Link>
+                    )}
                     <Typography.Link
                       onClick={() => setActiveLogJobId(job.id)}
-                      style={{ fontSize: token.fontSizeSM, whiteSpace: 'nowrap' }}
+                      style={{ fontSize: 12, whiteSpace: 'nowrap' }}
                     >
-                      {t.home.viewLogs}
+                      {t.home.errLinkLog}
                     </Typography.Link>
-                    <Button
-                      size="small"
-                      type="primary"
-                      loading={retryingJobId === job.id}
-                      onClick={() => handleRetryFailedJob(job.id)}
-                    >
-                      {t.queue.retryBtn}
-                    </Button>
                   </Space>
                 </Flex>
+
+                {errInfo.detail && (
+                  <div style={{ paddingLeft: 19, marginTop: 3 }}>
+                    <div
+                      style={{
+                        fontSize: 12,
+                        lineHeight: 1.5,
+                        color: token.colorTextSecondary,
+                        wordBreak: 'break-word',
+                        ...(isExpanded
+                          ? {}
+                          : {
+                              display: '-webkit-box',
+                              WebkitLineClamp: 2,
+                              WebkitBoxOrient: 'vertical',
+                              overflow: 'hidden',
+                            }),
+                      }}
+                    >
+                      {errInfo.detail}
+                    </div>
+                    {isLongErr && (
+                      <Typography.Link
+                        onClick={() =>
+                          setExpandedErrIds((prev) => ({ ...prev, [job.id]: !prev[job.id] }))
+                        }
+                        style={{ fontSize: 12, color: token.colorTextSecondary }}
+                      >
+                        {isExpanded ? t.home.collapseError : t.home.expandError}
+                      </Typography.Link>
+                    )}
+                  </div>
+                )}
               </div>
             )
           })}
@@ -1061,6 +1128,16 @@ export default function AppCard({
             {/* 底栏右侧：按分组渲染操作按钮 */}
             {isNoUpdate ? (
               <Space size={8} style={{ flexShrink: 0 }}>
+                {failedJobsForApp[0] && (
+                  <Button
+                    size="small"
+                    type="primary"
+                    loading={retryingJobId === failedJobsForApp[0].id}
+                    onClick={() => handleRetryFailedJob(failedJobsForApp[0].id)}
+                  >
+                    {t.queue.retryBtn}
+                  </Button>
+                )}
                 {isIgnored && (
                   <Button
                     size="small"
@@ -1163,10 +1240,18 @@ export default function AppCard({
                       <Space.Compact size="small">
                         <Button
                           type="primary"
+                          loading={
+                            Boolean(failedJobsForApp[0]) &&
+                            retryingJobId === failedJobsForApp[0].id
+                          }
                           disabled={lifecycleSubmitting}
-                          onClick={handleUpdateClick}
+                          onClick={
+                            failedJobsForApp[0]
+                              ? () => handleRetryFailedJob(failedJobsForApp[0].id)
+                              : handleUpdateClick
+                          }
                         >
-                          {t.home.updateBtn}
+                          {failedJobsForApp[0] ? t.queue.retryBtn : t.home.updateBtn}
                         </Button>
                         <Dropdown
                           trigger={['click']}

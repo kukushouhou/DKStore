@@ -53,6 +53,7 @@ import {
   type HostTestResult,
 } from '../api/client'
 import { useI18n } from '../i18n'
+import { useUIStore } from '../store/ui'
 
 type PlatformId = 'synology' | 'fnos' | 'openwrt' | 'linux' | 'local'
 
@@ -100,6 +101,7 @@ export default function HostsPage() {
   const { locale, t } = useI18n()
   const { token } = theme.useToken()
   const qc = useQueryClient()
+  const setActiveMirrorHostId = useUIStore((s) => s.setActiveMirrorHostId)
   const [searchParams, setSearchParams] = useSearchParams()
   const authQuery = useQuery({ queryKey: ['authStatus'], queryFn: api.authStatus })
   const hostsQuery = useQuery({ queryKey: ['hosts', locale], queryFn: api.listHosts })
@@ -899,6 +901,13 @@ export default function HostsPage() {
                         </Typography.Text>
                       </Flex>
 
+                      <div
+                        style={{
+                          borderTop: `1px solid ${token.colorBorderSecondary}`,
+                          marginBlock: 2,
+                        }}
+                      />
+
                       <Flex justify="space-between" align="center" gap={12}>
                         <Typography.Text
                           type="secondary"
@@ -947,6 +956,23 @@ export default function HostsPage() {
                             {dockerVer}
                           </Typography.Text>
                         )}
+                      </Flex>
+
+                      <Flex justify="space-between" align="center" gap={12}>
+                        <Typography.Text
+                          type="secondary"
+                          style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}
+                        >
+                          {t.hosts.cardDockerMirrors}
+                        </Typography.Text>
+                        <Typography.Link
+                          onClick={() => setActiveMirrorHostId(h.id)}
+                          style={{ fontSize: token.fontSizeSM, fontWeight: 500 }}
+                        >
+                          {(h.mirrorCount ?? 0) > 0
+                            ? t.hosts.mirrorConfiguredCount.replace('{n}', String(h.mirrorCount))
+                            : t.hosts.mirrorUnconfigured}
+                        </Typography.Link>
                       </Flex>
                     </div>
 

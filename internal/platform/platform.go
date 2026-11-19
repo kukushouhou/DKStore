@@ -248,6 +248,7 @@ type StandaloneUpdateRequest struct {
 	TargetImageRef  string
 	RegistryAuthB64 string
 	LayerSizes      map[string]int64
+	MirrorPairs     []MirrorPair
 	StartAfter      *bool
 	Env             []EnvVar
 	Ports           []PortBinding
@@ -306,6 +307,7 @@ type ComposeUpdateOptions struct {
 	DeleteRemovedImages   bool
 	DeleteRemovedFileIDs  []string
 	LayerSizes            map[string]int64
+	MirrorPairs           []MirrorPair
 	StartAfter            *bool
 	TargetComposePath     string
 }
@@ -425,7 +427,30 @@ type UpdateRequest struct {
 	TargetImageRef  string           // 目标镜像引用（如 nginx:1.27.4 或 ghcr.io/xxx:v1.2.0）
 	RegistryAuthB64 string           // 可选的 Docker X-Registry-Auth 头
 	LayerSizes      map[string]int64 // 预读自镜像 Manifest 的各层真实压缩体积（key 为层摘要 hex 或前 12 位 ID）
+	MirrorPairs     []MirrorPair     // 当前设备配置的镜像源配对（用于非底层原生覆盖的仓库代拉与诊断）
 	StartAfter      *bool            // 可选：更新完成后是否启动容器（nil 表示保持原运行状态）
+}
+
+// MirrorPair 表示「源仓库 -> 加速镜像网址列表」的一组配对配置。
+type MirrorPair struct {
+	Source string   `json:"source"`
+	URLs   []string `json:"urls"`
+}
+
+// MirrorTestItem 表示单个加速镜像网址在目标设备上的连通测速结果。
+type MirrorTestItem struct {
+	URL       string `json:"url"`
+	OK        bool   `json:"ok"`
+	LatencyMs int64  `json:"latencyMs,omitempty"`
+	Error     string `json:"error,omitempty"`
+}
+
+// MirrorAdapter 扩展 Adapter，提供设备底层镜像加速源读取、写入与从目标设备发起的连通测速能力。
+type MirrorAdapter interface {
+	Adapter
+	GetDockerHubMirrors(ctx context.Context) ([]string, error)
+	ApplyMirrorPairs(ctx context.Context, pairs []MirrorPair) (restartsAllContainers bool, err error)
+	TestMirrorURLs(ctx context.Context, urls []string) ([]MirrorTestItem, error)
 }
 
 // UpdateResult 是单服务更新完成后的核验结果。

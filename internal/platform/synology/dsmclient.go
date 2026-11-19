@@ -336,7 +336,7 @@ func (c *dsmClient) doCall(ctx context.Context, sid, apiName, version, method st
 		vals.Set(k, v)
 	}
 	timeout := dsmDefaultTimeout
-	if method == "build" || method == "build_stream" {
+	if method == "build" || method == "build_stream" || (apiName == "SYNO.Docker.Registry" && method == "set") {
 		timeout = dsmLongCallTimeout
 	}
 	body, err := c.post(ctx, vals, timeout)

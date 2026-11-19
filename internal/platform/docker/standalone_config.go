@@ -205,7 +205,7 @@ func (a *Adapter) UpdateStandaloneConfig(
 		Percent:    0,
 		LogChunk:   fmt.Sprintf("Pulling image %s ...\r\n", req.TargetImageRef),
 	})
-	newImageID, newRepoDigest, err := a.pullImageStreamWithSizes(ctx, execTr, req.TargetImageRef, req.RegistryAuthB64, req.LayerSizes, emit)
+	newImageID, newRepoDigest, err := a.pullImageWithMirrorPairs(ctx, execTr, req.TargetImageRef, req.RegistryAuthB64, req.LayerSizes, req.MirrorPairs, emit)
 	if err != nil {
 		return nil, &platform.UpdateError{Code: "pull_failed", Message: i18n.DetailOf(err)}
 	}

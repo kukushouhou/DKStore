@@ -133,7 +133,7 @@ func (a *Adapter) UpdateService(
 		LogChunk:   fmt.Sprintf("Pulling image %s ...\r\n", req.TargetImageRef),
 	})
 	addLog("pulling image: %s", req.TargetImageRef)
-	newImageID, newRepoDigest, err := a.pullImageStreamWithSizes(ctx, execTr, req.TargetImageRef, req.RegistryAuthB64, req.LayerSizes, emit)
+	newImageID, newRepoDigest, err := a.pullImageWithMirrorPairs(ctx, execTr, req.TargetImageRef, req.RegistryAuthB64, req.LayerSizes, req.MirrorPairs, emit)
 	if err != nil {
 		return nil, &platform.UpdateError{Code: "pull_failed", Message: i18n.DetailOf(err)}
 	}
@@ -366,11 +366,15 @@ func (a *Adapter) pullImageStreamWithSizes(
 			return "", "", err
 		}
 		delay := pullRetryBaseDelay * time.Duration(attempt)
+		retryLog := fmt.Sprintf("\r\n\x1b[33m↻ 网络连接中断，正在自动接着下载剩余镜像层（第 %d/%d 次）...\x1b[0m\r\n", attempt+1, maxPullStreamAttempts)
+		if len(layers) == 0 {
+			retryLog = fmt.Sprintf("\r\n\x1b[33m↻ 连接镜像源失败，正在重试（第 %d/%d 次）...\x1b[0m\r\n", attempt+1, maxPullStreamAttempts)
+		}
 		wrappedEmit(platform.PullProgress{
 			Phase:      "pulling",
 			StatusText: fmt.Sprintf("Retrying image download (%d/%d)", attempt+1, maxPullStreamAttempts),
 			Percent:    lastPct,
-			LogChunk:   fmt.Sprintf("\r\n\x1b[33m↻ 网络连接中断，正在自动接着下载剩余镜像层（第 %d/%d 次）...\x1b[0m\r\n", attempt+1, maxPullStreamAttempts),
+			LogChunk:   retryLog,
 		})
 		timer := time.NewTimer(delay)
 		select {
@@ -1355,19 +1359,60 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 	})
 
 	var runErr error
+	pullViaCompose := true
+	if len(opts.MirrorPairs) > 0 {
+		if svcImgs, vErr := ValidateComposeYAML(newYAML); vErr == nil && len(svcImgs) > 0 {
+			hasCustomMatch := false
+			allConcrete := true
+			for _, ref := range svcImgs {
+				if strings.Contains(ref, "$") {
+					allConcrete = false
+					break
+				}
+				regHost, _, _ := splitImageRegistryAndRepoPath(ref)
+				if regHost != "" && regHost != "docker.io" {
+					for _, mp := range opts.MirrorPairs {
+						if NormalizeRegistrySource(mp.Source) == regHost && len(mp.URLs) > 0 {
+							hasCustomMatch = true
+							break
+						}
+					}
+				}
+			}
+			if hasCustomMatch && allConcrete {
+				prePullOK := true
+				seenRef := make(map[string]bool)
+				for _, ref := range svcImgs {
+					if seenRef[ref] {
+						continue
+					}
+					seenRef[ref] = true
+					if _, _, pErr := a.pullImageWithMirrorPairs(ctx, execTr, ref, "", opts.LayerSizes, opts.MirrorPairs, emit); pErr != nil {
+						prePullOK = false
+						runErr = fmt.Errorf("compose pull: %w", pErr)
+						break
+					}
+				}
+				if prePullOK {
+					pullViaCompose = false
+				}
+			}
+		}
+	}
+
 	handledNoStart := false
-	if preserveStopped {
+	if runErr == nil && preserveStopped {
 		if lcTr, ok := execTr.(transport.ComposeLifecycleTransport); ok {
 			handledNoStart = true
-			_, runErr = lcTr.ExecComposeProjectNoStart(ctx, effectiveWorkDir, cfgFiles, envFiles, projName, true, removeOrphans, beforeRunningSvcs, func(chunk string) {
+			_, runErr = lcTr.ExecComposeProjectNoStart(ctx, effectiveWorkDir, cfgFiles, envFiles, projName, pullViaCompose, removeOrphans, beforeRunningSvcs, func(chunk string) {
 				emit(parser.Feed(chunk))
 			})
 			parser.Flush()
 		}
 	}
-	if !handledNoStart {
+	if runErr == nil && !handledNoStart {
 		if optsTr, ok := execTr.(transport.ComposeProjectOptionsTransport); ok {
-			_, runErr = optsTr.ExecComposeProjectWithOptions(ctx, effectiveWorkDir, cfgFiles, envFiles, projName, true, removeOrphans, func(chunk string) {
+			_, runErr = optsTr.ExecComposeProjectWithOptions(ctx, effectiveWorkDir, cfgFiles, envFiles, projName, pullViaCompose, removeOrphans, func(chunk string) {
 				emit(parser.Feed(chunk))
 			})
 			parser.Flush()
@@ -1378,7 +1423,7 @@ func (a *Adapter) UpdateProjectComposeWithOptions(
 			parser.Flush()
 		} else {
 			var out string
-			out, runErr = execTr.ExecComposeProject(ctx, effectiveWorkDir, cfgFiles, envFiles, projName, true)
+			out, runErr = execTr.ExecComposeProject(ctx, effectiveWorkDir, cfgFiles, envFiles, projName, pullViaCompose)
 			if out != "" {
 				emit(parser.Feed(out + "\r\n"))
 				parser.Flush()

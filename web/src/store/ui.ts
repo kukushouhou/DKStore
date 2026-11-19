@@ -79,6 +79,9 @@ function isSameJobVisualState(prev: UpdateJobItem, next: UpdateJobItem): boolean
     prev.retryable !== next.retryable ||
     prev.errorCode !== next.errorCode ||
     prev.errorMsg !== next.errorMsg ||
+    prev.errorTitle !== next.errorTitle ||
+    prev.errorDetail !== next.errorDetail ||
+    prev.errorAction !== next.errorAction ||
     prev.finishedAt !== next.finishedAt ||
     prev.targetVersion !== next.targetVersion ||
     prev.targetImageRef !== next.targetImageRef
@@ -112,6 +115,7 @@ interface UIState {
   updateQueueJobs: Record<string, UpdateJobItem>
   queueCollapsed: boolean
   activeLogJobId: string | null
+  activeMirrorHostId: string | null
   setThemeMode: (m: ThemeMode) => void
   setLocale: (l: Locale) => void
   setProgressStyle: (style: ProgressStyle) => void
@@ -119,6 +123,7 @@ interface UIState {
   setQueueCollapsed: (collapsed: boolean) => void
   toggleQueueCollapsed: () => void
   setActiveLogJobId: (jobId: string | null) => void
+  setActiveMirrorHostId: (hostId: string | null) => void
   dismissQueueJob: (jobId: string) => void
   clearFinishedQueueJobs: () => void
   clearJobsByScope: (scope: 'failed' | 'all') => void
@@ -135,6 +140,7 @@ export const useUIStore = create<UIState>((set) => ({
   updateQueueJobs: {},
   queueCollapsed: false,
   activeLogJobId: null,
+  activeMirrorHostId: null,
   setThemeMode: (m) => {
     localStorage.setItem('dkstore.theme', m)
     set({ themeMode: m })
@@ -151,6 +157,7 @@ export const useUIStore = create<UIState>((set) => ({
   setQueueCollapsed: (collapsed) => set({ queueCollapsed: collapsed }),
   toggleQueueCollapsed: () => set((s) => ({ queueCollapsed: !s.queueCollapsed })),
   setActiveLogJobId: (jobId) => set({ activeLogJobId: jobId }),
+  setActiveMirrorHostId: (hostId) => set({ activeMirrorHostId: hostId }),
   dismissQueueJob: (jobId) =>
     set((s) => {
       if (!s.updateQueueJobs[jobId]) return s
