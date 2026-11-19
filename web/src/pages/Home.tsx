@@ -17,6 +17,7 @@ import {
   Space,
   Spin,
   Tag,
+  Tooltip,
   Typography,
   message,
   theme,
@@ -183,6 +184,7 @@ export default function HomePage() {
   }
 
   const handleCheck = async () => {
+    if (isRunning) return
     try {
       const p = await api.triggerCheck(hostFilter || undefined, true)
       setLiveProgress(p)
@@ -258,6 +260,46 @@ export default function HomePage() {
     }
     return timePart
   }
+
+  const checkFillPercent = useMemo((): number => {
+    if (!isRunning) return 0
+    if (progress?.phase === 'discovering') return 6
+    const tot = progress?.total ?? 0
+    if (tot > 0) {
+      const pct = ((progress?.completed ?? 0) / tot) * 100
+      return Math.min(100, Math.max(6, Number(pct.toFixed(1))))
+    }
+    return 6
+  }, [isRunning, progress?.completed, progress?.phase, progress?.total])
+
+  const checkTooltipTitle = useMemo(() => {
+    if (!isRunning) return undefined
+    let text = `${t.home.checkingProgress}…`
+    if (progress?.phase === 'discovering') {
+      text = progress.hostName
+        ? `${t.home.discoveringHost}${progress.hostName}`
+        : t.home.discoveringGeneric
+    } else if ((progress?.total ?? 0) > 0) {
+      const done = progress?.completed ?? 0
+      const tot = progress!.total
+      const pct = Math.min(100, Math.round((done / tot) * 100))
+      text = t.home.checkingTooltipCount
+        .replace('{completed}', String(done))
+        .replace('{total}', String(tot))
+        .replace('{percent}', String(pct))
+    }
+    return <span style={{ fontVariantNumeric: 'tabular-nums' }}>{text}</span>
+  }, [
+    isRunning,
+    progress?.completed,
+    progress?.hostName,
+    progress?.phase,
+    progress?.total,
+    t.home.checkingProgress,
+    t.home.checkingTooltipCount,
+    t.home.discoveringGeneric,
+    t.home.discoveringHost,
+  ])
 
   const hosts = overview.data?.hosts ?? []
   const rawFailed = overview.data?.failed
@@ -489,14 +531,54 @@ export default function HomePage() {
           </Typography.Text>
         </div>
 
-        <Button
-          type="primary"
-          icon={<SyncOutlined spin={isRunning} />}
-          disabled={isRunning}
-          onClick={handleCheck}
-        >
-          {isRunning ? t.home.checking : t.home.checkNow}
-        </Button>
+        {isRunning ? (
+          <Tooltip title={checkTooltipTitle} placement="topRight">
+            <button
+              type="button"
+              aria-busy="true"
+              style={{
+                position: 'relative',
+                overflow: 'hidden',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 8,
+                height: token.controlHeight,
+                paddingInline: 15,
+                borderRadius: token.borderRadius,
+                fontSize: token.fontSize,
+                fontFamily: 'inherit',
+                fontWeight: 500,
+                lineHeight: 1,
+                border: `1px solid ${token.colorPrimaryBorderHover}`,
+                background: 'rgba(22, 119, 255, 0.08)',
+                color: token.colorPrimary,
+                cursor: 'default',
+                userSelect: 'none',
+                transition: 'border-color 0.2s ease, background 0.2s ease',
+              }}
+            >
+              <span
+                aria-hidden="true"
+                style={{
+                  position: 'absolute',
+                  insetBlock: 0,
+                  left: 0,
+                  width: `${checkFillPercent}%`,
+                  background: 'rgba(22, 119, 255, 0.22)',
+                  transition: 'width 0.22s ease',
+                  pointerEvents: 'none',
+                }}
+              />
+              <SyncOutlined spin style={{ position: 'relative', zIndex: 1 }} />
+              <span style={{ position: 'relative', zIndex: 1 }}>{t.home.checking}</span>
+            </button>
+          </Tooltip>
+        ) : (
+          <Button type="primary" icon={<SyncOutlined />} onClick={handleCheck}>
+            {t.home.checkNow}
+          </Button>
+        )}
       </Flex>
 
       {/* 中小屏（< 1980px）全宽内嵌更新任务队列：紧接标题栏下方，0 横向挤压、0 遮挡卡片 */}
