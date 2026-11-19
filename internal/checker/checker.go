@@ -62,7 +62,12 @@ type pendingRun struct {
 }
 
 // finalizeTimeout 是检查收尾写库使用的独立超时（审计 M6）。
-const finalizeTimeout = 5 * time.Second
+const (
+	finalizeTimeout               = 5 * time.Second
+	maxGlobalCheckConcurrency     = 10
+	maxPerRegistryConcurrency     = 4
+	maxHostDiscoveryConcurrency   = 4
+)
 
 // New 创建检查服务，并把上次进程异常退出时残留的 running 检查记录标记为 failed（审计 M6）。
 func New(
@@ -216,11 +221,35 @@ type svcRow struct {
 	LabelsJSON    string
 }
 
+type checkTask struct {
+	origIdx   int
+	regDomain string
+	svc       svcRow
+}
+
+type svcCheckResult struct {
+	out   classify.Output
+	isNew bool
+	done  bool
+}
+
+func serviceRegistryDomain(svc svcRow) string {
+	if svc.AppSource == "vendor_managed" || strings.HasPrefix(svc.ImageRef, "sha256:") {
+		return "_local_"
+	}
+	ref, err := version.ParseImageRef(svc.ImageRef)
+	if err != nil || strings.TrimSpace(ref.Registry) == "" {
+		return "_local_"
+	}
+	return strings.ToLower(strings.TrimSpace(ref.Registry))
+}
+
 func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, bypassCache bool) {
 	started := time.Now().Unix()
 	var (
 		runID     int64
 		total     int
+		stateMu   sync.Mutex
 		doneKeys  []string
 		completed bool
 	)
@@ -247,11 +276,14 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 				_, _ = s.st.DB.ExecContext(fCtx, `UPDATE check_run SET finished_at=?, status='failed' WHERE id=?`, time.Now().Unix(), runID)
 				cancel()
 			}
+			stateMu.Lock()
+			dk := append([]string(nil), doneKeys...)
+			stateMu.Unlock()
 			s.broadcast(Progress{
 				Running:              false,
 				RunID:                runID,
 				Phase:                "done",
-				CompletedServiceKeys: doneKeys,
+				CompletedServiceKeys: dk,
 				Completed:            total,
 				Total:                total,
 				StartedAt:            started,
@@ -261,10 +293,15 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 	}()
 
 	hosts, _ := s.hosts.List(ctx)
+	var targetHosts []host.Host
 	for _, h := range hosts {
 		if hostIDFilter != "" && h.ID != hostIDFilter {
 			continue
 		}
+		targetHosts = append(targetHosts, h)
+	}
+	if len(targetHosts) == 1 {
+		h := targetHosts[0]
 		s.broadcast(Progress{
 			Running:   true,
 			RunID:     runID,
@@ -272,11 +309,42 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 			HostName:  h.Name,
 			StartedAt: started,
 		})
-		if _, _, err := s.inv.SyncHost(ctx, h.ID); err != nil {
-			if s.log != nil {
-				s.log.Warn("同步主机应用失败", "host", h.Name, "err", err)
-			}
+		if _, _, err := s.inv.SyncHost(ctx, h.ID); err != nil && s.log != nil {
+			s.log.Warn("同步主机应用失败", "host", h.Name, "err", err)
 		}
+	} else if len(targetHosts) > 1 {
+		s.broadcast(Progress{
+			Running:   true,
+			RunID:     runID,
+			Phase:     "discovering",
+			HostName:  targetHosts[0].Name,
+			StartedAt: started,
+		})
+		hostSem := make(chan struct{}, maxHostDiscoveryConcurrency)
+		var hostWG sync.WaitGroup
+		for _, h := range targetHosts {
+			if ctx.Err() != nil {
+				break
+			}
+			acquired := false
+			select {
+			case hostSem <- struct{}{}:
+				acquired = true
+			case <-ctx.Done():
+			}
+			if !acquired {
+				break
+			}
+			hostWG.Add(1)
+			go func(th host.Host) {
+				defer hostWG.Done()
+				defer func() { <-hostSem }()
+				if _, _, err := s.inv.SyncHost(ctx, th.ID); err != nil && s.log != nil {
+					s.log.Warn("同步主机应用失败", "host", th.Name, "err", err)
+				}
+			}(h)
+		}
+		hostWG.Wait()
 	}
 
 	// 读取待检查的活跃服务
@@ -324,31 +392,150 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 	})
 
 	ignoreRules, _ := s.ign.ListAll(ctx)
+	runCtx := registry.WithCheckSession(ctx)
+	results := make([]svcCheckResult, total)
+
+	if total > 0 {
+		var domainOrder []string
+		buckets := make(map[string][]checkTask)
+		for i, svc := range services {
+			dom := serviceRegistryDomain(svc)
+			if _, exists := buckets[dom]; !exists {
+				domainOrder = append(domainOrder, dom)
+			}
+			buckets[dom] = append(buckets[dom], checkTask{
+				origIdx:   i,
+				regDomain: dom,
+				svc:       svc,
+			})
+		}
+
+		taskChans := make(map[string]chan checkTask, len(domainOrder))
+		workerLimits := make(map[string]int, len(domainOrder))
+		maxWorkersInAnyDomain := 0
+		for _, dom := range domainOrder {
+			b := buckets[dom]
+			ch := make(chan checkTask, len(b))
+			for _, t := range b {
+				ch <- t
+			}
+			close(ch)
+			taskChans[dom] = ch
+
+			w := len(b)
+			if dom != "_local_" && w > maxPerRegistryConcurrency {
+				w = maxPerRegistryConcurrency
+			}
+			if dom == "_local_" && w > 2 {
+				w = 2
+			}
+			workerLimits[dom] = w
+			if w > maxWorkersInAnyDomain {
+				maxWorkersInAnyDomain = w
+			}
+		}
+
+		globalSem := make(chan struct{}, maxGlobalCheckConcurrency)
+		completedCount := 0
+
+		checkRemote := func(task checkTask) (out classify.Output, errKind, errMsg string, curTags []string) {
+			if task.regDomain != "_local_" {
+				select {
+				case globalSem <- struct{}{}:
+					defer func() { <-globalSem }()
+				case <-runCtx.Done():
+					return classify.Output{Kind: classify.KindCheckFailed}, string(registry.ErrNetwork), runCtx.Err().Error(), nil
+				}
+			}
+			return s.checkSingleService(runCtx, task.svc, bypassCache)
+		}
+
+		runSingleTask := func(task checkTask) {
+			var (
+				out              classify.Output
+				errKind, errMsg  string
+				curTags          []string
+				isNew            bool
+			)
+			defer func() {
+				if r := recover(); r != nil {
+					if s.log != nil {
+						s.log.Error("单服务检查发生 panic", "service", task.svc.Key, "recover", r)
+					}
+					out = classify.Output{Kind: classify.KindCheckFailed}
+				}
+				results[task.origIdx] = svcCheckResult{
+					out:   out,
+					isNew: isNew,
+					done:  true,
+				}
+				stateMu.Lock()
+				doneKeys = append(doneKeys, task.svc.Key)
+				completedCount++
+				snapDone := append([]string(nil), doneKeys...)
+				snapCount := completedCount
+				stateMu.Unlock()
+
+				s.broadcast(Progress{
+					Running:              true,
+					RunID:                runID,
+					Phase:                "checking",
+					HostName:             task.svc.HostName,
+					CurrentServiceKey:    task.svc.Key,
+					CurrentAppName:       task.svc.AppName,
+					CompletedServiceKeys: snapDone,
+					Completed:            snapCount,
+					Total:                total,
+					StartedAt:            started,
+				})
+			}()
+
+			out, errKind, errMsg, curTags = checkRemote(task)
+			if ctx.Err() != nil {
+				return
+			}
+			isNew = s.saveFinding(ctx, runID, task.svc, out, errKind, errMsg, curTags)
+		}
+
+		var wg sync.WaitGroup
+		// 按轮次交错启动不同 Registry 的 worker，使各独立仓库在第一时间同时并行发起请求
+		for w := 0; w < maxWorkersInAnyDomain; w++ {
+			for _, dom := range domainOrder {
+				if w >= workerLimits[dom] {
+					continue
+				}
+				ch := taskChans[dom]
+				wg.Add(1)
+				go func(c <-chan checkTask) {
+					defer wg.Done()
+					for task := range c {
+						if runCtx.Err() != nil {
+							return
+						}
+						runSingleTask(task)
+					}
+				}(ch)
+			}
+		}
+		wg.Wait()
+	}
+
+	if ctx.Err() != nil {
+		return
+	}
+
 	var (
 		newNotifyItems []i18n.NotifyItem
 		normalCount    int
 		cautionCount   int
 		failedCount    int
 	)
-
 	for idx, svc := range services {
-		s.broadcast(Progress{
-			Running:              true,
-			RunID:                runID,
-			Phase:                "checking",
-			HostName:             svc.HostName,
-			CurrentServiceKey:    svc.Key,
-			CurrentAppName:       svc.AppName,
-			CompletedServiceKeys: doneKeys,
-			Completed:            idx,
-			Total:                total,
-			StartedAt:            started,
-		})
-
-		out, errKind, errMsg, curTags := s.checkSingleService(ctx, svc, bypassCache)
-		isNew := s.saveFinding(ctx, runID, svc, out, errKind, errMsg, curTags)
-		doneKeys = append(doneKeys, svc.Key)
-
+		res := results[idx]
+		if !res.done {
+			continue
+		}
+		out := res.out
 		switch out.Kind {
 		case classify.KindDigestUpdate, classify.KindVersionUpdate:
 			if out.Category == classify.CategoryCaution {
@@ -357,7 +544,7 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 				normalCount++
 			}
 			rule := ignoreRules[svc.Key]
-			if isNew && !ignore.Matches(rule, string(out.Kind), out.TargetDigest, out.TargetVersion) {
+			if res.isNew && !ignore.Matches(rule, string(out.Kind), out.TargetDigest, out.TargetVersion) {
 				newNotifyItems = append(newNotifyItems, i18n.NotifyItem{
 					HostName:       svc.HostName,
 					AppName:        svc.AppName,
@@ -372,19 +559,6 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 		case classify.KindCheckFailed:
 			failedCount++
 		}
-
-		s.broadcast(Progress{
-			Running:              true,
-			RunID:                runID,
-			Phase:                "checking",
-			HostName:             svc.HostName,
-			CurrentServiceKey:    svc.Key,
-			CurrentAppName:       svc.AppName,
-			CompletedServiceKeys: doneKeys,
-			Completed:            idx + 1,
-			Total:                total,
-			StartedAt:            started,
-		})
 	}
 
 	if len(newNotifyItems) > 0 {

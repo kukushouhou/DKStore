@@ -170,7 +170,7 @@ export default function HomePage() {
     if (!isRunning) return false
     if (progress?.phase === 'discovering') return true
     if (progress?.phase === 'checking') {
-      if (Array.isArray(progress.completedServiceKeys)) {
+      if (Array.isArray(progress.completedServiceKeys) || !progress.currentServiceKey) {
         const checkSvcs = item.services.length > 0 ? item.services : (item.allServices ?? [])
         if (checkSvcs.length === 0) return false
         return !checkSvcs.every((s) => completedKeySet.has(s.key))

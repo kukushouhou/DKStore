@@ -6,7 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/kukushouhou/DKStore/internal/secret"
 	"github.com/kukushouhou/DKStore/internal/store"
@@ -96,8 +99,8 @@ func TestZeroQuotaHubManifestAndSearchTagsAndOCILookup(t *testing.T) {
 	defer st.Close()
 	box, _ := secret.LoadOrCreate(dir)
 
-	regGetCalls := 0
-	ociHeadCalls := 0
+	var regGetCalls atomic.Int32
+	var ociHeadCalls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/v2/repositories/library/eclipse-mosquitto/tags/2":
@@ -107,7 +110,7 @@ func TestZeroQuotaHubManifestAndSearchTagsAndOCILookup(t *testing.T) {
 				"images": [{"os":"linux","architecture":"amd64","digest":"sha256:hubamd64888"}]
 			}`))
 		case r.URL.Path == "/v2/library/eclipse-mosquitto/manifests/2":
-			regGetCalls++
+			regGetCalls.Add(1)
 			w.WriteHeader(http.StatusInternalServerError)
 		case r.URL.Path == "/v2/repositories/library/eclipse-mosquitto/tags":
 			w.Header().Set("Content-Type", "application/json")
@@ -131,11 +134,11 @@ func TestZeroQuotaHubManifestAndSearchTagsAndOCILookup(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"tags":["latest","20261101-1","20261110-3"]}`))
 		case r.URL.Path == "/v2/org/custom/manifests/20261110-3" && r.Method == http.MethodHead:
-			ociHeadCalls++
+			ociHeadCalls.Add(1)
 			w.Header().Set("Docker-Content-Digest", "sha256:ocidate333")
 			w.WriteHeader(http.StatusOK)
 		case r.URL.Path == "/v2/org/custom/manifests/20261101-1" && r.Method == http.MethodHead:
-			ociHeadCalls++
+			ociHeadCalls.Add(1)
 			w.Header().Set("Docker-Content-Digest", "sha256:ocidate111")
 			w.WriteHeader(http.StatusOK)
 		default:
@@ -160,8 +163,8 @@ func TestZeroQuotaHubManifestAndSearchTagsAndOCILookup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CheckManifestEx: %v", err)
 	}
-	if regGetCalls != 0 || mf.RepoDigest != "sha256:hubindex999" || mf.PlatformDigest != "sha256:hubamd64888" {
-		t.Fatalf("expected 0 registry GET calls and valid digests, got calls=%d mf=%+v", regGetCalls, mf)
+	if regGetCalls.Load() != 0 || mf.RepoDigest != "sha256:hubindex999" || mf.PlatformDigest != "sha256:hubamd64888" {
+		t.Fatalf("expected 0 registry GET calls and valid digests, got calls=%d mf=%+v", regGetCalls.Load(), mf)
 	}
 
 	// 2. SearchTags local vs remote
@@ -181,8 +184,8 @@ func TestZeroQuotaHubManifestAndSearchTagsAndOCILookup(t *testing.T) {
 		t.Fatalf("FetchRecentTags OCI: %v", err)
 	}
 	matchedOCI := cli.LookupTagsByDigest(ctx, refOCI, "sha256:ocidate333", "", "linux/amd64", ociRecent)
-	if len(matchedOCI) != 1 || matchedOCI[0] != "20261110-3" || ociHeadCalls == 0 {
-		t.Fatalf("expected OCI date alias 20261110-3 via HEAD, got matched=%v headCalls=%d", matchedOCI, ociHeadCalls)
+	if len(matchedOCI) != 1 || matchedOCI[0] != "20261110-3" || ociHeadCalls.Load() == 0 {
+		t.Fatalf("expected OCI date alias 20261110-3 via HEAD, got matched=%v headCalls=%d", matchedOCI, ociHeadCalls.Load())
 	}
 }
 
@@ -488,5 +491,97 @@ func TestSearchTagsExPrereleasePrefixSortAndRemoteRefresh(t *testing.T) {
 	r2Fresh, err := cli.SearchTagsEx(ctx, refGHCR, SearchOptions{Query: "3.0", Remote: true})
 	if err != nil || len(r2Fresh.Items) == 0 || r2Fresh.Items[0].Name != "3.0.0-beta.1" || r2Fresh.HighestStableTag != "2.5.12" {
 		t.Fatalf("expected ghcr Remote=true to bypass cache and find 3.0.0-beta.1, got err=%v res=%+v", err, r2Fresh)
+	}
+}
+
+func TestCheckSessionDeduplicatesBypassCacheAndBearerTokenFlight(t *testing.T) {
+	ctx := WithCheckSession(context.Background())
+	dir := t.TempDir()
+	st, err := store.Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	box, _ := secret.LoadOrCreate(dir)
+
+	var (
+		tokenCalls atomic.Int32
+		tagsCalls  atomic.Int32
+		srvURL     string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/token":
+			tokenCalls.Add(1)
+			time.Sleep(25 * time.Millisecond)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"token":"shared-jwt"}`))
+		case r.URL.Path == "/v2/org/svc/tags/list":
+			if r.Header.Get("Authorization") != "Bearer shared-jwt" {
+				w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm="%s/token",service="ghcr.io",scope="repository:org/svc:pull"`, srvURL))
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			tagsCalls.Add(1)
+			time.Sleep(25 * time.Millisecond)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"tags":["latest","1.0.0","1.1.0","1.2.0","1.3.0"]}`))
+		case strings.HasPrefix(r.URL.Path, "/v2/org/svc/manifests/"):
+			if r.Header.Get("Authorization") != "Bearer shared-jwt" {
+				w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm="%s/token",service="ghcr.io",scope="repository:org/svc:pull"`, srvURL))
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			tag := strings.TrimPrefix(r.URL.Path, "/v2/org/svc/manifests/")
+			if tag == "1.3.0" || tag == "latest" {
+				w.Header().Set("Docker-Content-Digest", "sha256:target130")
+			} else {
+				w.Header().Set("Docker-Content-Digest", "sha256:older")
+			}
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			if r.Method == http.MethodGet {
+				_, _ = w.Write([]byte(`{"config":{"digest":"sha256:cfg130"}}`))
+			}
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	srvURL = srv.URL
+
+	cli := New(st, box)
+	cli.BaseURLOverride = map[string]string{"ghcr.io": srv.URL}
+
+	// 6 concurrent callers checking same repo with bypassCache=true in one check session
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			tag := "1.1.0"
+			if idx%2 == 0 {
+				tag = "1.2.0"
+			}
+			ref, _ := version.ParseImageRef("ghcr.io/org/svc:" + tag)
+			if _, mErr := cli.CheckManifestEx(ctx, ref, ManifestCheckOptions{HostPlatform: "linux/amd64", BypassCache: true}); mErr != nil {
+				t.Errorf("CheckManifestEx: %v", mErr)
+			}
+			tags, tErr := cli.FetchRecentTags(ctx, ref, 3, true)
+			if tErr != nil || len(tags) != 5 {
+				t.Errorf("FetchRecentTags: err=%v len=%d", tErr, len(tags))
+			}
+			matched := cli.LookupTagsByDigest(ctx, ref, "sha256:target130", "", "linux/amd64", tags)
+			if len(matched) == 0 || matched[0] != "1.3.0" {
+				t.Errorf("LookupTagsByDigest matched=%v, want [1.3.0]", matched)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if tokenCalls.Load() != 1 {
+		t.Fatalf("expected exactly 1 /token request via flight dedup, got %d", tokenCalls.Load())
+	}
+	if tagsCalls.Load() != 1 {
+		t.Fatalf("expected exactly 1 /tags/list request in check session even with bypassCache=true, got %d", tagsCalls.Load())
 	}
 }

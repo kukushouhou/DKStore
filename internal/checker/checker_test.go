@@ -2,10 +2,13 @@ package checker
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -257,5 +260,138 @@ func TestOverview_ThreeGroupsNoSlashConcatenationAndIgnoreBadges(t *testing.T) {
 	}
 	if len(ov.NoUpdate) != 1 || ov.NoUpdate[0].Group != "no_update" || !ov.NoUpdate[0].Ignored || ov.NoUpdate[0].IgnorePrefix != "131" || ov.NoUpdate[0].SummaryCurrent != "131.0.6778.85" {
 		t.Fatalf("unexpected noUpdate card: %+v", ov.NoUpdate)
+	}
+}
+
+func TestRunCheck_ConcurrentAcrossRegistriesAndPerRegistryLimit(t *testing.T) {
+	var (
+		inFlightDocker atomic.Int32
+		maxDocker      atomic.Int32
+		inFlightTotal  atomic.Int32
+		maxTotal       atomic.Int32
+	)
+	recordEnter := func(isDocker bool) func() {
+		curT := inFlightTotal.Add(1)
+		for {
+			prev := maxTotal.Load()
+			if curT <= prev || maxTotal.CompareAndSwap(prev, curT) {
+				break
+			}
+		}
+		if isDocker {
+			curD := inFlightDocker.Add(1)
+			for {
+				prev := maxDocker.Load()
+				if curD <= prev || maxDocker.CompareAndSwap(prev, curD) {
+					break
+				}
+			}
+		}
+		return func() {
+			if isDocker {
+				inFlightDocker.Add(-1)
+			}
+			inFlightTotal.Add(-1)
+		}
+	}
+
+	dockerSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		done := recordEnter(true)
+		defer done()
+		time.Sleep(45 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/tags/1.0.0") {
+			_, _ = w.Write([]byte(`{"digest":"sha256:newdig","images":[{"os":"linux","architecture":"amd64","digest":"sha256:newdig"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"next":"","results":[{"name":"1.0.0","digest":"sha256:olddig","images":[]},{"name":"1.1.0","digest":"sha256:newdig","images":[]}]}`))
+	}))
+	defer dockerSrv.Close()
+
+	makeOCISrv := func() *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			done := recordEnter(false)
+			defer done()
+			time.Sleep(45 * time.Millisecond)
+			if strings.HasSuffix(r.URL.Path, "/tags/list") {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"tags":["1.0.0","1.2.0"]}`))
+				return
+			}
+			w.Header().Set("Docker-Content-Digest", "sha256:oci100")
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			if r.Method == http.MethodGet {
+				_, _ = w.Write([]byte(`{"config":{"digest":"sha256:cfg100"}}`))
+			}
+		}))
+	}
+	ghcrSrv := makeOCISrv()
+	defer ghcrSrv.Close()
+	lscrSrv := makeOCISrv()
+	defer lscrSrv.Close()
+
+	chk, st := newTestChecker(t, map[string]string{
+		"docker.io":      dockerSrv.URL,
+		"hub.docker.com": dockerSrv.URL,
+		"ghcr.io":        ghcrSrv.URL,
+		"lscr.io":        lscrSrv.URL,
+	})
+	ctx := context.Background()
+	now := time.Now().Unix()
+
+	// transport='ssh' without credentials fails fast in SyncHost without touching seeded services
+	_, _ = st.DB.ExecContext(ctx, `INSERT INTO host(id, name, kind, transport, status, created_at) VALUES ('h1', 'NAS', 'docker', 'ssh', 'online', ?)`, now)
+
+	// 6 docker.io services + 3 ghcr.io services + 3 lscr.io services = 12 services across 3 registries
+	for i := 0; i < 12; i++ {
+		appKey := fmt.Sprintf("h1/container/app-%02d", i)
+		svcKey := appKey + "/main"
+		appName := fmt.Sprintf("app-%02d", i)
+		var img, dig string
+		switch {
+		case i < 6:
+			img = fmt.Sprintf("org/dk-%d:1.0.0", i)
+			dig = "sha256:newdig"
+		case i < 9:
+			img = fmt.Sprintf("ghcr.io/org/gh-%d:1.0.0", i)
+			dig = "sha256:oci100"
+		default:
+			img = fmt.Sprintf("lscr.io/org/ls-%d:1.0.0", i)
+			dig = "sha256:oci100"
+		}
+		_, err := st.DB.ExecContext(ctx, `INSERT INTO app(key, host_id, name, source, updated_at) VALUES (?, 'h1', ?, 'standalone', ?)`, appKey, appName, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = st.DB.ExecContext(ctx, `INSERT INTO service(key, app_key, name, state, image_ref, image_id, repo_digest, platform, updated_at) VALUES (?, ?, ?, 'running', ?, 'sha256:id', ?, 'linux/amd64', ?)`,
+			svcKey, appKey, appName, img, dig, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	start := time.Now()
+	chk.runCheck(ctx, "manual", "h1", true)
+	elapsed := time.Since(start)
+
+	// Serial execution of 12 services * 2 calls * 45ms would take > 1080ms; concurrent across 3 registries finishes much faster.
+	if maxTotal.Load() < 5 {
+		t.Fatalf("expected cross-registry concurrency >= 5, got maxTotal=%d (elapsed=%v)", maxTotal.Load(), elapsed)
+	}
+	if maxDocker.Load() > maxPerRegistryConcurrency {
+		t.Fatalf("expected docker.io concurrency <= %d, got %d", maxPerRegistryConcurrency, maxDocker.Load())
+	}
+
+	p := chk.CurrentProgress()
+	if p.Running || p.Phase != "done" || p.Completed != 12 || p.Total != 12 || len(p.CompletedServiceKeys) != 12 {
+		t.Fatalf("unexpected final progress: %+v", p)
+	}
+
+	ov, err := chk.Overview(ctx, "h1", i18n.ZhCN)
+	if err != nil {
+		t.Fatalf("Overview: %v", err)
+	}
+	if len(ov.Normal) != 12 {
+		t.Fatalf("expected all 12 services to report version updates in Normal group, got %d (failed=%+v)", len(ov.Normal), ov.Failed)
 	}
 }

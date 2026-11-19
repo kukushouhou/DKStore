@@ -88,6 +88,7 @@ type Client struct {
 
 	tokenMu sync.Mutex
 	tokens  map[string]cachedToken
+	flight  flightGroup
 }
 
 type cachedToken struct {
@@ -95,20 +96,158 @@ type cachedToken struct {
 	expiresAt time.Time
 }
 
+type flightCall struct {
+	wg  sync.WaitGroup
+	val any
+	err error
+}
+
+type flightGroup struct {
+	mu    sync.Mutex
+	calls map[string]*flightCall
+}
+
+func (g *flightGroup) do(key string, fn func() (any, error)) (any, error) {
+	g.mu.Lock()
+	if g.calls == nil {
+		g.calls = make(map[string]*flightCall)
+	}
+	if c, ok := g.calls[key]; ok {
+		g.mu.Unlock()
+		c.wg.Wait()
+		return c.val, c.err
+	}
+	c := &flightCall{}
+	c.wg.Add(1)
+	g.calls[key] = c
+	g.mu.Unlock()
+
+	defer func() {
+		g.mu.Lock()
+		delete(g.calls, key)
+		g.mu.Unlock()
+		c.wg.Done()
+	}()
+	c.val, c.err = fn()
+	return c.val, c.err
+}
+
+type checkSessionKey struct{}
+
+type checkSession struct {
+	mu        sync.RWMutex
+	manifests map[string]*ManifestResult
+	tags      map[string][]TagDigestEntry
+}
+
+// WithCheckSession 为单轮批量检查绑定内存级去重会话：
+// 即使 bypassCache=true 绕过历史 SQLite 缓存，同一轮检查内相同的镜像 Manifest 或仓库标签列表也只向远端请求一次。
+func WithCheckSession(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if _, ok := ctx.Value(checkSessionKey{}).(*checkSession); ok {
+		return ctx
+	}
+	return context.WithValue(ctx, checkSessionKey{}, &checkSession{
+		manifests: make(map[string]*ManifestResult),
+		tags:      make(map[string][]TagDigestEntry),
+	})
+}
+
+func getCheckSession(ctx context.Context) *checkSession {
+	if ctx == nil {
+		return nil
+	}
+	s, _ := ctx.Value(checkSessionKey{}).(*checkSession)
+	return s
+}
+
+func cloneManifestResult(src *ManifestResult) *ManifestResult {
+	if src == nil {
+		return nil
+	}
+	cp := *src
+	if len(src.Annotations) > 0 {
+		cp.Annotations = make(map[string]string, len(src.Annotations))
+		for k, v := range src.Annotations {
+			cp.Annotations[k] = v
+		}
+	}
+	return &cp
+}
+
+func cloneTagEntries(src []TagDigestEntry) []TagDigestEntry {
+	if src == nil {
+		return nil
+	}
+	cp := make([]TagDigestEntry, len(src))
+	copy(cp, src)
+	return cp
+}
+
+func (s *checkSession) getManifest(key string) (*ManifestResult, bool) {
+	s.mu.RLock()
+	v, ok := s.manifests[key]
+	s.mu.RUnlock()
+	if !ok || v == nil {
+		return nil, false
+	}
+	return cloneManifestResult(v), true
+}
+
+func (s *checkSession) putManifest(key string, v *ManifestResult) {
+	if v == nil {
+		return
+	}
+	cp := cloneManifestResult(v)
+	s.mu.Lock()
+	s.manifests[key] = cp
+	s.mu.Unlock()
+}
+
+func (s *checkSession) getTags(key string) ([]TagDigestEntry, bool) {
+	s.mu.RLock()
+	v, ok := s.tags[key]
+	s.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	return cloneTagEntries(v), true
+}
+
+func (s *checkSession) putTags(key string, v []TagDigestEntry) {
+	cp := cloneTagEntries(v)
+	s.mu.Lock()
+	s.tags[key] = cp
+	s.mu.Unlock()
+}
+
 const (
 	acceptManifestHeaders = "application/vnd.oci.image.index.v1+json, " +
 		"application/vnd.docker.distribution.manifest.list.v2+json, " +
 		"application/vnd.oci.image.manifest.v1+json, " +
 		"application/vnd.docker.distribution.manifest.v2+json"
+
+	ociLookupHeadConcurrency = 4
 )
 
 // New 创建 Registry 客户端。
 func New(st *store.Store, box *secret.Box) *Client {
+	var rt http.RoundTripper = http.DefaultTransport
+	if baseTr, ok := http.DefaultTransport.(*http.Transport); ok {
+		tr := baseTr.Clone()
+		tr.MaxIdleConns = 100
+		tr.MaxIdleConnsPerHost = 16
+		tr.IdleConnTimeout = 90 * time.Second
+		rt = tr
+	}
 	return &Client{
 		st:  st,
 		box: box,
 		httpClient: &http.Client{
-			Timeout: 20 * time.Second,
+			Timeout:   20 * time.Second,
+			Transport: rt,
 		},
 		tokens: make(map[string]cachedToken),
 	}
@@ -133,16 +272,48 @@ func (c *Client) CheckManifestEx(ctx context.Context, ref version.ParsedRef, opt
 	}
 	repoKey := ref.Registry + "/" + ref.Repository
 	cacheKey := fmt.Sprintf("manifest:%s/%s:%s@%s", ref.Registry, ref.Repository, tag, opts.HostPlatform)
+	localDig := NormalizeDigest(opts.LocalRepoDigest)
+	sessKey := fmt.Sprintf("%s/%s:%s@%s|dig=%s|cfg=%t", ref.Registry, ref.Repository, tag, opts.HostPlatform, localDig, opts.NeedConfig)
+	sess := getCheckSession(ctx)
+	if sess != nil {
+		if cached, ok := sess.getManifest(sessKey); ok && cached.RepoDigest != "" && (!opts.NeedConfig || cached.ConfigDigest != "") {
+			return cached, nil
+		}
+	}
 	if !opts.BypassCache {
 		if b, ok := c.getCache(ctx, cacheKey); ok {
 			var res ManifestResult
 			if json.Unmarshal(b, &res) == nil && res.RepoDigest != "" && (!opts.NeedConfig || res.ConfigDigest != "") {
+				if sess != nil {
+					sess.putManifest(sessKey, &res)
+				}
 				return &res, nil
 			}
 		}
 	}
 
-	localDig := NormalizeDigest(opts.LocalRepoDigest)
+	val, err := c.flight.do("mf:"+sessKey, func() (any, error) {
+		return c.fetchManifestRemote(ctx, ref, tag, repoKey, cacheKey, localDig, opts)
+	})
+	if err != nil {
+		return nil, err
+	}
+	res, _ := val.(*ManifestResult)
+	if res == nil {
+		return nil, nil
+	}
+	if sess != nil && res.RepoDigest != "" {
+		sess.putManifest(sessKey, res)
+	}
+	return cloneManifestResult(res), nil
+}
+
+func (c *Client) fetchManifestRemote(
+	ctx context.Context,
+	ref version.ParsedRef,
+	tag, repoKey, cacheKey, localDig string,
+	opts ManifestCheckOptions,
+) (*ManifestResult, error) {
 	var hubFallback *ManifestResult
 
 	// 1. Docker Hub 镜像优先走网页端 Tags 接口（0 拉取配额）
@@ -480,31 +651,51 @@ func (c *Client) FetchRecentTags(ctx context.Context, ref version.ParsedRef, max
 		maxPages = 5
 	}
 	cacheKey := fmt.Sprintf("tags:%s/%s", ref.Registry, ref.Repository)
+	sessKey := fmt.Sprintf("%s/%s:p=%d", ref.Registry, ref.Repository, maxPages)
+	sess := getCheckSession(ctx)
+	if sess != nil {
+		if cached, ok := sess.getTags(sessKey); ok {
+			return cached, nil
+		}
+	}
 	if !bypassCache {
 		if b, ok := c.getCache(ctx, cacheKey); ok {
 			var list []TagDigestEntry
 			if json.Unmarshal(b, &list) == nil {
+				if sess != nil {
+					sess.putTags(sessKey, list)
+				}
 				return list, nil
 			}
 		}
 	}
 
-	var (
-		entries []TagDigestEntry
-		err     error
-	)
-	if ref.Registry == "docker.io" {
-		entries, err = c.fetchDockerHubTags(ctx, ref.Repository, maxPages)
-	} else {
-		entries, err = c.fetchOCITagsList(ctx, ref.Registry, ref.Repository, 5)
-	}
+	val, err := c.flight.do("tags:"+sessKey, func() (any, error) {
+		var (
+			entries []TagDigestEntry
+			fErr    error
+		)
+		if ref.Registry == "docker.io" {
+			entries, fErr = c.fetchDockerHubTags(ctx, ref.Repository, maxPages)
+		} else {
+			entries, fErr = c.fetchOCITagsList(ctx, ref.Registry, ref.Repository, 5)
+		}
+		if fErr != nil {
+			return nil, fErr
+		}
+		if b, mErr := json.Marshal(entries); mErr == nil {
+			c.putCache(ctx, cacheKey, b, 6*time.Hour)
+		}
+		return entries, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if b, err := json.Marshal(entries); err == nil {
-		c.putCache(ctx, cacheKey, b, 6*time.Hour)
+	entries, _ := val.([]TagDigestEntry)
+	if sess != nil {
+		sess.putTags(sessKey, entries)
 	}
-	return entries, nil
+	return cloneTagEntries(entries), nil
 }
 
 func mergeUniqueTagEntries(groups ...[]TagDigestEntry) []TagDigestEntry {
@@ -1409,19 +1600,58 @@ func (c *Client) LookupTagsByDigestOrConfig(
 		}
 	}
 
-	// 对非 Docker Hub 的 OCI 仓库（recent 只有名字没有 digest），挑选最多 12 个候选标签（含标准版本标签及日期/构建别名标签）做免费 HEAD 比对
+	// 对非 Docker Hub 的 OCI 仓库（recent 只有名字没有 digest），挑选最多 12 个候选标签（含标准版本标签及日期/构建别名标签）做免费并发 HEAD 比对
 	if len(matched) == 0 && (targetDigest != "" || targetPlatformDigest != "") && ref.Registry != "docker.io" && len(recent) > 0 {
 		candidates := pickCandidateTagsForLookup(recent, 12)
-		baseURL := c.registryAPIBase(ref.Registry)
-		for _, tagName := range candidates {
-			u := fmt.Sprintf("%s/v2/%s/manifests/%s", baseURL, ref.Repository, url.PathEscape(tagName))
-			resp, _, err := c.doRegistryRequest(ctx, ref.Registry, ref.Repository, http.MethodHead, u, acceptManifestHeaders)
-			if err != nil {
-				continue
+		if len(candidates) > 0 {
+			baseURL := c.registryAPIBase(ref.Registry)
+			hits := make([]bool, len(candidates))
+			probeHead := func(i int) {
+				u := fmt.Sprintf("%s/v2/%s/manifests/%s", baseURL, ref.Repository, url.PathEscape(candidates[i]))
+				resp, _, err := c.doRegistryRequest(ctx, ref.Registry, ref.Repository, http.MethodHead, u, acceptManifestHeaders)
+				if err != nil {
+					return
+				}
+				dig := NormalizeDigest(resp.Header.Get("Docker-Content-Digest"))
+				if dig != "" && ((targetDigest != "" && dig == targetDigest) || (targetPlatformDigest != "" && dig == targetPlatformDigest)) {
+					hits[i] = true
+				}
 			}
-			dig := NormalizeDigest(resp.Header.Get("Docker-Content-Digest"))
-			if dig != "" && ((targetDigest != "" && dig == targetDigest) || (targetPlatformDigest != "" && dig == targetPlatformDigest)) {
-				add(tagName)
+
+			startIdx := 0
+			if len(candidates) > 1 && c.getCachedToken(ref.Registry+"/"+ref.Repository) == "" {
+				probeHead(0)
+				startIdx = 1
+			}
+			if startIdx < len(candidates) {
+				sem := make(chan struct{}, ociLookupHeadConcurrency)
+				var wg sync.WaitGroup
+				for i := startIdx; i < len(candidates); i++ {
+					if ctx.Err() != nil {
+						break
+					}
+					acquired := false
+					select {
+					case sem <- struct{}{}:
+						acquired = true
+					case <-ctx.Done():
+					}
+					if !acquired {
+						break
+					}
+					wg.Add(1)
+					go func(idx int) {
+						defer wg.Done()
+						defer func() { <-sem }()
+						probeHead(idx)
+					}(i)
+				}
+				wg.Wait()
+			}
+			for i, ok := range hits {
+				if ok {
+					add(candidates[i])
+				}
 			}
 		}
 	}
@@ -1847,9 +2077,19 @@ func (c *Client) doRegistryRequest(ctx context.Context, reg, repo, method, targe
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		www := resp.Header.Get("WWW-Authenticate")
-		newTok, authErr := c.acquireBearerToken(ctx, www, creds)
+		flightKey := "tok:" + tokenKey + "|" + www
+		val, authErr := c.flight.do(flightKey, func() (any, error) {
+			if cur := c.getCachedToken(tokenKey); cur != "" && cur != tok {
+				return cur, nil
+			}
+			t, aErr := c.acquireBearerToken(ctx, www, creds)
+			if aErr == nil && t != "" {
+				c.setCachedToken(tokenKey, t)
+			}
+			return t, aErr
+		})
+		newTok, _ := val.(string)
 		if authErr == nil && newTok != "" {
-			c.setCachedToken(tokenKey, newTok)
 			resp, body, err = send(newTok, nil)
 			if err != nil {
 				return nil, nil, err
