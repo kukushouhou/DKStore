@@ -172,6 +172,8 @@ function compareAnyNumericSegs(tagA?: string, tagB?: string): number | null {
   return 0
 }
 
+const PAGE_RENDER_STEP = 80
+
 function sortMatchedTagsClient(
   items: ServiceTagItem[],
   rawQuery: string,
@@ -184,14 +186,21 @@ function sortMatchedTagsClient(
   return [...items].sort((a, b) => {
     const la = a.tag.toLowerCase()
     const lb = b.tag.toLowerCase()
-    const exactA = la === qLow || trimV(la) === qNoV
-    const exactB = lb === qLow || trimV(lb) === qNoV
+    const exactA = la === qLow || (qNoV !== '' && trimV(la) === qNoV)
+    const exactB = lb === qLow || (qNoV !== '' && trimV(lb) === qNoV)
     if (exactA !== exactB) return exactA ? -1 : 1
     const prefA = la.startsWith(qLow) || (qNoV !== '' && trimV(la).startsWith(qNoV))
     const prefB = lb.startsWith(qLow) || (qNoV !== '' && trimV(lb).startsWith(qNoV))
     if (prefA !== prefB) return prefA ? -1 : 1
     if (sortMode === 'time' && hasTimestamps && (a.updatedAt ?? 0) !== (b.updatedAt ?? 0)) {
       return (b.updatedAt ?? 0) - (a.updatedAt ?? 0)
+    }
+    if (
+      a.searchOrder !== undefined &&
+      b.searchOrder !== undefined &&
+      a.searchOrder !== b.searchOrder
+    ) {
+      return a.searchOrder - b.searchOrder
     }
     const cmp = compareAnyNumericSegs(b.tag, a.tag)
     if (cmp !== null) {
@@ -267,16 +276,15 @@ function VersionPickerModalBody({
     [initialSelectedTag, service.currentVersion, service.imageRef],
   )
 
-  const [localTags, setLocalTags] = useState<ServiceTagItem[]>([])
-  const [remoteTags, setRemoteTags] = useState<ServiceTagItem[]>([])
-  const [highestApiTag, setHighestApiTag] = useState<string>('')
+  const [allTags, setAllTags] = useState<ServiceTagItem[]>([])
+  const [highestStableTag, setHighestStableTag] = useState<string>('')
+  const [highestPrereleaseTag, setHighestPrereleaseTag] = useState<string>('')
   const [loading, setLoading] = useState(true)
-  const [searchingRemote, setSearchingRemote] = useState(false)
-  const [remoteSearched, setRemoteSearched] = useState(false)
   const [showPrerelease, setShowPrerelease] = useState<boolean>(initialPrereleaseOn)
   const [sortMode, setSortMode] = useState<TagSortMode>('version')
   const [hasTimestamps, setHasTimestamps] = useState<boolean>(true)
   const [query, setQuery] = useState('')
+  const [visibleLimit, setVisibleLimit] = useState<number>(PAGE_RENDER_STEP)
   const [selectedTag, setSelectedTag] = useState(() =>
     cleanInitialTag(service, initialSelectedTag),
   )
@@ -286,9 +294,8 @@ function VersionPickerModalBody({
 
   const showPrereleaseRef = useRef(showPrerelease)
   showPrereleaseRef.current = showPrerelease
-  const sortModeRef = useRef(sortMode)
-  sortModeRef.current = sortMode
   const userToggledPreRef = useRef(false)
+  const listBoxRef = useRef<HTMLDivElement | null>(null)
 
   // 按配置更新 —— 分支 A：单容器 YAML 项目编辑状态
   const isStandaloneConfigMode = Boolean(
@@ -351,20 +358,35 @@ function VersionPickerModalBody({
     [service.imageRef, service.targetRef],
   )
 
-  // 计算当前作用域内已知最高版本标签
-  const highestTag = useMemo(() => {
-    if (highestApiTag) return highestApiTag
+  const resolveHighestForTag = (
+    tag: string,
+    pool: ServiceTagItem[],
+    stHi: string,
+    preHi: string,
+  ): string => {
+    const isTagPre = Boolean(
+      pool.find((i) => i.tag === tag)?.prerelease || isPrereleaseTagStr(tag),
+    )
+    if (isTagPre && preHi) return preHi
+    if (stHi) return stHi
+    if (preHi) return preHi
     if (service.rawTargetVersion && !service.rawTargetVersion.includes(' ')) {
       return service.rawTargetVersion
     }
     if (service.targetVersion && !service.targetVersion.includes(' ')) {
       return service.targetVersion
     }
-    const pool = remoteTags.length > 0 ? remoteTags : localTags
     const firstVer = pool.find((item) => item.tag !== 'latest')
     if (firstVer) return firstVer.tag
     return pool[0]?.tag || ''
-  }, [highestApiTag, localTags, remoteTags, service])
+  }
+
+  // 计算当前所选标签对应通道（稳定版 / 预发布版）内已知最高版本标签
+  const highestTag = useMemo(
+    () => resolveHighestForTag(selectedTag, allTags, highestStableTag, highestPrereleaseTag),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [allTags, highestPrereleaseTag, highestStableTag, selectedTag, service],
+  )
 
   const checkIsAtOrAboveLatest = (
     tag: string,
@@ -391,11 +413,12 @@ function VersionPickerModalBody({
     return false
   }
 
-  const applyTagSelection = (tag: string, knownHighest: string) => {
+  const applyTagSelection = (tag: string) => {
     userPickedVersionRef.current = true
     setSelectedTag(tag)
     setLockDepth(1)
-    const atLatest = checkIsAtOrAboveLatest(tag, knownHighest, allCombinedTags)
+    const knownHighest = resolveHighestForTag(tag, allTags, highestStableTag, highestPrereleaseTag)
+    const atLatest = checkIsAtOrAboveLatest(tag, knownHighest, allTags)
     setPolicy(atLatest ? 'all' : 'skip_latest')
 
     if (yamlLoaded && yamlEditable) {
@@ -409,36 +432,23 @@ function VersionPickerModalBody({
     }
   }
 
-  const refreshLocalPool = async (nextPrerelease: boolean, nextSort: TagSortMode) => {
-    try {
-      const res = await api.searchServiceTags(service.key, {
-        q: '',
-        remote: false,
-        prerelease: nextPrerelease,
-        sort: nextSort,
-      })
-      setLocalTags(res.items ?? [])
-      if (res.hasTimestamps !== undefined) {
-        setHasTimestamps(res.hasTimestamps)
-      }
-      if (res.highestTag) {
-        setHighestApiTag(res.highestTag)
-      }
-    } catch (e) {
-      showApiError(e)
+  const resetListViewport = () => {
+    setVisibleLimit(PAGE_RENDER_STEP)
+    if (listBoxRef.current) {
+      listBoxRef.current.scrollTop = 0
     }
   }
 
   const handleTogglePrerelease = (checked: boolean) => {
     userToggledPreRef.current = true
     setShowPrerelease(checked)
-    void refreshLocalPool(checked, sortMode)
+    resetListViewport()
   }
 
   const handleChangeSortMode = (nextSort: TagSortMode) => {
     if (nextSort === 'time' && !hasTimestamps) return
     setSortMode(nextSort)
-    void refreshLocalPool(showPrerelease, nextSort)
+    resetListViewport()
   }
 
   const tagsLoadedForKeyRef = useRef<string>('')
@@ -455,25 +465,14 @@ function VersionPickerModalBody({
 
     let cancelled = false
     const initTag = cleanInitialTag(service, initialSelectedTag)
+    setLoading(true)
 
     ;(async () => {
-      let alreadyFetchedRemote = false
       try {
-        let res = await api.searchServiceTags(service.key, {
-          q: '',
-          remote: false,
-          prerelease: showPrereleaseRef.current,
-          sort: sortModeRef.current,
+        const res = await api.searchServiceTags(service.key, {
+          all: true,
+          remote: true,
         })
-        if (!cancelled && (!res.items || res.items.length === 0)) {
-          alreadyFetchedRemote = true
-          res = await api.searchServiceTags(service.key, {
-            q: '',
-            remote: true,
-            prerelease: showPrereleaseRef.current,
-            sort: sortModeRef.current,
-          })
-        }
         if (cancelled) return
         if (res.currentPrerelease && !userToggledPreRef.current && !showPrereleaseRef.current) {
           setShowPrerelease(true)
@@ -482,56 +481,25 @@ function VersionPickerModalBody({
           setHasTimestamps(res.hasTimestamps)
         }
         const items = res.items ?? []
-        setLocalTags(items)
-        const hi =
-          res.highestTag ||
-          (service.rawTargetVersion && !service.rawTargetVersion.includes(' ')) ||
-          items.find((i) => i.tag !== 'latest')?.tag ||
-          ''
-        setHighestApiTag(typeof hi === 'string' ? hi : '')
-        const hiStr =
-          res.highestTag ||
-          (service.rawTargetVersion && !service.rawTargetVersion.includes(' ')
-            ? service.rawTargetVersion
-            : '') ||
-          items.find((i) => i.tag !== 'latest')?.tag ||
-          ''
-        setHighestApiTag(hiStr)
-        // 严格保持当前推荐/配置的目标标签 initTag，绝不自动跌落到 items[0] 造成跨版本误降级
-        const atLatest = checkIsAtOrAboveLatest(initTag, hiStr, items)
-        setSelectedTag(initTag)
-        setPolicy(atLatest ? 'all' : 'skip_latest')
+        const stHi = res.highestStableTag || res.highestTag || ''
+        const preHi = res.highestPrereleaseTag || res.highestTag || ''
+        setAllTags(items)
+        setHighestStableTag(stHi)
+        setHighestPrereleaseTag(preHi)
+
+        if (!userPickedVersionRef.current) {
+          const effHi = resolveHighestForTag(initTag, items, stHi, preHi)
+          const atLatest = checkIsAtOrAboveLatest(initTag, effHi, items)
+          setSelectedTag(initTag)
+          setPolicy(atLatest ? 'all' : 'skip_latest')
+        }
       } catch (e) {
         if (!cancelled) {
-          setLocalTags([])
+          setAllTags([])
           showApiError(e)
         }
       } finally {
         if (!cancelled) setLoading(false)
-      }
-
-      // 秒开本地缓存后，立即在后台静默同步云端最新标签并无缝更新列表
-      if (!cancelled && !alreadyFetchedRemote) {
-        try {
-          const fresh = await api.searchServiceTags(service.key, {
-            q: '',
-            remote: true,
-            prerelease: showPrereleaseRef.current,
-            sort: sortModeRef.current,
-          })
-          if (cancelled) return
-          if (fresh.hasTimestamps !== undefined) {
-            setHasTimestamps(fresh.hasTimestamps)
-          }
-          if (fresh.items && fresh.items.length > 0) {
-            setLocalTags(fresh.items)
-          }
-          if (fresh.highestTag) {
-            setHighestApiTag(fresh.highestTag)
-          }
-        } catch {
-          // 后台静默同步偶发失败不弹错误打断用户操作
-        }
       }
     })()
 
@@ -626,100 +594,78 @@ function VersionPickerModalBody({
     }
   }, [tab, isStandaloneConfigMode, standaloneLoaded, service.key, service.name, service.imageRef, appName, selectedTag])
 
-  const handleRemoteSearch = async () => {
-    if (!service) return
-    const q = query.trim()
-    setSearchingRemote(true)
-    try {
-      if (!q) {
-        const res = await api.searchServiceTags(service.key, {
-          q: '',
-          remote: true,
-          prerelease: showPrerelease,
-          sort: sortMode,
-        })
-        setLocalTags(res.items ?? [])
-        if (res.hasTimestamps !== undefined) {
-          setHasTimestamps(res.hasTimestamps)
-        }
-        if (res.highestTag) {
-          setHighestApiTag(res.highestTag)
-        }
-        setRemoteSearched(false)
-      } else {
-        const res = await api.searchServiceTags(service.key, {
-          q,
-          remote: true,
-          prerelease: true,
-          sort: sortMode,
-        })
-        setRemoteTags(res.items ?? [])
-        if (res.hasTimestamps !== undefined) {
-          setHasTimestamps(res.hasTimestamps)
-        }
-        if (res.highestTag) {
-          setHighestApiTag(res.highestTag)
-        }
-        setRemoteSearched(true)
-      }
-    } catch (e) {
-      showApiError(e)
-    } finally {
-      setSearchingRemote(false)
-    }
+  const handleApplySearch = () => {
+    resetListViewport()
   }
 
   const trimmedQuery = query.trim()
-  const activePool = remoteSearched ? remoteTags : localTags
   const effectiveSortMode: TagSortMode = hasTimestamps ? sortMode : 'version'
-  const displayedTags = useMemo(() => {
+
+  const matchedAllTags = useMemo(() => {
     if (trimmedQuery) {
-      const matched = activePool.filter((item) =>
-        item.tag.toLowerCase().includes(trimmedQuery.toLowerCase()),
-      )
-      return sortMatchedTagsClient(matched, trimmedQuery, effectiveSortMode, hasTimestamps).slice(
-        0,
-        50,
-      )
+      const qLow = trimmedQuery.toLowerCase()
+      const rawMatched = allTags.filter((item) => item.tag.toLowerCase().includes(qLow))
+      return sortMatchedTagsClient(rawMatched, trimmedQuery, effectiveSortMode, hasTimestamps)
     }
-    const base = localTags.slice(0, 50)
+
+    const base = allTags.filter((item) =>
+      showPrerelease ? Boolean(item.preVisible) : Boolean(item.stableVisible),
+    )
+
     const initTag = cleanInitialTag(service, initialSelectedTag)
-    if (initTag && !base.some((item) => item.tag === initTag)) {
-      const extraItem: ServiceTagItem = {
+    const initIsPre = isPrereleaseTagStr(initTag)
+    let list = base
+    if (initTag && (!initIsPre || showPrerelease) && !base.some((item) => item.tag === initTag)) {
+      const existingInPool = allTags.find((item) => item.tag === initTag)
+      const extraItem: ServiceTagItem = existingInPool ?? {
         tag: initTag,
         updatedAt: service.targetUpdatedAt || service.currentUpdatedAt,
-        prerelease: isPrereleaseTagStr(initTag),
+        prerelease: initIsPre,
       }
       if (effectiveSortMode === 'version' && base[0]?.tag === 'latest') {
-        return [base[0], extraItem, ...base.slice(1)].slice(0, 50)
+        list = [base[0], extraItem, ...base.slice(1)]
+      } else {
+        list = [extraItem, ...base]
       }
-      return [extraItem, ...base].slice(0, 50)
     }
-    return base
+
+    if (effectiveSortMode === 'time') {
+      return [...list].sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+    }
+    return list
   }, [
-    activePool,
+    allTags,
     effectiveSortMode,
     hasTimestamps,
     initialSelectedTag,
-    localTags,
     service,
+    showPrerelease,
     trimmedQuery,
   ])
 
-  const allCombinedTags = useMemo(() => {
-    const seen = new Set<string>()
-    const merged: ServiceTagItem[] = []
-    for (const it of [...localTags, ...remoteTags]) {
-      if (!seen.has(it.tag)) {
-        seen.add(it.tag)
-        merged.push(it)
-      }
-    }
-    return merged
-  }, [localTags, remoteTags])
+  const displayedTags = useMemo(
+    () => matchedAllTags.slice(0, visibleLimit),
+    [matchedAllTags, visibleLimit],
+  )
 
-  const isSelectedPrerelease = useMemo(() => isPrereleaseTagStr(selectedTag), [selectedTag])
-  const isLatest = checkIsAtOrAboveLatest(selectedTag, highestTag, allCombinedTags)
+  const handleListScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget
+    if (
+      visibleLimit < matchedAllTags.length &&
+      el.scrollTop + el.clientHeight >= el.scrollHeight - 120
+    ) {
+      setVisibleLimit((prev) => Math.min(prev + PAGE_RENDER_STEP, matchedAllTags.length))
+    }
+  }
+
+  const isSelectedPrerelease = useMemo(
+    () =>
+      Boolean(
+        allTags.find((i) => i.tag === selectedTag)?.prerelease || isPrereleaseTagStr(selectedTag),
+      ),
+    [allTags, selectedTag],
+  )
+  const isLatest = checkIsAtOrAboveLatest(selectedTag, highestTag, allTags)
   const numericSegs = useMemo(() => parseNumericSegs(selectedTag), [selectedTag])
   const safeLockDepth = Math.min(Math.max(1, lockDepth), Math.max(1, numericSegs.length - 1))
   const lockedPrefix = numericSegs.length >= 2 ? numericSegs.slice(0, safeLockDepth).join('.') : ''
@@ -731,7 +677,7 @@ function VersionPickerModalBody({
       return highestTag
     }
     if (policy === 'prefix' && lockedPrefix) {
-      const hit = allCombinedTags.find((r) => {
+      const hit = allTags.find((r) => {
         if (r.tag === selectedTag) return false
         if (!isSelectedPrerelease && (r.prerelease || isPrereleaseTagStr(r.tag))) return false
         const clean = r.tag.replace(/^v/i, '')
@@ -742,7 +688,7 @@ function VersionPickerModalBody({
       if (hit) return hit.tag
     }
     return ''
-  }, [allCombinedTags, highestTag, isLatest, isSelectedPrerelease, lockedPrefix, policy, selectedTag])
+  }, [allTags, highestTag, isLatest, isSelectedPrerelease, lockedPrefix, policy, selectedTag])
 
   const origYamlConfigs = useMemo(() => parseComposeServices(origYaml), [origYaml])
   const curYamlConfigs = useMemo(() => parseComposeServices(yamlText), [yamlText])
@@ -1029,7 +975,7 @@ function VersionPickerModalBody({
 
   const shortRepo = extractShortRepo(service.imageRef)
   const curVer = service.currentVersion || t.home.unknownCurrent
-  const exactTagExists = allCombinedTags.some((r) => r.tag === trimmedQuery)
+  const exactTagExists = allTags.some((r) => r.tag === trimmedQuery)
 
   const renderRadioCard = (
     key: UpdatePolicyMode,
@@ -1167,28 +1113,23 @@ function VersionPickerModalBody({
           {/* 双栏主体：桌面左宽右精 14:10，移动端上下叠放 */}
           <Row gutter={[20, 16]} align="stretch">
             <Col xs={24} md={14} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {/* 组合式搜索框（输入仅过滤本地列表，回车/点搜索请求远端） */}
+              {/* 组合式搜索框（直接基于已拉取的完整标签池本地即时筛选，点击按钮或回车同样本地生效） */}
               <Space.Compact style={{ width: '100%' }}>
                 <Input
                   allowClear
                   value={query}
                   onChange={(e) => {
                     setQuery(e.target.value)
-                    setRemoteSearched(false)
+                    resetListViewport()
                   }}
                   onPressEnter={(e) => {
                     e.preventDefault()
-                    handleRemoteSearch()
+                    handleApplySearch()
                   }}
                   placeholder={t.versionPicker.searchPlaceholder}
                   style={{ fontFamily: token.fontFamilyCode }}
                 />
-                <Button
-                  type="primary"
-                  ghost
-                  loading={searchingRemote}
-                  onClick={handleRemoteSearch}
-                >
+                <Button type="primary" ghost onClick={handleApplySearch}>
                   {t.versionPicker.searchBtn}
                 </Button>
               </Space.Compact>
@@ -1249,7 +1190,9 @@ function VersionPickerModalBody({
 
               {/* 标签列表 */}
               <div
+                ref={listBoxRef}
                 role="listbox"
+                onScroll={handleListScroll}
                 style={{
                   flex: 1,
                   maxHeight: 260,
@@ -1260,7 +1203,7 @@ function VersionPickerModalBody({
                   background: token.colorBgContainer,
                 }}
               >
-                {loading || searchingRemote ? (
+                {loading ? (
                   <Flex align="center" justify="center" gap={8} style={{ height: 180 }}>
                     <Spin size="small" />
                     <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
@@ -1282,11 +1225,11 @@ function VersionPickerModalBody({
                           align="flex-start"
                           justify="space-between"
                           gap={10}
-                          onClick={() => applyTagSelection(item.tag, highestTag)}
+                          onClick={() => applyTagSelection(item.tag)}
                           onKeyDown={(e) => {
                             if (e.key === 'Enter' || e.key === ' ') {
                               e.preventDefault()
-                              applyTagSelection(item.tag, highestTag)
+                              applyTagSelection(item.tag)
                             }
                           }}
                           style={{
@@ -1378,59 +1321,49 @@ function VersionPickerModalBody({
                       )
                     })}
 
-                    {trimmedQuery && displayedTags.length === 0 && !remoteSearched && (
-                      <div style={{ padding: 8 }}>
-                        <Button type="link" block onClick={handleRemoteSearch}>
-                          {t.versionPicker.notFoundInRecent.replace('{q}', trimmedQuery)}
-                        </Button>
-                      </div>
-                    )}
-
-                    {trimmedQuery &&
-                      !exactTagExists &&
-                      (remoteSearched || localTags.length === 0) && (
-                        <Flex
-                          role="option"
-                          aria-selected={selectedTag === trimmedQuery}
-                          tabIndex={0}
-                          align="center"
-                          justify="space-between"
-                          gap={8}
-                          onClick={() => applyTagSelection(trimmedQuery, highestTag)}
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter' || e.key === ' ') {
-                              e.preventDefault()
-                              applyTagSelection(trimmedQuery, highestTag)
-                            }
-                          }}
-                          style={{
-                            padding: '9px 12px',
-                            borderTop:
-                              displayedTags.length > 0 ? `1px solid ${token.colorSplit}` : 'none',
-                            background:
-                              selectedTag === trimmedQuery ? token.colorPrimaryBg : 'transparent',
-                            cursor: 'pointer',
-                          }}
-                        >
-                          <Space size={6}>
-                            <PlusOutlined style={{ fontSize: 11, color: token.colorPrimary }} />
-                            <Typography.Text
-                              strong
-                              style={{
-                                fontFamily: token.fontFamilyCode,
-                                fontSize: token.fontSizeSM,
-                              }}
-                            >
-                              {trimmedQuery}
-                            </Typography.Text>
-                          </Space>
+                    {trimmedQuery && !exactTagExists && (
+                      <Flex
+                        role="option"
+                        aria-selected={selectedTag === trimmedQuery}
+                        tabIndex={0}
+                        align="center"
+                        justify="space-between"
+                        gap={8}
+                        onClick={() => applyTagSelection(trimmedQuery)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault()
+                            applyTagSelection(trimmedQuery)
+                          }
+                        }}
+                        style={{
+                          padding: '9px 12px',
+                          borderTop:
+                            displayedTags.length > 0 ? `1px solid ${token.colorSplit}` : 'none',
+                          background:
+                            selectedTag === trimmedQuery ? token.colorPrimaryBg : 'transparent',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        <Space size={6}>
+                          <PlusOutlined style={{ fontSize: 11, color: token.colorPrimary }} />
                           <Typography.Text
-                            style={{ fontSize: token.fontSizeSM, color: token.colorPrimary }}
+                            strong
+                            style={{
+                              fontFamily: token.fontFamilyCode,
+                              fontSize: token.fontSizeSM,
+                            }}
                           >
-                            {t.versionPicker.useCustomTag}
+                            {trimmedQuery}
                           </Typography.Text>
-                        </Flex>
-                      )}
+                        </Space>
+                        <Typography.Text
+                          style={{ fontSize: token.fontSizeSM, color: token.colorPrimary }}
+                        >
+                          {t.versionPicker.useCustomTag}
+                        </Typography.Text>
+                      </Flex>
+                    )}
 
                     {!trimmedQuery && displayedTags.length === 0 && (
                       <Empty

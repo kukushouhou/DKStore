@@ -726,30 +726,40 @@ func mergeUniqueTagEntries(groups ...[]TagDigestEntry) []TagDigestEntry {
 	return out
 }
 
-const maxTagSearchItems = 50
+const (
+	maxTagSearchItems      = 50
+	maxModalHubPages       = 20
+	maxModalOCIPages       = 15
+	hubModalPageConcurrent = 5
+)
 
 // SearchOptions 控制版本弹窗的标签列表查询、预发布过滤与排序方式。
 type SearchOptions struct {
 	Query             string
 	Remote            bool
+	All               bool   // true 时并发拉取完整标签池并全量返回前端（不提前过滤丢弃或截断 50 条）
 	IncludePrerelease *bool  // nil 时自动按容器当前标签是否为预发布版本决定
 	SortBy            string // "version"（默认）| "time"
 }
 
-// TaggedSearchItem 是携带预发布标记与通道实际指向版本的标签项。
+// TaggedSearchItem 是携带预发布标记、通道实际指向版本及本地筛选排序元数据的标签项。
 type TaggedSearchItem struct {
 	TagDigestEntry
-	Prerelease bool
-	AliasOf    string
+	Prerelease    bool
+	AliasOf       string
+	StableVisible bool
+	PreVisible    bool
+	SearchOrder   int
 }
 
 // SearchResult 是 SearchTagsEx 的完整返回结果。
 type SearchResult struct {
-	Items             []TaggedSearchItem
-	HighestTag        string
-	HighestStableTag  string
-	CurrentPrerelease bool
-	HasTimestamps     bool
+	Items                []TaggedSearchItem
+	HighestTag           string
+	HighestStableTag     string
+	HighestPrereleaseTag string
+	CurrentPrerelease    bool
+	HasTimestamps        bool
 }
 
 // SearchTags 兼容简化调用签名，返回标签列表与作用域内最高版本标签 highestTag。
@@ -769,9 +779,8 @@ func (c *Client) SearchTags(ctx context.Context, ref version.ParsedRef, query st
 }
 
 // SearchTagsEx 支持弹窗版本浏览与按需检索：
-// - remote=true 时对所有仓库（含 Docker Hub / GHCR / LSCR / Quay / 私有仓库）一律绕过缓存直连云端实时拉取；
-// - 支持按预发布开关控制默认列表，主动搜索（query!=""）始终包含预发布并按「精确匹配 > 前缀匹配 > 版本号/时间」排序；
-// - 支持按版本号（latest 置顶并解析实际指向版本）与按更新时间双模式排序，返回最多 50 条。
+// - All=true 时直接拉取完整标签池并附带预发布/默认显隐与排序权重全量交给前端，支持前端纯本地 0ms 切换开关、排序与检索；
+// - remote=true 时对所有仓库（含 Docker Hub / GHCR / LSCR / Quay / 私有仓库）一律绕过缓存直连云端实时拉取（网络异常时自动回退本地缓存）。
 func (c *Client) SearchTagsEx(ctx context.Context, ref version.ParsedRef, opts SearchOptions) (*SearchResult, error) {
 	q := strings.TrimSpace(opts.Query)
 	qLower := strings.ToLower(q)
@@ -785,12 +794,20 @@ func (c *Client) SearchTagsEx(ctx context.Context, ref version.ParsedRef, opts S
 		sortBy = "version"
 	}
 
-	recent, err := c.FetchRecentTags(ctx, ref, 5, opts.Remote)
-	if err != nil && opts.Remote {
-		// 若远端刷新偶发网络波动但本地尚有缓存且非强制搜词，尝试降级读取缓存；搜词场景在 Docker Hub 下继续走按名检索
-		if fallback, fbErr := c.FetchRecentTags(ctx, ref, 5, false); fbErr == nil && len(fallback) > 0 && q == "" {
-			recent = fallback
-			err = nil
+	var (
+		recent []TagDigestEntry
+		err    error
+	)
+	if opts.All {
+		recent, err = c.fetchFullTagsForModal(ctx, ref, opts.Remote)
+	} else {
+		recent, err = c.FetchRecentTags(ctx, ref, 5, opts.Remote)
+		if err != nil && opts.Remote {
+			// 若远端刷新偶发网络波动但本地尚有缓存且非强制搜词，尝试降级读取缓存；搜词场景在 Docker Hub 下继续走按名检索
+			if fallback, fbErr := c.FetchRecentTags(ctx, ref, 5, false); fbErr == nil && len(fallback) > 0 && q == "" {
+				recent = fallback
+				err = nil
+			}
 		}
 	}
 	if err != nil && (!opts.Remote || q == "" || ref.Registry != "docker.io") {
@@ -802,7 +819,7 @@ func (c *Client) SearchTagsEx(ctx context.Context, ref version.ParsedRef, opts S
 	scopePrefix := computeServiceScopePrefix(ref)
 
 	if ref.Registry == "docker.io" {
-		if q != "" {
+		if q != "" && !opts.All {
 			hubQKey := fmt.Sprintf("hub_q:%s:%s:%d", ref.Repository, qLower, 100)
 			if opts.Remote {
 				remoteHits, rErr := c.searchDockerHubTagsByNameWithSize(ctx, ref.Repository, q, 100)
@@ -822,7 +839,7 @@ func (c *Client) SearchTagsEx(ctx context.Context, ref version.ParsedRef, opts S
 				}
 			}
 		} else if curTag.Scheme != version.SchemeUnknown {
-			// 对 mysql:8.4 / postgres:17 / registry:2 等多变体或长周期大仓库，补充拉取本系列标签，防止正式版本被海量变体挤出前几页
+			// 对 mysql:8.4 / postgres:17 / registry:2 等多变体或长周期大仓库，补充拉取本系列标签，防止正式版本被海量变体挤出分页窗口
 			seriesQuery := scopePrefix
 			if seriesQuery == "" {
 				seriesQuery = strconv.Itoa(curTag.Major)
@@ -864,6 +881,11 @@ func (c *Client) SearchTagsEx(ctx context.Context, ref version.ParsedRef, opts S
 			break
 		}
 	}
+
+	if opts.All {
+		return buildFullModalSearchResult(combined, ref, scopePrefix, curPrerelease, hasTimestamps), nil
+	}
+
 	effectiveSort := sortBy
 	if !hasTimestamps {
 		effectiveSort = "version"
@@ -871,10 +893,11 @@ func (c *Client) SearchTagsEx(ctx context.Context, ref version.ParsedRef, opts S
 
 	cleanedDefault := buildCleanDefaultTags(combined, ref, scopePrefix, includePre, effectiveSort)
 	highestStable := pickScopedHighestTag(cleanedDefault, combined, ref, scopePrefix, false)
+	highestPre := pickScopedHighestTag(cleanedDefault, combined, ref, scopePrefix, true)
 	highest := highestStable
 	if includePre || curPrerelease {
-		if hp := pickScopedHighestTag(cleanedDefault, combined, ref, scopePrefix, true); hp != "" {
-			highest = hp
+		if highestPre != "" {
+			highest = highestPre
 		}
 	}
 
@@ -900,9 +923,10 @@ func (c *Client) SearchTagsEx(ctx context.Context, ref version.ParsedRef, opts S
 		chosen = cleanedDefault
 	}
 
+	digestGroup := buildDigestTagGroup(combined)
 	items := make([]TaggedSearchItem, 0, len(chosen))
-	for _, e := range chosen {
-		alias := resolveEntryAliasOf(e, combined)
+	for i, e := range chosen {
+		alias := resolveEntryAliasOfWithGroup(e, digestGroup)
 		isPre := version.IsPrereleaseAny(e.Name)
 		if isPre && alias != "" && version.ParseTag(e.Name).Scheme == version.SchemeUnknown && !version.IsPrereleaseAny(alias) {
 			isPre = false
@@ -911,16 +935,237 @@ func (c *Client) SearchTagsEx(ctx context.Context, ref version.ParsedRef, opts S
 			TagDigestEntry: e,
 			Prerelease:     isPre,
 			AliasOf:        alias,
+			StableVisible:  !isPre,
+			PreVisible:     true,
+			SearchOrder:    i,
 		})
 	}
 
 	return &SearchResult{
-		Items:             items,
-		HighestTag:        highest,
-		HighestStableTag:  highestStable,
-		CurrentPrerelease: curPrerelease,
-		HasTimestamps:     hasTimestamps,
+		Items:                items,
+		HighestTag:           highest,
+		HighestStableTag:     highestStable,
+		HighestPrereleaseTag: highestPre,
+		CurrentPrerelease:    curPrerelease,
+		HasTimestamps:        hasTimestamps,
 	}, nil
+}
+
+func (c *Client) fetchFullTagsForModal(ctx context.Context, ref version.ParsedRef, bypassCache bool) ([]TagDigestEntry, error) {
+	fullCacheKey := fmt.Sprintf("tags_full:%s/%s", ref.Registry, ref.Repository)
+	recentCacheKey := fmt.Sprintf("tags:%s/%s", ref.Registry, ref.Repository)
+
+	readCached := func() ([]TagDigestEntry, bool) {
+		if b, ok := c.getCache(ctx, fullCacheKey); ok {
+			var list []TagDigestEntry
+			if json.Unmarshal(b, &list) == nil && len(list) > 0 {
+				return list, true
+			}
+		}
+		if b, ok := c.getCache(ctx, recentCacheKey); ok {
+			var list []TagDigestEntry
+			if json.Unmarshal(b, &list) == nil && len(list) > 0 {
+				return list, true
+			}
+		}
+		return nil, false
+	}
+
+	if !bypassCache {
+		if cached, ok := readCached(); ok {
+			return cloneTagEntries(cached), nil
+		}
+	}
+
+	val, err := c.flight.do("tags_full:"+ref.Registry+"/"+ref.Repository, func() (any, error) {
+		var (
+			entries []TagDigestEntry
+			fErr    error
+		)
+		if ref.Registry == "docker.io" {
+			entries, fErr = c.fetchDockerHubAllTags(ctx, ref.Repository, maxModalHubPages)
+		} else {
+			entries, fErr = c.fetchOCITagsList(ctx, ref.Registry, ref.Repository, maxModalOCIPages)
+		}
+		if fErr != nil {
+			return nil, fErr
+		}
+		if b, mErr := json.Marshal(entries); mErr == nil {
+			c.putCache(ctx, fullCacheKey, b, 6*time.Hour)
+			c.putCache(ctx, recentCacheKey, b, 6*time.Hour)
+		}
+		return entries, nil
+	})
+	if err != nil {
+		if bypassCache {
+			if cached, ok := readCached(); ok {
+				return cloneTagEntries(cached), nil
+			}
+		}
+		return nil, err
+	}
+	entries, _ := val.([]TagDigestEntry)
+	return cloneTagEntries(entries), nil
+}
+
+func buildFullModalSearchResult(
+	combined []TagDigestEntry,
+	ref version.ParsedRef,
+	scopePrefix string,
+	curPrerelease bool,
+	hasTimestamps bool,
+) *SearchResult {
+	unique := mergeUniqueTagEntries(combined)
+	cleanStable := buildCleanDefaultTags(unique, ref, scopePrefix, false, "version")
+	cleanPre := buildCleanDefaultTags(unique, ref, scopePrefix, true, "version")
+
+	highestStable := pickScopedHighestTag(cleanStable, unique, ref, scopePrefix, false)
+	highestPre := pickScopedHighestTag(cleanPre, unique, ref, scopePrefix, true)
+	highest := highestStable
+	if curPrerelease && highestPre != "" {
+		highest = highestPre
+	}
+
+	stableSet := make(map[string]bool, len(cleanStable))
+	for _, e := range cleanStable {
+		stableSet[e.Name] = true
+	}
+	preSet := make(map[string]bool, len(cleanPre))
+	for _, e := range cleanPre {
+		preSet[e.Name] = true
+	}
+
+	// 预解析全量标签以计算权威搜索排序权重（避免在 O(N log N) 比较器内重复正则解析）
+	type parsedMeta struct {
+		entry  TagDigestEntry
+		pt     version.ParsedTag
+		flavor string
+		isArch bool
+	}
+	curFlavor := resolveCurrentFlavor(ref.Tag)
+	metas := make([]parsedMeta, len(unique))
+	parsedMap := make(map[string]version.ParsedTag, len(unique))
+	for i, e := range unique {
+		pt := version.ParseTag(e.Name)
+		parsedMap[e.Name] = pt
+		var fl string
+		var isArch bool
+		if pt.Scheme != version.SchemeUnknown {
+			fl, isArch = classifyTagVariant(pt.Variant)
+		} else {
+			fl, isArch = classifyTagVariant(e.Name)
+		}
+		metas[i] = parsedMeta{entry: e, pt: pt, flavor: fl, isArch: isArch}
+	}
+
+	sort.SliceStable(metas, func(i, j int) bool {
+		mi, mj := metas[i], metas[j]
+		iSem := mi.pt.Scheme != version.SchemeUnknown
+		jSem := mj.pt.Scheme != version.SchemeUnknown
+		if iSem != jSem {
+			return iSem
+		}
+		if iSem && jSem {
+			if mi.isArch != mj.isArch {
+				return !mi.isArch
+			}
+			if cmp := version.Compare(mi.pt, mj.pt); cmp != 0 {
+				return cmp > 0
+			}
+			if mi.pt.Precision != mj.pt.Precision {
+				return mi.pt.Precision > mj.pt.Precision
+			}
+			iMatchFlavor := mi.flavor == curFlavor
+			jMatchFlavor := mj.flavor == curFlavor
+			if iMatchFlavor != jMatchFlavor {
+				return iMatchFlavor
+			}
+			if (mi.flavor == "") != (mj.flavor == "") {
+				return mi.flavor == ""
+			}
+		}
+		if mi.entry.UpdatedAt != mj.entry.UpdatedAt {
+			return mi.entry.UpdatedAt > mj.entry.UpdatedAt
+		}
+		return mi.entry.Name > mj.entry.Name
+	})
+
+	searchOrderMap := make(map[string]int, len(metas))
+	for idx, m := range metas {
+		searchOrderMap[m.entry.Name] = idx
+	}
+
+	// 保序合并 cleanStable、cleanPre 与剩余全量标签，确保：
+	// 1) 前端按 stableVisible 过滤时顺序与 cleanStable 完全一致；
+	// 2) 前端按 preVisible 过滤时顺序与 cleanPre 完全一致；
+	// 3) 任何变体/历史/短别名标签均保留在返回结果中，供搜索框本地即时匹配。
+	orderedAll := make([]TagDigestEntry, 0, len(unique))
+	seenOrdered := make(map[string]bool, len(unique))
+	pushOrd := func(e TagDigestEntry) {
+		if e.Name != "" && !seenOrdered[e.Name] {
+			seenOrdered[e.Name] = true
+			orderedAll = append(orderedAll, e)
+		}
+	}
+	iPre := 0
+	for _, stItem := range cleanStable {
+		if preSet[stItem.Name] {
+			for iPre < len(cleanPre) && cleanPre[iPre].Name != stItem.Name {
+				pushOrd(cleanPre[iPre])
+				iPre++
+			}
+			if iPre < len(cleanPre) {
+				pushOrd(cleanPre[iPre])
+				iPre++
+			}
+		} else {
+			pushOrd(stItem)
+		}
+	}
+	for iPre < len(cleanPre) {
+		pushOrd(cleanPre[iPre])
+		iPre++
+	}
+	for _, m := range metas {
+		pushOrd(m.entry)
+	}
+
+	digestGroup := buildDigestTagGroup(unique)
+	items := make([]TaggedSearchItem, 0, len(orderedAll))
+	for _, e := range orderedAll {
+		alias := resolveEntryAliasOfWithGroup(e, digestGroup)
+		isPre := version.IsPrereleaseAny(e.Name)
+		if isPre && alias != "" && parsedMap[e.Name].Scheme == version.SchemeUnknown && !version.IsPrereleaseAny(alias) {
+			isPre = false
+		}
+		items = append(items, TaggedSearchItem{
+			TagDigestEntry: e,
+			Prerelease:     isPre,
+			AliasOf:        alias,
+			StableVisible:  stableSet[e.Name],
+			PreVisible:     preSet[e.Name],
+			SearchOrder:    searchOrderMap[e.Name],
+		})
+	}
+
+	return &SearchResult{
+		Items:                items,
+		HighestTag:           highest,
+		HighestStableTag:     highestStable,
+		HighestPrereleaseTag: highestPre,
+		CurrentPrerelease:    curPrerelease,
+		HasTimestamps:        hasTimestamps,
+	}
+}
+
+func buildDigestTagGroup(pool []TagDigestEntry) map[string][]string {
+	out := make(map[string][]string)
+	for _, e := range pool {
+		if e.Name != "" && e.RepoDigest != "" {
+			out[e.RepoDigest] = append(out[e.RepoDigest], e.Name)
+		}
+	}
+	return out
 }
 
 func resolveCurrentFlavor(curTagName string) string {
@@ -942,21 +1187,32 @@ func resolveEntryAliasOf(entry TagDigestEntry, pool []TagDigestEntry) string {
 	if entry.RepoDigest == "" || entry.Name == "" {
 		return ""
 	}
-	pt := version.ParseTag(entry.Name)
-	if pt.Scheme != version.SchemeUnknown && pt.Precision > 2 {
-		return ""
-	}
 	var sameDigest []string
 	for _, other := range pool {
 		if other.Name != "" && other.RepoDigest == entry.RepoDigest {
 			sameDigest = append(sameDigest, other.Name)
 		}
 	}
+	return resolveAliasFromCandidates(entry.Name, sameDigest)
+}
+
+func resolveEntryAliasOfWithGroup(entry TagDigestEntry, digestGroup map[string][]string) string {
+	if entry.RepoDigest == "" || entry.Name == "" {
+		return ""
+	}
+	return resolveAliasFromCandidates(entry.Name, digestGroup[entry.RepoDigest])
+}
+
+func resolveAliasFromCandidates(entryName string, sameDigest []string) string {
 	if len(sameDigest) <= 1 {
 		return ""
 	}
-	best := version.SelectBestDisplayTag(entry.Name, sameDigest)
-	if best == "" || strings.EqualFold(best, entry.Name) {
+	pt := version.ParseTag(entryName)
+	if pt.Scheme != version.SchemeUnknown && pt.Precision > 2 {
+		return ""
+	}
+	best := version.SelectBestDisplayTag(entryName, sameDigest)
+	if best == "" || strings.EqualFold(best, entryName) {
 		return ""
 	}
 	bp := version.ParseTag(best)
@@ -1806,6 +2062,7 @@ func (c *Client) fetchDockerHubTagManifest(ctx context.Context, repository, tag,
 }
 
 type dockerHubTagsPayload struct {
+	Count   int    `json:"count"`
 	Next    string `json:"next"`
 	Results []struct {
 		Name        string `json:"name"`
@@ -1833,10 +2090,10 @@ func parseHubTimestamp(raw string) int64 {
 	return 0
 }
 
-func decodeDockerHubTagEntries(body []byte) ([]TagDigestEntry, string, error) {
+func decodeDockerHubTagPage(body []byte) ([]TagDigestEntry, string, int, error) {
 	var payload dockerHubTagsPayload
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
 	out := make([]TagDigestEntry, 0, len(payload.Results))
 	for _, r := range payload.Results {
@@ -1853,7 +2110,33 @@ func decodeDockerHubTagEntries(body []byte) ([]TagDigestEntry, string, error) {
 			UpdatedAt:       parseHubTimestamp(r.LastUpdated),
 		})
 	}
-	return out, payload.Next, nil
+	return out, payload.Next, payload.Count, nil
+}
+
+func decodeDockerHubTagEntries(body []byte) ([]TagDigestEntry, string, error) {
+	items, next, _, err := decodeDockerHubTagPage(body)
+	return items, next, err
+}
+
+func (c *Client) fetchDockerHubSinglePage(ctx context.Context, pageURL string) ([]TagDigestEntry, string, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, pageURL, nil)
+	if err != nil {
+		return nil, "", 0, &RegistryError{Kind: ErrNetwork, Message: i18n.EngineDetail(i18n.MsgRegistryNetwork, "Docker Hub", err.Error())}
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, "", 0, &RegistryError{Kind: ErrNetwork, Message: i18n.EngineDetail(i18n.MsgRegistryNetwork, "Docker Hub", err.Error())}
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", 0, classifyHTTPStatus("Docker Hub", resp.StatusCode)
+	}
+	items, next, count, err := decodeDockerHubTagPage(body)
+	if err != nil {
+		return nil, "", 0, &RegistryError{Kind: ErrRegistry, Message: i18n.EngineDetail(i18n.MsgRegistryParse, "Docker Hub")}
+	}
+	return items, next, count, nil
 }
 
 func (c *Client) fetchDockerHubTags(ctx context.Context, repository string, maxPages int) ([]TagDigestEntry, error) {
@@ -1862,27 +2145,88 @@ func (c *Client) fetchDockerHubTags(ctx context.Context, repository string, maxP
 	var out []TagDigestEntry
 
 	for page := 0; page < maxPages && nextURL != ""; page++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, nextURL, nil)
+		items, next, _, err := c.fetchDockerHubSinglePage(ctx, nextURL)
 		if err != nil {
-			return nil, &RegistryError{Kind: ErrNetwork, Message: i18n.EngineDetail(i18n.MsgRegistryNetwork, "Docker Hub", err.Error())}
-		}
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return nil, &RegistryError{Kind: ErrNetwork, Message: i18n.EngineDetail(i18n.MsgRegistryNetwork, "Docker Hub", err.Error())}
-		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-		_ = resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			return nil, classifyHTTPStatus("Docker Hub", resp.StatusCode)
-		}
-		items, next, err := decodeDockerHubTagEntries(body)
-		if err != nil {
-			return nil, &RegistryError{Kind: ErrRegistry, Message: i18n.EngineDetail(i18n.MsgRegistryParse, "Docker Hub")}
+			return nil, err
 		}
 		out = append(out, items...)
 		nextURL = next
 	}
 	return out, nil
+}
+
+func (c *Client) fetchDockerHubAllTags(ctx context.Context, repository string, maxPages int) ([]TagDigestEntry, error) {
+	if maxPages <= 0 {
+		maxPages = maxModalHubPages
+	}
+	hubBase := c.hubAPIBase()
+	firstURL := fmt.Sprintf("%s/v2/repositories/%s/tags?page_size=100&ordering=last_updated", hubBase, repository)
+	firstItems, nextURL, totalCount, err := c.fetchDockerHubSinglePage(ctx, firstURL)
+	if err != nil {
+		return nil, err
+	}
+	if nextURL == "" || maxPages <= 1 {
+		return firstItems, nil
+	}
+
+	// 若未返回总条数但存在下一页链接，顺序跟随 next 指针
+	if totalCount <= len(firstItems) {
+		out := append([]TagDigestEntry(nil), firstItems...)
+		curNext := nextURL
+		for page := 1; page < maxPages && curNext != ""; page++ {
+			items, nxt, _, pErr := c.fetchDockerHubSinglePage(ctx, curNext)
+			if pErr != nil {
+				break
+			}
+			out = append(out, items...)
+			curNext = nxt
+		}
+		return mergeUniqueTagEntries(out), nil
+	}
+
+	totalPages := (totalCount + 99) / 100
+	if totalPages > maxPages {
+		totalPages = maxPages
+	}
+	if totalPages <= 1 {
+		return firstItems, nil
+	}
+
+	pageBuckets := make([][]TagDigestEntry, totalPages+1)
+	pageBuckets[1] = firstItems
+
+	pCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+
+	sem := make(chan struct{}, hubModalPageConcurrent)
+	var wg sync.WaitGroup
+	for p := 2; p <= totalPages; p++ {
+		if pCtx.Err() != nil {
+			break
+		}
+		acquired := false
+		select {
+		case sem <- struct{}{}:
+			acquired = true
+		case <-pCtx.Done():
+		}
+		if !acquired {
+			break
+		}
+		wg.Add(1)
+		go func(pageNum int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			u := fmt.Sprintf("%s/v2/repositories/%s/tags?page_size=100&ordering=last_updated&page=%d", hubBase, repository, pageNum)
+			items, _, _, pErr := c.fetchDockerHubSinglePage(pCtx, u)
+			if pErr == nil && len(items) > 0 {
+				pageBuckets[pageNum] = items
+			}
+		}(p)
+	}
+	wg.Wait()
+
+	return mergeUniqueTagEntries(pageBuckets[1:]...), nil
 }
 
 func (c *Client) searchDockerHubTagsByNameWithSize(ctx context.Context, repository, query string, pageSize int) ([]TagDigestEntry, error) {

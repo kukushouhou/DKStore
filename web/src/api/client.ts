@@ -428,12 +428,16 @@ export interface ServiceTagItem {
   digest?: string
   prerelease?: boolean
   aliasOf?: string
+  stableVisible?: boolean
+  preVisible?: boolean
+  searchOrder?: number
 }
 
 export interface ServiceTagsResponse {
   items: ServiceTagItem[]
   highestTag?: string
   highestStableTag?: string
+  highestPrereleaseTag?: string
   currentPrerelease?: boolean
   hasTimestamps?: boolean
 }
@@ -441,6 +445,7 @@ export interface ServiceTagsResponse {
 export interface SearchServiceTagsOpts {
   q?: string
   remote?: boolean
+  all?: boolean
   prerelease?: boolean
   sort?: TagSortMode
 }
@@ -830,6 +835,9 @@ export const api = {
     params.set('serviceKey', serviceKey)
     if (opts.q) params.set('q', opts.q)
     params.set('remote', opts.remote ? '1' : '0')
+    if (opts.all) {
+      params.set('all', '1')
+    }
     if (opts.prerelease !== undefined) {
       params.set('prerelease', opts.prerelease ? '1' : '0')
     }

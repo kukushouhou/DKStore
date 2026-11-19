@@ -585,3 +585,113 @@ func TestCheckSessionDeduplicatesBypassCacheAndBearerTokenFlight(t *testing.T) {
 		t.Fatalf("expected exactly 1 /tags/list request in check session even with bypassCache=true, got %d", tagsCalls.Load())
 	}
 }
+
+func TestSearchTagsExFullModalPoolAndConcurrentPages(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	box, _ := secret.LoadOrCreate(dir)
+
+	var hubFail atomic.Bool
+	var srvURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hubFail.Load() {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		if r.URL.Path != "/v2/repositories/louislam/uptime-kuma/tags" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		page := r.URL.Query().Get("page")
+		switch page {
+		case "", "1":
+			_, _ = w.Write([]byte(fmt.Sprintf(`{
+				"count": 122,
+				"next": "%s/v2/repositories/louislam/uptime-kuma/tags?page=2&page_size=100",
+				"results": [
+					{"name":"latest","digest":"sha256:u2512","last_updated":"2026-11-17T15:23:08Z","images":[]},
+					{"name":"beta","digest":"sha256:b1","last_updated":"2026-11-18T10:00:00Z","images":[]},
+					{"name":"3.0.0-beta.1","digest":"sha256:b1","last_updated":"2026-11-18T10:00:00Z","images":[]},
+					{"name":"3.0.0-beta.1-slim","digest":"sha256:b1s","last_updated":"2026-11-18T10:01:00Z","images":[]},
+					{"name":"2.5.12","digest":"sha256:u2512","last_updated":"2026-11-17T15:23:08Z","images":[]},
+					{"name":"2.5.12-slim","digest":"sha256:u2512s","last_updated":"2026-11-17T15:24:00Z","images":[]},
+					{"name":"2.5","digest":"sha256:u2512","last_updated":"2026-11-17T15:23:08Z","images":[]}
+				]
+			}`, srvURL)))
+		case "2":
+			var buf strings.Builder
+			buf.WriteString(`{"count":122,"next":"","results":[`)
+			for i := 1; i <= 55; i++ {
+				if i > 1 {
+					buf.WriteByte(',')
+				}
+				buf.WriteString(fmt.Sprintf(`{"name":"1.23.%d","digest":"sha256:old%d","last_updated":"2025-01-01T00:00:00Z","images":[]}`, i, i))
+			}
+			buf.WriteString(`]}`)
+			_, _ = w.Write([]byte(buf.String()))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	srvURL = srv.URL
+
+	cli := New(st, box)
+	cli.BaseURLOverride = map[string]string{
+		"docker.io":      srv.URL,
+		"hub.docker.com": srv.URL,
+	}
+
+	ref, _ := version.ParseImageRef("louislam/uptime-kuma:2.5.11")
+	res, err := cli.SearchTagsEx(ctx, ref, SearchOptions{All: true, Remote: true})
+	if err != nil {
+		t.Fatalf("SearchTagsEx All=true failed: %v", err)
+	}
+	// 全量标签（7 + 55 = 62 > 50）全部返回，绝不丢弃 -slim / 2.5 / beta，也不截断 50 条
+	if len(res.Items) != 62 {
+		t.Fatalf("expected full 62 items without 50-item truncation or variant dropping, got %d", len(res.Items))
+	}
+	if res.HighestStableTag != "2.5.12" || res.HighestPrereleaseTag != "3.0.0-beta.1" {
+		t.Fatalf("unexpected highest tags: stable=%q pre=%q", res.HighestStableTag, res.HighestPrereleaseTag)
+	}
+
+	var stableList, preList []string
+	hasSlim := false
+	hasShort := false
+	for _, it := range res.Items {
+		if it.Name == "2.5.12-slim" {
+			hasSlim = true
+		}
+		if it.Name == "2.5" && it.AliasOf == "2.5.12" {
+			hasShort = true
+		}
+		if it.StableVisible {
+			stableList = append(stableList, it.Name)
+		}
+		if it.PreVisible {
+			preList = append(preList, it.Name)
+		}
+	}
+	if !hasSlim || !hasShort {
+		t.Fatalf("expected variant 2.5.12-slim and floating 2.5(2.5.12) preserved in full pool: hasSlim=%v hasShort=%v", hasSlim, hasShort)
+	}
+	if len(stableList) < 3 || stableList[0] != "latest" || stableList[1] != "2.5.12" {
+		t.Fatalf("unexpected stableVisible head: %v", stableList[:minInt(5, len(stableList))])
+	}
+	if len(preList) < 4 || preList[0] != "latest" || preList[1] != "beta" || preList[2] != "3.0.0-beta.1" || preList[3] != "2.5.12" {
+		t.Fatalf("unexpected preVisible head: %v", preList[:minInt(5, len(preList))])
+	}
+
+	// 网络异常时自动回退本地已缓存的全量标签池
+	hubFail.Store(true)
+	resFallback, err := cli.SearchTagsEx(ctx, ref, SearchOptions{All: true, Remote: true})
+	if err != nil || len(resFallback.Items) != 62 {
+		t.Fatalf("expected fallback to full cached 62 items on 429, got err=%v len=%d", err, len(resFallback.Items))
+	}
+}

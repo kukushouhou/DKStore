@@ -786,6 +786,8 @@ func (s *Server) handleSearchServiceTags(w http.ResponseWriter, r *http.Request)
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	remoteParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("remote")))
 	remote := remoteParam == "1" || remoteParam == "true"
+	allParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("all")))
+	all := allParam == "1" || allParam == "true"
 	sortBy := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort")))
 
 	var includePrePtr *bool
@@ -801,6 +803,7 @@ func (s *Server) handleSearchServiceTags(w http.ResponseWriter, r *http.Request)
 	res, err := s.d.Reg.SearchTagsEx(r.Context(), ref, registry.SearchOptions{
 		Query:             q,
 		Remote:            remote,
+		All:               all,
 		IncludePrerelease: includePrePtr,
 		SortBy:            sortBy,
 	})
@@ -810,28 +813,35 @@ func (s *Server) handleSearchServiceTags(w http.ResponseWriter, r *http.Request)
 	}
 
 	type tagItem struct {
-		Tag        string `json:"tag"`
-		UpdatedAt  int64  `json:"updatedAt,omitempty"`
-		Digest     string `json:"digest,omitempty"`
-		Prerelease bool   `json:"prerelease,omitempty"`
-		AliasOf    string `json:"aliasOf,omitempty"`
+		Tag           string `json:"tag"`
+		UpdatedAt     int64  `json:"updatedAt,omitempty"`
+		Digest        string `json:"digest,omitempty"`
+		Prerelease    bool   `json:"prerelease,omitempty"`
+		AliasOf       string `json:"aliasOf,omitempty"`
+		StableVisible bool   `json:"stableVisible,omitempty"`
+		PreVisible    bool   `json:"preVisible,omitempty"`
+		SearchOrder   int    `json:"searchOrder"`
 	}
 	out := make([]tagItem, 0, len(res.Items))
 	for _, e := range res.Items {
 		out = append(out, tagItem{
-			Tag:        e.Name,
-			UpdatedAt:  e.UpdatedAt,
-			Digest:     e.RepoDigest,
-			Prerelease: e.Prerelease,
-			AliasOf:    e.AliasOf,
+			Tag:           e.Name,
+			UpdatedAt:     e.UpdatedAt,
+			Digest:        e.RepoDigest,
+			Prerelease:    e.Prerelease,
+			AliasOf:       e.AliasOf,
+			StableVisible: e.StableVisible,
+			PreVisible:    e.PreVisible,
+			SearchOrder:   e.SearchOrder,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"items":             out,
-		"highestTag":        res.HighestTag,
-		"highestStableTag":  res.HighestStableTag,
-		"currentPrerelease": res.CurrentPrerelease,
-		"hasTimestamps":     res.HasTimestamps,
+		"items":                out,
+		"highestTag":           res.HighestTag,
+		"highestStableTag":     res.HighestStableTag,
+		"highestPrereleaseTag": res.HighestPrereleaseTag,
+		"currentPrerelease":    res.CurrentPrerelease,
+		"hasTimestamps":        res.HasTimestamps,
 	})
 }
 
