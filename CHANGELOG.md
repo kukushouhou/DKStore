@@ -6,6 +6,22 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+## [v0.7.1] - 2026-11-19
+
+### 新功能
+- **批量检查更新加速与按钮进度**：首页检查更新与多设备扫描由逐个排队改为并发执行——不同镜像仓库并行请求、互不阻塞，单个仓库独立控制并发上限以避免触发限流，同一轮检查内自动复用相同仓库的标签列表、镜像信息与鉴权令牌，并将非 Docker Hub 仓库的候选版本号反查改为并发探测；同时为右上角「正在检查…」按钮加入内嵌实时进度条，鼠标悬停时弹出气泡显示具体完成数量与百分比 ([`fd263b8`](https://github.com/kukushouhou/DKStore/commit/fd263b8), [`5d45078`](https://github.com/kukushouhou/DKStore/commit/5d45078))
+
+### 问题修复
+- **版本选择预发布开关与标签搜索修复**：打开选择版本弹窗时直接并发拉取仓库完整最新标签列表（不再提前过滤丢弃预发布版、变体后缀或截断 50 条），将「预发布」开关、「按版本号 / 按更新时间」排序与版本号搜索统一改为基于本地完整标签列表即时筛选，无需重复请求后端，修复开启预发布后被后台旧请求结果覆盖闪回的问题 ([`0de4504`](https://github.com/kukushouhou/DKStore/commit/0de4504))
+
+---
+
+### Features
+- **Concurrent Update Checks & Progress Button**: Parallelized batch update checks and multi-device discovery so different image registries are queried concurrently without blocking each other while enforcing per-registry concurrency limits to avoid rate limiting, deduplicating same-repository tag lists, manifests, and auth token requests within each check run and parallelizing candidate tag HEAD lookups on non-Docker Hub registries; added an inline progress bar to the `Checking…` button with a hover tooltip showing the exact completed count and percentage ([`fd263b8`](https://github.com/kukushouhou/DKStore/commit/fd263b8), [`5d45078`](https://github.com/kukushouhou/DKStore/commit/5d45078))
+
+### Fixes
+- **Version Picker Pre-release Toggle & Tag Search Fix**: Fetches the complete latest repository tag list concurrently when opening the version picker modal instead of pre-discarding filtered items or truncating to 50 tags, unifying the `Pre-release` toggle, `By Version / By Time` sorting, and tag search into instant client-side filtering without extra backend requests and fixing the pre-release list flashing back to stable tags ([`0de4504`](https://github.com/kukushouhou/DKStore/commit/0de4504))
+
 ## [v0.7.0] - 2026-11-18
 
 ### 新功能
