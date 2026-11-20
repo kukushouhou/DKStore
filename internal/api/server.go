@@ -119,6 +119,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/hosts/{id}/mirrors", s.requireAuth(s.handleGetHostMirrors))
 	mux.HandleFunc("PUT /api/v1/hosts/{id}/mirrors", s.requireAuth(s.handleSaveHostMirrors))
 	mux.HandleFunc("POST /api/v1/hosts/{id}/mirrors/test", s.requireAuth(s.handleTestHostMirrors))
+	mux.HandleFunc("GET /api/v1/hosts/{id}/mirrors/search", s.requireAuth(s.handleSearchHostMirrorRepos))
 	mux.HandleFunc("POST /api/v1/hosts/test", s.requireAuth(s.handleTestHost))
 	mux.HandleFunc("POST /api/v1/hosts/keygen", s.requireAuth(s.handleKeygen))
 
@@ -617,7 +618,14 @@ func (s *Server) handleGetHostMirrors(w http.ResponseWriter, r *http.Request) {
 		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeErr(lang, err))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"pairs": pairs})
+	localContainers := s.d.Hosts.ListHostMirrorContainers(r.Context(), id)
+	if localContainers == nil {
+		localContainers = []platform.HostMirrorContainerItem{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"pairs":           pairs,
+		"localContainers": localContainers,
+	})
 }
 
 func (s *Server) handleSaveHostMirrors(w http.ResponseWriter, r *http.Request) {
@@ -643,16 +651,29 @@ func (s *Server) handleTestHostMirrors(w http.ResponseWriter, r *http.Request) {
 	lang := s.langOf(r)
 	id := strings.TrimSpace(r.PathValue("id"))
 	var body struct {
-		URLs []string `json:"urls"`
+		Source      string   `json:"source"`
+		URLs        []string `json:"urls"`
+		TargetImage string   `json:"targetImage"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	items, err := s.d.Hosts.TestHostMirrors(r.Context(), id, body.URLs, lang)
+	items, err := s.d.Hosts.TestHostMirrors(r.Context(), id, body.Source, body.URLs, body.TargetImage, lang)
 	if err != nil {
 		writeError(w, lang, http.StatusBadRequest, "bad_request", i18n.LocalizeErr(lang, err))
 		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleSearchHostMirrorRepos(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	source := strings.TrimSpace(r.URL.Query().Get("source"))
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	items := s.d.Hosts.SearchRegistryRepositories(r.Context(), id, source, q)
+	if items == nil {
+		items = []string{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }

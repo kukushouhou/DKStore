@@ -3,12 +3,17 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/url"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/kukushouhou/DKStore/internal/i18n"
 	"github.com/kukushouhou/DKStore/internal/platform"
 	"github.com/kukushouhou/DKStore/internal/platform/docker"
+	"github.com/kukushouhou/DKStore/internal/transport"
 )
 
 func countMirrorURLs(pairs []platform.MirrorPair) int {
@@ -233,8 +238,148 @@ func (r *Registry) SaveHostMirrors(ctx context.Context, hostID string, pairs []p
 	return normalized, nil
 }
 
-// TestHostMirrors 从指定目标设备发起各加速镜像网址的连通与延迟实测。
-func (r *Registry) TestHostMirrors(ctx context.Context, hostID string, urls []string, lang i18n.Lang) ([]platform.MirrorTestItem, error) {
+// ListHostMirrorContainers 提取指定设备上现有容器的源仓库域名与镜像路径，供镜像源测速抽检与指定验证使用。
+func (r *Registry) ListHostMirrorContainers(ctx context.Context, hostID string) []platform.HostMirrorContainerItem {
+	if r == nil || strings.TrimSpace(hostID) == "" {
+		return nil
+	}
+	apps, err := r.ListCachedRuntimeContainers(ctx, hostID)
+	if err != nil || len(apps) == 0 {
+		lCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		apps, _ = r.ListRuntimeContainers(lCtx, hostID, false)
+		cancel()
+	}
+	var out []platform.HostMirrorContainerItem
+	seen := make(map[string]bool)
+	for _, app := range apps {
+		for _, c := range app.Containers {
+			rawImg := strings.TrimSpace(c.Image)
+			if rawImg == "" || strings.HasPrefix(rawImg, "sha256:") {
+				continue
+			}
+			src, repoPath, tag := docker.SplitImageRegistryAndRepoPath(rawImg)
+			if src == "" || repoPath == "" {
+				continue
+			}
+			fullImg := repoPath + ":" + tag
+			key := src + "|" + fullImg
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			name := strings.TrimSpace(c.Name)
+			if name == "" {
+				name = strings.TrimSpace(app.Name)
+			}
+			if name == "" {
+				parts := strings.Split(repoPath, "/")
+				name = parts[len(parts)-1]
+			}
+			out = append(out, platform.HostMirrorContainerItem{
+				Name:   name,
+				Source: src,
+				Image:  fullImg,
+			})
+		}
+	}
+	// 优先把非 library/* 的第三方业务容器排在前面，更容易直接测出第三方白名单源的覆盖限制
+	sort.SliceStable(out, func(i, j int) bool {
+		iLib := strings.HasPrefix(out[i].Image, "library/")
+		jLib := strings.HasPrefix(out[j].Image, "library/")
+		if iLib != jLib {
+			return !iLib
+		}
+		return false
+	})
+	return out
+}
+
+func parseProbeCandidateForSource(source, rawTarget string) platform.MirrorProbeCandidate {
+	s := strings.TrimSpace(rawTarget)
+	if s == "" {
+		return platform.MirrorProbeCandidate{}
+	}
+	if at := strings.IndexByte(s, '@'); at >= 0 {
+		s = s[:at]
+	}
+	tag := "latest"
+	lastSlash := strings.LastIndexByte(s, '/')
+	lastColon := strings.LastIndexByte(s, ':')
+	if lastColon > lastSlash {
+		tag = strings.TrimSpace(s[lastColon+1:])
+		s = strings.TrimSpace(s[:lastColon])
+		if tag == "" {
+			tag = "latest"
+		}
+	}
+	s = strings.Trim(s, "/")
+	if s == "" {
+		return platform.MirrorProbeCandidate{}
+	}
+
+	first, rest, hasSlash := strings.Cut(s, "/")
+	if hasSlash {
+		normFirst := docker.NormalizeRegistrySource(first)
+		if normFirst == source || (source == "docker.io" && (first == "index.docker.io" || first == "registry-1.docker.io" || first == "docker.io")) {
+			s = rest
+		}
+	}
+	if source == "docker.io" && !strings.Contains(s, "/") {
+		s = "library/" + s
+	}
+	return platform.MirrorProbeCandidate{
+		RepoPath: s,
+		Tag:      tag,
+	}
+}
+
+// TestHostMirrors 从指定目标设备发起各加速镜像网址的连通、镜像拉取与延迟验证。
+func (r *Registry) TestHostMirrors(
+	ctx context.Context,
+	hostID string,
+	source string,
+	urls []string,
+	targetImage string,
+	lang i18n.Lang,
+) ([]platform.MirrorTestItem, error) {
+	normSource := docker.NormalizeRegistrySource(source)
+	if normSource == "" {
+		normSource = "docker.io"
+	}
+
+	probeReq := platform.MirrorProbeRequest{
+		Source: normSource,
+		URLs:   urls,
+	}
+	if strings.TrimSpace(targetImage) != "" {
+		if cand := parseProbeCandidateForSource(normSource, targetImage); cand.RepoPath != "" {
+			probeReq.Candidates = []platform.MirrorProbeCandidate{cand}
+			probeReq.HasSpecificApp = true
+		}
+	} else {
+		locals := r.ListHostMirrorContainers(ctx, hostID)
+		for _, c := range locals {
+			if c.Source != normSource {
+				continue
+			}
+			if cand := parseProbeCandidateForSource(normSource, c.Image); cand.RepoPath != "" {
+				probeReq.Candidates = append(probeReq.Candidates, cand)
+				if len(probeReq.Candidates) >= 3 {
+					break
+				}
+			}
+		}
+		if len(probeReq.Candidates) > 0 {
+			probeReq.HasSpecificApp = true
+		} else if normSource == "docker.io" {
+			probeReq.Candidates = []platform.MirrorProbeCandidate{
+				{RepoPath: "library/alpine", Tag: "latest"},
+				{RepoPath: "library/busybox", Tag: "latest"},
+			}
+			probeReq.HasSpecificApp = false
+		}
+	}
+
 	ad, _, err := r.OpenAdapter(ctx, hostID)
 	if err != nil {
 		return nil, err
@@ -245,7 +390,7 @@ func (r *Registry) TestHostMirrors(ctx context.Context, hostID string, urls []st
 	if !ok {
 		return nil, nil
 	}
-	items, err := mAd.TestMirrorURLs(ctx, urls)
+	items, err := mAd.TestMirrorURLs(ctx, probeReq)
 	if err != nil {
 		return nil, err
 	}
@@ -255,4 +400,112 @@ func (r *Registry) TestHostMirrors(ctx context.Context, hostID string, urls []st
 		}
 	}
 	return items, nil
+}
+
+type hostHTTPClientAdapter interface {
+	NewHostHTTPClient(ctx context.Context) (*http.Client, func())
+}
+
+// SearchRegistryRepositories 调用公开仓库官方搜索接口查询匹配镜像名（仅支持官方开放公开搜索的 docker.io 与 quay.io）。
+func (r *Registry) SearchRegistryRepositories(ctx context.Context, hostID, source, query string) []string {
+	normSource := docker.NormalizeRegistrySource(source)
+	q := strings.TrimSpace(query)
+	if q == "" || (normSource != "docker.io" && normSource != "quay.io") {
+		return nil
+	}
+
+	sCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+
+	trySearch := func(hc *http.Client) ([]string, bool) {
+		switch normSource {
+		case "docker.io":
+			u := "https://hub.docker.com/v2/search/repositories/?page_size=8&query=" + url.QueryEscape(q)
+			req, err := http.NewRequestWithContext(sCtx, http.MethodGet, u, nil)
+			if err != nil {
+				return nil, false
+			}
+			resp, err := hc.Do(req)
+			if err != nil {
+				return nil, false
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return nil, false
+			}
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 128<<10))
+			var parsed struct {
+				Results []struct {
+					RepoName string `json:"repo_name"`
+				} `json:"results"`
+			}
+			if json.Unmarshal(body, &parsed) != nil {
+				return nil, false
+			}
+			var out []string
+			for _, item := range parsed.Results {
+				if rn := strings.TrimSpace(item.RepoName); rn != "" {
+					out = append(out, rn)
+				}
+			}
+			return out, true
+		case "quay.io":
+			u := "https://quay.io/api/v1/find/repositories?query=" + url.QueryEscape(q)
+			req, err := http.NewRequestWithContext(sCtx, http.MethodGet, u, nil)
+			if err != nil {
+				return nil, false
+			}
+			resp, err := hc.Do(req)
+			if err != nil {
+				return nil, false
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return nil, false
+			}
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 128<<10))
+			var parsed struct {
+				Results []struct {
+					Namespace struct {
+						Name string `json:"name"`
+					} `json:"namespace"`
+					Name string `json:"name"`
+				} `json:"results"`
+			}
+			if json.Unmarshal(body, &parsed) != nil {
+				return nil, false
+			}
+			var out []string
+			for _, item := range parsed.Results {
+				ns := strings.TrimSpace(item.Namespace.Name)
+				nm := strings.TrimSpace(item.Name)
+				if ns != "" && nm != "" {
+					out = append(out, ns+"/"+nm)
+				}
+				if len(out) >= 8 {
+					break
+				}
+			}
+			return out, true
+		}
+		return nil, false
+	}
+
+	if strings.TrimSpace(hostID) != "" {
+		if ad, _, err := r.OpenAdapter(sCtx, hostID); err == nil {
+			defer ad.Close()
+			if hAd, ok := ad.(hostHTTPClientAdapter); ok {
+				hc, cleanup := hAd.NewHostHTTPClient(sCtx)
+				defer cleanup()
+				if res, ok := trySearch(hc); ok {
+					return res
+				}
+			}
+		}
+	}
+
+	hc, cleanup := transport.DefaultMirrorHTTPClient()
+	defer cleanup()
+	res, _ := trySearch(hc)
+	return res
 }

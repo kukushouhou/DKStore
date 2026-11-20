@@ -291,11 +291,21 @@ func equalStringSlices(a, b []string) bool {
 	return true
 }
 
-// TestMirrorURLs 在目标 Docker 宿主机本机并发探测加速镜像网址的连通性与响应耗时。
-func (a *Adapter) TestMirrorURLs(ctx context.Context, urls []string) ([]platform.MirrorTestItem, error) {
-	cleaned := make([]string, 0, len(urls))
-	seen := make(map[string]bool, len(urls))
-	for _, raw := range urls {
+// NewHostHTTPClient 返回经由当前适配器底层传输通道（本机或远端 SSH 宿主机代理环境）发起请求的 HTTP 客户端。
+func (a *Adapter) NewHostHTTPClient(ctx context.Context) (*http.Client, func()) {
+	if a != nil && a.tr != nil {
+		if mcTr, ok := a.tr.(transport.MirrorConfigTransport); ok {
+			return mcTr.NewHostHTTPClient(ctx)
+		}
+	}
+	return transport.DefaultMirrorHTTPClient()
+}
+
+// RunMirrorProbeBatch 并发执行一组加速网址的连通与镜像拉取验证，并在自动多候选模式下处理旧标签 404 顺延与跨源存在性交叉复核。
+func RunMirrorProbeBatch(ctx context.Context, hc *http.Client, req platform.MirrorProbeRequest) []platform.MirrorTestItem {
+	cleaned := make([]string, 0, len(req.URLs))
+	seen := make(map[string]bool, len(req.URLs))
+	for _, raw := range req.URLs {
 		u := NormalizeMirrorURL(raw)
 		if u != "" && !seen[u] {
 			seen[u] = true
@@ -304,10 +314,18 @@ func (a *Adapter) TestMirrorURLs(ctx context.Context, urls []string) ([]platform
 	}
 	out := make([]platform.MirrorTestItem, len(cleaned))
 	if len(cleaned) == 0 {
-		return out, nil
+		return out
 	}
 
-	mcTr, hasHostProbe := a.tr.(transport.MirrorConfigTransport)
+	source := NormalizeRegistrySource(req.Source)
+	if source == "" {
+		source = "docker.io"
+	}
+	candidates := req.Candidates
+	if len(candidates) == 0 {
+		candidates = []platform.MirrorProbeCandidate{{}}
+	}
+
 	sem := make(chan struct{}, 4)
 	var wg sync.WaitGroup
 	for i, u := range cleaned {
@@ -316,24 +334,46 @@ func (a *Adapter) TestMirrorURLs(ctx context.Context, urls []string) ([]platform
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			var ok bool
-			var ms int64
-			var rawErr string
-			if hasHostProbe {
-				ok, ms, rawErr = mcTr.ProbeMirrorURLFromHost(ctx, targetURL)
-			} else {
-				ok, ms, rawErr = transport.ProbeMirrorViaGoHTTP(ctx, targetURL)
+
+			var lastItem platform.MirrorTestItem
+			for cIdx, cand := range candidates {
+				lastItem = transport.ProbeMirrorPullWithClient(ctx, hc, targetURL, source, cand, req.HasSpecificApp)
+				// 仅当存在多个自动候选镜像且当前返回 404（可能旧标签已下架）时，自动顺延测试下一个候选镜像
+				if lastItem.Status == "not_found" && cIdx+1 < len(candidates) {
+					continue
+				}
+				break
 			}
-			out[idx] = platform.MirrorTestItem{
-				URL:       targetURL,
-				OK:        ok,
-				LatencyMs: ms,
-				Error:     rawErr,
-			}
+			out[idx] = lastItem
 		}(i, u)
 	}
 	wg.Wait()
-	return out, nil
+
+	// 交叉复核：若同批次已有其他加速源成功拉取了同一镜像，说明该镜像真实存在，则将返回 404 的加速源准确归类为「该源未收录」(restricted)
+	confirmedExists := make(map[string]bool)
+	for _, it := range out {
+		if it.OK && it.TestedImage != "" {
+			confirmedExists[it.TestedImage] = true
+		}
+	}
+	for i := range out {
+		if out[i].Status == "not_found" && confirmedExists[out[i].TestedImage] {
+			out[i].Status = "restricted"
+		}
+	}
+	return out
+}
+
+// TestMirrorURLs 在目标 Docker 宿主机网络环境下并发验证各加速镜像网址的连通与真实拉取能力。
+func (a *Adapter) TestMirrorURLs(ctx context.Context, req platform.MirrorProbeRequest) ([]platform.MirrorTestItem, error) {
+	hc, cleanup := a.NewHostHTTPClient(ctx)
+	defer cleanup()
+	return RunMirrorProbeBatch(ctx, hc, req), nil
+}
+
+// SplitImageRegistryAndRepoPath 拆分镜像引用的源仓库域名（默认 docker.io）、仓库路径与标签。
+func SplitImageRegistryAndRepoPath(imageRef string) (regHost, repoPath, tag string) {
+	return splitImageRegistryAndRepoPath(imageRef)
 }
 
 // splitImageRegistryAndRepoPath 拆分镜像引用的源仓库域名（默认 docker.io）、仓库路径与标签。

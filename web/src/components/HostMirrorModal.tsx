@@ -1,14 +1,14 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   AutoComplete,
   Button,
   Checkbox,
-  Col,
   Flex,
   Grid,
   Input,
   Modal,
-  Row,
+  Popover,
+  Space,
   Spin,
   Tooltip,
   Typography,
@@ -17,8 +17,9 @@ import {
 } from 'antd'
 import {
   ArrowUpOutlined,
-  CheckCircleFilled,
-  CloseCircleFilled,
+  CloseOutlined,
+  DownOutlined,
+  ExclamationCircleFilled,
   PlusOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
@@ -27,6 +28,7 @@ import {
   api,
   showApiError,
   type HostItem,
+  type HostMirrorContainerItem,
   type MirrorPair,
   type MirrorTestItem,
 } from '../api/client'
@@ -41,7 +43,10 @@ interface UrlRowState {
 interface PairRowState {
   key: string
   source: string
+  selectedTarget: string
+  testing: boolean
   urls: UrlRowState[]
+  testMap: Record<string, MirrorTestItem>
 }
 
 let rowSeq = 1
@@ -76,6 +81,17 @@ function normalizeMirrorUrl(raw: string): string {
   return `https://${s}`
 }
 
+function normalizeCustomTargetImage(raw: string): string {
+  const s = raw.trim().replace(/^\/+|\/+$/g, '')
+  if (!s) return ''
+  const lastSlash = s.lastIndexOf('/')
+  const lastColon = s.lastIndexOf(':')
+  if (lastColon > lastSlash) {
+    return s
+  }
+  return `${s}:latest`
+}
+
 function sameStringArray(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false
   for (let i = 0; i < a.length; i += 1) {
@@ -94,7 +110,7 @@ export default function HostMirrorModal() {
       open={Boolean(hostId)}
       onCancel={() => setActiveMirrorHostId(null)}
       footer={null}
-      width={screens.md ? 760 : '96vw'}
+      width={screens.md ? 720 : '96vw'}
       destroyOnHidden
       title={null}
       closable={false}
@@ -120,6 +136,7 @@ function HostMirrorModalBody({
 }) {
   const { locale, t } = useI18n()
   const { token } = theme.useToken()
+  const screens = Grid.useBreakpoint()
   const qc = useQueryClient()
   const [modal, modalContextHolder] = Modal.useModal()
 
@@ -139,12 +156,27 @@ function HostMirrorModalBody({
 
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [testing, setTesting] = useState(false)
   const [rows, setRows] = useState<PairRowState[]>([])
+  const [localContainers, setLocalContainers] = useState<HostMirrorContainerItem[]>([])
   const [initialDockerHubUrls, setInitialDockerHubUrls] = useState<string[]>([])
-  const [testMap, setTestMap] = useState<Record<string, MirrorTestItem>>({})
   const [alsoApply, setAlsoApply] = useState(false)
   const [selectedPeerIds, setSelectedPeerIds] = useState<string[]>([])
+
+  // 右上角「▾」弹出菜单状态
+  const [openMenuKey, setOpenMenuKey] = useState<string | null>(null)
+  const [searchKeyword, setSearchKeyword] = useState('')
+  const [remoteSearchItems, setRemoteSearchItems] = useState<string[]>([])
+  const [searchingRemote, setSearchingRemote] = useState(false)
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const searchSeqRef = useRef(0)
+
+  useEffect(() => {
+    return () => {
+      if (searchTimerRef.current) {
+        clearTimeout(searchTimerRef.current)
+      }
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -159,10 +191,14 @@ function HostMirrorModalBody({
         setInitialDockerHubUrls(
           (hubPair?.urls ?? []).map(normalizeMirrorUrl).filter(Boolean),
         )
+        setLocalContainers(res.localContainers ?? [])
         setRows(
           pairs.map((p) => ({
             key: nextKey('pair'),
             source: p.source || 'docker.io',
+            selectedTarget: '',
+            testing: false,
+            testMap: {},
             urls:
               p.urls && p.urls.length > 0
                 ? p.urls.map((u) => ({ key: nextKey('url'), url: u }))
@@ -177,6 +213,9 @@ function HostMirrorModalBody({
             {
               key: nextKey('pair'),
               source: 'docker.io',
+              selectedTarget: '',
+              testing: false,
+              testMap: {},
               urls: [{ key: nextKey('url'), url: '' }],
             },
           ])
@@ -244,45 +283,118 @@ function HostMirrorModalBody({
     return out
   }
 
-  const handleTestAll = async () => {
-    const allUrls: string[] = []
-    for (const r of rows) {
-      for (const u of r.urls) {
-        const cleaned = normalizeMirrorUrl(u.url)
-        if (cleaned && !allUrls.includes(cleaned)) {
-          allUrls.push(cleaned)
-        }
+  const handleTestPair = async (pairIdx: number, overrideTarget?: string) => {
+    const pair = rows[pairIdx]
+    if (!pair) return
+    const normSrc = normalizeSourceDomain(pair.source) || 'docker.io'
+    const pairUrls: string[] = []
+    for (const u of pair.urls) {
+      const cleaned = normalizeMirrorUrl(u.url)
+      if (cleaned && !pairUrls.includes(cleaned)) {
+        pairUrls.push(cleaned)
       }
     }
-    if (allUrls.length === 0) {
+    if (pairUrls.length === 0) {
       message.warning(t.hosts.mirrorTestEmptyMsg)
       return
     }
-    // 先将规范化后的 URL 回填展示
+
+    const effectiveTarget =
+      overrideTarget !== undefined ? overrideTarget : pair.selectedTarget
+    const targetKey = pair.key
+
     setRows((prev) =>
-      prev.map((r) => ({
-        ...r,
-        source: normalizeSourceDomain(r.source) || r.source,
-        urls: r.urls.map((u) => ({
-          ...u,
-          url: u.url.trim() ? normalizeMirrorUrl(u.url) : '',
-        })),
-      })),
+      prev.map((item) =>
+        item.key === targetKey
+          ? {
+              ...item,
+              source: normSrc,
+              selectedTarget: effectiveTarget,
+              testing: true,
+              urls: item.urls.map((u) => ({
+                ...u,
+                url: u.url.trim() ? normalizeMirrorUrl(u.url) : '',
+              })),
+            }
+          : item,
+      ),
     )
-    setTesting(true)
+
     try {
-      const res = await api.testHostMirrors(hostId, allUrls)
+      const res = await api.testHostMirrors(hostId, normSrc, pairUrls, effectiveTarget)
       const nextMap: Record<string, MirrorTestItem> = {}
-      for (const item of res.items ?? []) {
-        nextMap[normalizeMirrorUrl(item.url)] = item
+      for (const it of res.items ?? []) {
+        nextMap[normalizeMirrorUrl(it.url)] = it
       }
-      setTestMap(nextMap)
+      setRows((prev) =>
+        prev.map((item) =>
+          item.key === targetKey
+            ? { ...item, testing: false, testMap: nextMap }
+            : item,
+        ),
+      )
       message.success(t.hosts.mirrorTestDoneMsg)
     } catch (e) {
+      setRows((prev) =>
+        prev.map((item) =>
+          item.key === targetKey ? { ...item, testing: false } : item,
+        ),
+      )
       showApiError(e)
-    } finally {
-      setTesting(false)
     }
+  }
+
+  const handleMenuOpenChange = (pairKey: string, nextOpen: boolean) => {
+    if (searchTimerRef.current) {
+      clearTimeout(searchTimerRef.current)
+      searchTimerRef.current = null
+    }
+    searchSeqRef.current += 1
+    setSearchingRemote(false)
+    setRemoteSearchItems([])
+    setSearchKeyword('')
+    setOpenMenuKey(nextOpen ? pairKey : null)
+  }
+
+  const handleSearchInputChange = (val: string, rawSource: string) => {
+    setSearchKeyword(val)
+    if (searchTimerRef.current) {
+      clearTimeout(searchTimerRef.current)
+      searchTimerRef.current = null
+    }
+    const q = val.trim()
+    const normSrc = normalizeSourceDomain(rawSource) || 'docker.io'
+    if (q.length < 2 || (normSrc !== 'docker.io' && normSrc !== 'quay.io')) {
+      setSearchingRemote(false)
+      setRemoteSearchItems([])
+      return
+    }
+    setSearchingRemote(true)
+    const seq = ++searchSeqRef.current
+    searchTimerRef.current = setTimeout(() => {
+      api
+        .searchHostMirrorRepos(hostId, normSrc, q)
+        .then((res) => {
+          if (searchSeqRef.current !== seq) return
+          setRemoteSearchItems(res.items ?? [])
+        })
+        .catch(() => {
+          if (searchSeqRef.current !== seq) return
+          setRemoteSearchItems([])
+        })
+        .finally(() => {
+          if (searchSeqRef.current === seq) {
+            setSearchingRemote(false)
+          }
+        })
+    }, 260)
+  }
+
+  const pickTargetAndTest = (pairIdx: number, targetImg: string) => {
+    setOpenMenuKey(null)
+    setSearchKeyword('')
+    setRemoteSearchItems([])
+    void handleTestPair(pairIdx, targetImg)
   }
 
   const executeSave = async (pairs: MirrorPair[], applyPeerIds: string[]) => {
@@ -344,7 +456,11 @@ function HostMirrorModalBody({
 
   const updateRowSource = (pairIdx: number, val: string) => {
     setRows((prev) =>
-      prev.map((item, idx) => (idx === pairIdx ? { ...item, source: val } : item)),
+      prev.map((item, idx) =>
+        idx === pairIdx
+          ? { ...item, source: val, selectedTarget: '', testMap: {} }
+          : item,
+      ),
     )
   }
 
@@ -454,6 +570,9 @@ function HostMirrorModalBody({
       {
         key: nextKey('pair'),
         source: '',
+        selectedTarget: '',
+        testing: false,
+        testMap: {},
         urls: [{ key: nextKey('url'), url: '' }],
       },
     ])
@@ -461,6 +580,314 @@ function HostMirrorModalBody({
 
   const removePair = (pairIdx: number) => {
     setRows((prev) => prev.filter((_, idx) => idx !== pairIdx))
+  }
+
+  const renderTargetPopover = (pair: PairRowState, pairIdx: number) => {
+    const normSrc = normalizeSourceDomain(pair.source) || 'docker.io'
+    const pairLocals = localContainers.filter((c) => c.source === normSrc)
+    const q = searchKeyword.trim().toLowerCase()
+    const isAuto = !pair.selectedTarget
+
+    let defaultTagText = t.hosts.mirrorTagPingOnly
+    let defaultTagIsWarn = true
+    if (pairLocals.length > 0) {
+      defaultTagText = t.hosts.mirrorTagSample.replace('{name}', pairLocals[0].name)
+      defaultTagIsWarn = false
+    } else if (normSrc === 'docker.io') {
+      defaultTagText = t.hosts.mirrorTagBasicImage
+      defaultTagIsWarn = true
+    }
+
+    const matchedLocals = q
+      ? pairLocals.filter(
+          (c) =>
+            c.name.toLowerCase().includes(q) || c.image.toLowerCase().includes(q),
+        )
+      : pairLocals
+
+    const customCandidate = q ? normalizeCustomTargetImage(searchKeyword) : ''
+    const hasExactRemote = remoteSearchItems.some(
+      (r) => `${r}:latest`.toLowerCase() === customCandidate.toLowerCase(),
+    )
+
+    const optionRowStyle = (active: boolean): React.CSSProperties => ({
+      width: '100%',
+      textAlign: 'left',
+      border: 'none',
+      borderRadius: token.borderRadius,
+      padding: '7px 10px',
+      cursor: 'pointer',
+      background: active ? token.controlItemBgActive : 'transparent',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      gap: 8,
+    })
+
+    return (
+      <Flex vertical gap={8} style={{ width: '100%' }}>
+        {/* 顶部淡橙色微提示卡：明确说明第三方镜像源可能未全量同步 */}
+        <Flex
+          align="flex-start"
+          gap={8}
+          style={{
+            background: token.colorWarningBg,
+            border: `1px solid ${token.colorWarningBorder}`,
+            borderRadius: token.borderRadius,
+            padding: '8px 10px',
+          }}
+        >
+          <ExclamationCircleFilled
+            style={{ color: token.colorWarning, marginTop: 3, flexShrink: 0 }}
+          />
+          <div style={{ lineHeight: 1.45, fontSize: 12 }}>
+            <div style={{ fontWeight: 600, color: token.colorText }}>
+              {t.hosts.mirrorNoticeTitle}
+            </div>
+            <div style={{ color: token.colorTextSecondary, marginTop: 2 }}>
+              {t.hosts.mirrorNoticeDesc}
+            </div>
+          </div>
+        </Flex>
+
+        <Input
+          size="small"
+          allowClear
+          value={searchKeyword}
+          onChange={(e) => handleSearchInputChange(e.target.value, pair.source)}
+          onPressEnter={() => {
+            if (customCandidate) {
+              pickTargetAndTest(pairIdx, customCandidate)
+            }
+          }}
+          placeholder={t.hosts.mirrorSearchPlaceholder}
+        />
+
+        <div style={{ maxHeight: 205, overflowY: 'auto' }}>
+          <Flex vertical gap={2}>
+            {!q ? (
+              <>
+                <button
+                  type="button"
+                  style={optionRowStyle(isAuto)}
+                  onClick={() => pickTargetAndTest(pairIdx, '')}
+                >
+                  <Typography.Text strong style={{ fontSize: 12, flexShrink: 0 }}>
+                    {isAuto ? '✓ ' : ''}
+                    {t.hosts.mirrorDefaultTestLabel}
+                  </Typography.Text>
+                  <span
+                    style={{
+                      fontSize: 11,
+                      padding: '1px 6px',
+                      borderRadius: 4,
+                      maxWidth: 185,
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      fontFamily: defaultTagIsWarn ? undefined : token.fontFamilyCode,
+                      background: defaultTagIsWarn
+                        ? token.colorWarningBg
+                        : token.colorFillSecondary,
+                      color: defaultTagIsWarn
+                        ? token.colorWarningText
+                        : token.colorTextSecondary,
+                    }}
+                  >
+                    {defaultTagText}
+                  </span>
+                </button>
+
+                {pairLocals.length > 0 && (
+                  <>
+                    <Typography.Text
+                      type="secondary"
+                      style={{ fontSize: 11, padding: '6px 10px 2px' }}
+                    >
+                      {t.hosts.mirrorLocalGroup}
+                    </Typography.Text>
+                    {pairLocals.map((c) => {
+                      const active = pair.selectedTarget === c.image
+                      return (
+                        <button
+                          key={`${c.source}|${c.image}`}
+                          type="button"
+                          style={optionRowStyle(active)}
+                          onClick={() => pickTargetAndTest(pairIdx, c.image)}
+                        >
+                          <Typography.Text
+                            strong
+                            style={{ fontSize: 12, flexShrink: 0 }}
+                          >
+                            {active ? '✓ ' : ''}
+                            {c.name}
+                          </Typography.Text>
+                          <Typography.Text
+                            type="secondary"
+                            ellipsis
+                            style={{
+                              fontSize: 12,
+                              fontFamily: token.fontFamilyCode,
+                            }}
+                          >
+                            {c.image}
+                          </Typography.Text>
+                        </button>
+                      )
+                    })}
+                  </>
+                )}
+              </>
+            ) : (
+              <>
+                {matchedLocals.map((c) => (
+                  <button
+                    key={`m_${c.source}|${c.image}`}
+                    type="button"
+                    style={optionRowStyle(pair.selectedTarget === c.image)}
+                    onClick={() => pickTargetAndTest(pairIdx, c.image)}
+                  >
+                    <Typography.Text strong style={{ fontSize: 12, flexShrink: 0 }}>
+                      {c.name}
+                    </Typography.Text>
+                    <Typography.Text
+                      type="secondary"
+                      ellipsis
+                      style={{ fontSize: 12, fontFamily: token.fontFamilyCode }}
+                    >
+                      {c.image}
+                    </Typography.Text>
+                  </button>
+                ))}
+
+                {searchingRemote && (
+                  <div style={{ textAlign: 'center', padding: '6px 0' }}>
+                    <Spin size="small" />
+                  </div>
+                )}
+
+                {remoteSearchItems.map((repo) => {
+                  const full = `${repo}:latest`
+                  return (
+                    <button
+                      key={`r_${repo}`}
+                      type="button"
+                      style={optionRowStyle(pair.selectedTarget === full)}
+                      onClick={() => pickTargetAndTest(pairIdx, full)}
+                    >
+                      <Typography.Text
+                        ellipsis
+                        style={{ fontSize: 12, fontFamily: token.fontFamilyCode }}
+                      >
+                        {full}
+                      </Typography.Text>
+                    </button>
+                  )
+                })}
+
+                {customCandidate && !hasExactRemote && (
+                  <button
+                    type="button"
+                    style={optionRowStyle(false)}
+                    onClick={() => pickTargetAndTest(pairIdx, customCandidate)}
+                  >
+                    <Typography.Text
+                      ellipsis
+                      style={{
+                        fontSize: 12,
+                        color: token.colorLink,
+                        fontFamily: token.fontFamilyCode,
+                      }}
+                    >
+                      {t.hosts.mirrorVerifyCustom.replace('{image}', customCandidate)}
+                    </Typography.Text>
+                  </button>
+                )}
+              </>
+            )}
+          </Flex>
+        </div>
+      </Flex>
+    )
+  }
+
+  const renderUrlResultPill = (pair: PairRowState, rawUrl: string) => {
+    const normUrl = normalizeMirrorUrl(rawUrl)
+    const tested = normUrl ? pair.testMap[normUrl] : undefined
+    if (!tested) return null
+
+    const status = tested.status || (tested.ok ? 'ok' : 'dead')
+    const normSrc = normalizeSourceDomain(pair.source) || 'docker.io'
+    const fullImg = tested.testedImage
+      ? `${normSrc}/${tested.testedImage}`
+      : normSrc
+
+    let bg = token.colorSuccessBg
+    let fg = token.colorSuccessText
+    let label = `● ${tested.latencyMs ?? 1} ms`
+    let tipTitle = t.hosts.mirrorTipOkTitle
+    let tipBody = t.hosts.mirrorTipOkBody.replace('{image}', fullImg)
+
+    if (status === 'basic_ok') {
+      bg = token.colorSuccessBg
+      fg = token.colorSuccessText
+      label = `● ${tested.latencyMs ?? 1} ms · ${t.hosts.mirrorStateBasicSuffix}`
+      tipTitle = t.hosts.mirrorTipBasicTitle
+      tipBody = t.hosts.mirrorTipBasicBody
+    } else if (status === 'restricted') {
+      bg = token.colorWarningBg
+      fg = token.colorWarningText
+      label = `▲ ${t.hosts.mirrorStateRestricted}`
+      tipTitle = t.hosts.mirrorTipRestrictedTitle
+      tipBody = t.hosts.mirrorTipRestrictedBody
+        .replace('{image}', fullImg)
+        .replace('{detail}', tested.error || `HTTP ${tested.httpStatus || 403}`)
+    } else if (status === 'not_found') {
+      bg = token.colorWarningBg
+      fg = token.colorWarningText
+      label = `▲ ${t.hosts.mirrorStateNotFound}`
+      tipTitle = t.hosts.mirrorTipNotFoundTitle
+      tipBody = t.hosts.mirrorTipNotFoundBody.replace('{image}', fullImg)
+    } else if (status === 'dead' || !tested.ok) {
+      bg = token.colorErrorBg
+      fg = token.colorErrorText
+      label = `✖ ${t.hosts.mirrorStateBad}`
+      tipTitle = t.hosts.mirrorTipDeadTitle
+      tipBody = tested.error || t.hosts.mirrorTipDeadFallback
+    }
+
+    return (
+      <Popover
+        trigger="hover"
+        placement="topRight"
+        styles={{ container: { maxWidth: 275, padding: '8px 10px' } }}
+        content={
+          <div style={{ fontSize: 12, lineHeight: 1.5 }}>
+            <div style={{ fontWeight: 600, color: token.colorText }}>{tipTitle}</div>
+            <div style={{ color: token.colorTextSecondary, marginTop: 2 }}>
+              {tipBody}
+            </div>
+          </div>
+        }
+      >
+        <span
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            padding: '1px 7px',
+            borderRadius: 4,
+            background: bg,
+            color: fg,
+            fontSize: 12,
+            fontWeight: 500,
+            whiteSpace: 'nowrap',
+            cursor: 'help',
+          }}
+        >
+          {label}
+        </span>
+      </Popover>
+    )
   }
 
   const titleText = t.hosts.mirrorModalTitle.replace(
@@ -472,11 +899,8 @@ function HostMirrorModalBody({
     <Flex vertical gap={14}>
       {modalContextHolder}
 
-      {/* 弹窗头部：标题 + 右侧测速检活按钮 */}
-      <Flex
-        align="center"
-        justify="space-between"
-        gap={12}
+      {/* 弹窗标题 */}
+      <div
         style={{
           paddingBottom: 12,
           borderBottom: `1px solid ${token.colorSplit}`,
@@ -485,16 +909,7 @@ function HostMirrorModalBody({
         <Typography.Title level={5} style={{ margin: 0 }}>
           {titleText}
         </Typography.Title>
-        <Button
-          size="small"
-          icon={<ThunderboltOutlined />}
-          loading={testing}
-          disabled={loading || saving}
-          onClick={handleTestAll}
-        >
-          {testing ? t.hosts.mirrorTestingBtn : t.hosts.mirrorTestAllBtn}
-        </Button>
-      </Flex>
+      </div>
 
       {loading ? (
         <div style={{ textAlign: 'center', padding: '32px 0' }}>
@@ -502,146 +917,158 @@ function HostMirrorModalBody({
         </div>
       ) : (
         <>
-          {/* 列头说明 */}
-          <Row gutter={12} style={{ paddingInline: 6 }}>
-            <Col xs={24} sm={8}>
-              <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-                {t.hosts.mirrorColSource}
-              </Typography.Text>
-            </Col>
-            <Col xs={24} sm={16}>
-              <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-                {t.hosts.mirrorColUrls}
-              </Typography.Text>
-            </Col>
-          </Row>
-
-          {/* 配对行列表 */}
-          <Flex vertical gap={10} style={{ maxHeight: 380, overflowY: 'auto', paddingRight: 2 }}>
-            {rows.map((pair, pairIdx) => (
-              <div
-                key={pair.key}
-                style={{
-                  background: token.colorFillAlter,
-                  border: `1px solid ${token.colorBorderSecondary}`,
-                  borderRadius: token.borderRadiusLG,
-                  padding: 12,
-                }}
-              >
-                <Row gutter={[12, 10]} align="top">
-                  <Col xs={24} sm={8}>
-                    <Flex vertical gap={6}>
+          {/* 配对卡片列表 */}
+          <Flex
+            vertical
+            gap={12}
+            style={{ maxHeight: 400, overflowY: 'auto', paddingRight: 2 }}
+          >
+            {rows.map((pair, pairIdx) => {
+              const isMenuOpen = openMenuKey === pair.key
+              return (
+                <div
+                  key={pair.key}
+                  style={{
+                    background: token.colorFillAlter,
+                    border: `1px solid ${token.colorBorderSecondary}`,
+                    borderRadius: token.borderRadiusLG,
+                    padding: 14,
+                  }}
+                >
+                  {/* 卡片头：左「源仓库」 + 右「⚡ | ▾」分段图标按钮 */}
+                  <Flex align="center" justify="space-between" gap={12}>
+                    <Flex align="center" gap={10} style={{ minWidth: 0, flex: 1 }}>
+                      <Typography.Text
+                        type="secondary"
+                        style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}
+                      >
+                        {t.hosts.mirrorSourceLabel}
+                      </Typography.Text>
                       <AutoComplete
                         value={pair.source}
                         options={presetSourceOptions}
                         onChange={(val) => updateRowSource(pairIdx, val)}
                         onBlur={() => normalizeRowSourceOnBlur(pairIdx)}
                         placeholder={t.hosts.mirrorSourcePlaceholder}
-                        style={{ width: '100%', fontFamily: token.fontFamilyCode }}
+                        style={{
+                          width: screens.sm ? 250 : '100%',
+                          maxWidth: '100%',
+                          fontFamily: token.fontFamilyCode,
+                        }}
                       />
+                    </Flex>
+
+                    <Flex align="center" gap={8} style={{ flexShrink: 0 }}>
+                      <Space.Compact>
+                        <Tooltip title={t.hosts.mirrorTestTip}>
+                          <Button
+                            icon={<ThunderboltOutlined />}
+                            loading={pair.testing}
+                            disabled={saving}
+                            aria-label={t.hosts.mirrorTestTip}
+                            onClick={() => void handleTestPair(pairIdx)}
+                          />
+                        </Tooltip>
+                        <Popover
+                          open={isMenuOpen}
+                          onOpenChange={(open) => handleMenuOpenChange(pair.key, open)}
+                          trigger="click"
+                          placement="bottomRight"
+                          arrow={false}
+                          styles={{ container: { padding: 10, width: 365 } }}
+                          content={renderTargetPopover(pair, pairIdx)}
+                        >
+                          <Tooltip title={t.hosts.mirrorPickTargetTip}>
+                            <Button
+                              icon={<DownOutlined style={{ fontSize: 10 }} />}
+                              disabled={pair.testing || saving}
+                              aria-label={t.hosts.mirrorPickTargetTip}
+                              style={{ position: 'relative', width: 30 }}
+                            >
+                              {pair.selectedTarget ? (
+                                <span
+                                  style={{
+                                    position: 'absolute',
+                                    top: 5,
+                                    right: 5,
+                                    width: 6,
+                                    height: 6,
+                                    borderRadius: '50%',
+                                    background: token.colorPrimary,
+                                  }}
+                                />
+                              ) : null}
+                            </Button>
+                          </Tooltip>
+                        </Popover>
+                      </Space.Compact>
+
                       {rows.length > 1 && (
-                        <div>
-                          <Typography.Link
-                            type="danger"
-                            style={{ fontSize: 12 }}
+                        <Tooltip title={t.hosts.mirrorDelPairBtn}>
+                          <Button
+                            type="text"
+                            icon={<CloseOutlined style={{ fontSize: 12 }} />}
                             onClick={() => removePair(pairIdx)}
-                          >
-                            {t.hosts.mirrorDelPairBtn}
-                          </Typography.Link>
-                        </div>
+                          />
+                        </Tooltip>
                       )}
                     </Flex>
-                  </Col>
+                  </Flex>
 
-                  <Col xs={24} sm={16}>
-                    <Flex vertical gap={8}>
-                      {pair.urls.map((uItem, urlIdx) => {
-                        const normUrl = normalizeMirrorUrl(uItem.url)
-                        const tested = normUrl ? testMap[normUrl] : undefined
-                        return (
-                          <Flex key={uItem.key} align="center" gap={6}>
-                            <Input
-                              value={uItem.url}
-                              onChange={(e) =>
-                                updateUrlText(pairIdx, urlIdx, e.target.value)
-                              }
-                              onBlur={() => normalizeUrlOnBlur(pairIdx, urlIdx)}
-                              onPaste={(e) => handlePasteUrls(e, pairIdx, urlIdx)}
-                              placeholder={t.hosts.mirrorUrlPlaceholder}
-                              style={{
-                                flex: 1,
-                                minWidth: 0,
-                                fontFamily: token.fontFamilyCode,
-                              }}
-                              suffix={
-                                tested ? (
-                                  tested.ok ? (
-                                    <span
-                                      style={{
-                                        color: token.colorSuccess,
-                                        fontSize: 12,
-                                        fontWeight: 500,
-                                        whiteSpace: 'nowrap',
-                                      }}
-                                    >
-                                      <CheckCircleFilled style={{ marginRight: 4 }} />
-                                      {tested.latencyMs ?? 1} ms
-                                    </span>
-                                  ) : (
-                                    <Tooltip title={tested.error || t.hosts.mirrorStateBad}>
-                                      <span
-                                        style={{
-                                          color: token.colorError,
-                                          fontSize: 12,
-                                          fontWeight: 500,
-                                          whiteSpace: 'nowrap',
-                                        }}
-                                      >
-                                        <CloseCircleFilled style={{ marginRight: 4 }} />
-                                        {t.hosts.mirrorStateBad}
-                                      </span>
-                                    </Tooltip>
-                                  )
-                                ) : null
-                              }
-                            />
-                            <Tooltip title={t.hosts.mirrorMoveUpTip}>
-                              <Button
-                                type="text"
-                                size="small"
-                                icon={<ArrowUpOutlined />}
-                                disabled={urlIdx === 0}
-                                onClick={() => moveUrlUp(pairIdx, urlIdx)}
-                              />
-                            </Tooltip>
-                            <Button
-                              type="text"
-                              danger
-                              size="small"
-                              onClick={() => removeUrl(pairIdx, urlIdx)}
-                            >
-                              {t.hosts.mirrorDeleteBtn}
-                            </Button>
-                          </Flex>
-                        )
-                      })}
-
-                      <div>
-                        <Typography.Link
-                          style={{ fontSize: token.fontSizeSM }}
-                          onClick={() => addBlankUrl(pairIdx)}
+                  {/* 卡片主体：全宽展示该仓库的加速镜像网址列表 */}
+                  <Flex vertical gap={8} style={{ marginTop: 10 }}>
+                    {pair.urls.map((uItem, urlIdx) => (
+                      <Flex key={uItem.key} align="center" gap={6}>
+                        <Input
+                          value={uItem.url}
+                          onChange={(e) =>
+                            updateUrlText(pairIdx, urlIdx, e.target.value)
+                          }
+                          onBlur={() => normalizeUrlOnBlur(pairIdx, urlIdx)}
+                          onPaste={(e) => handlePasteUrls(e, pairIdx, urlIdx)}
+                          placeholder={t.hosts.mirrorUrlPlaceholder}
+                          style={{
+                            flex: 1,
+                            minWidth: 0,
+                            fontFamily: token.fontFamilyCode,
+                          }}
+                          suffix={renderUrlResultPill(pair, uItem.url)}
+                        />
+                        <Tooltip title={t.hosts.mirrorMoveUpTip}>
+                          <Button
+                            type="text"
+                            size="small"
+                            icon={<ArrowUpOutlined />}
+                            disabled={urlIdx === 0}
+                            onClick={() => moveUrlUp(pairIdx, urlIdx)}
+                          />
+                        </Tooltip>
+                        <Button
+                          type="text"
+                          danger
+                          size="small"
+                          onClick={() => removeUrl(pairIdx, urlIdx)}
                         >
-                          {t.hosts.mirrorAddUrlBtn}
-                        </Typography.Link>
-                      </div>
-                    </Flex>
-                  </Col>
-                </Row>
-              </div>
-            ))}
+                          {t.hosts.mirrorDeleteBtn}
+                        </Button>
+                      </Flex>
+                    ))}
+
+                    <div>
+                      <Typography.Link
+                        style={{ fontSize: token.fontSizeSM }}
+                        onClick={() => addBlankUrl(pairIdx)}
+                      >
+                        {t.hosts.mirrorAddUrlBtn}
+                      </Typography.Link>
+                    </div>
+                  </Flex>
+                </div>
+              )
+            })}
           </Flex>
 
-          {/* 新增配对行 */}
+          {/* 新增配对卡片 */}
           <div>
             <Button
               type="dashed"
@@ -668,7 +1095,11 @@ function HostMirrorModalBody({
                   onChange={(e) => {
                     const checked = e.target.checked
                     setAlsoApply(checked)
-                    if (checked && selectedPeerIds.length === 0 && peerHosts.length > 0) {
+                    if (
+                      checked &&
+                      selectedPeerIds.length === 0 &&
+                      peerHosts.length > 0
+                    ) {
                       setSelectedPeerIds(peerHosts.map((h) => h.id))
                     }
                   }}

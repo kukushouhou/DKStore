@@ -248,10 +248,21 @@ export interface MirrorPair {
   urls: string[]
 }
 
+export interface HostMirrorContainerItem {
+  name: string
+  source: string
+  image: string
+}
+
+export type MirrorTestStatus = 'ok' | 'basic_ok' | 'restricted' | 'not_found' | 'dead'
+
 export interface MirrorTestItem {
   url: string
   ok: boolean
+  status: MirrorTestStatus
   latencyMs?: number
+  testedImage?: string
+  httpStatus?: number
   error?: string
 }
 
@@ -928,17 +939,25 @@ export const api = {
   deleteHost: (id: string) =>
     request<{ ok: boolean }>(`/hosts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   getHostMirrors: (id: string) =>
-    request<{ pairs: MirrorPair[] }>(`/hosts/${encodeURIComponent(id)}/mirrors`),
+    request<{ pairs: MirrorPair[]; localContainers?: HostMirrorContainerItem[] }>(
+      `/hosts/${encodeURIComponent(id)}/mirrors`,
+    ),
   saveHostMirrors: (id: string, pairs: MirrorPair[], alsoApplyHostIds?: string[]) =>
     request<{ ok: boolean; pairs: MirrorPair[] }>(`/hosts/${encodeURIComponent(id)}/mirrors`, {
       method: 'PUT',
       body: JSON.stringify({ pairs, alsoApplyHostIds: alsoApplyHostIds ?? [] }),
     }),
-  testHostMirrors: (id: string, urls: string[]) =>
+  testHostMirrors: (id: string, source: string, urls: string[], targetImage?: string) =>
     request<{ items: MirrorTestItem[] }>(`/hosts/${encodeURIComponent(id)}/mirrors/test`, {
       method: 'POST',
-      body: JSON.stringify({ urls }),
+      body: JSON.stringify({ source, urls, targetImage: targetImage ?? '' }),
     }),
+  searchHostMirrorRepos: (id: string, source: string, q: string) => {
+    const params = new URLSearchParams({ source, q })
+    return request<{ items: string[] }>(
+      `/hosts/${encodeURIComponent(id)}/mirrors/search?${params.toString()}`,
+    )
+  },
   testHost: (input: HostInput) =>
     request<HostTestResult>('/hosts/test', { method: 'POST', body: JSON.stringify(input) }),
   keygen: () => request<{ privateKey: string; authorizedKey: string }>('/hosts/keygen', { method: 'POST' }),

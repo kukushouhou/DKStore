@@ -1,6 +1,10 @@
 package docker
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -52,5 +56,90 @@ func TestNormalizeMirrorPairsAndBuildMirrorRef(t *testing.T) {
 	ref := buildMirrorPullRef("https://ghcr.nju.edu.cn/", repo, tag)
 	if ref != "ghcr.nju.edu.cn/owner/app:v1.2.3" {
 		t.Fatalf("unexpected mirror pull ref: %s", ref)
+	}
+}
+
+func TestRunMirrorProbeBatchClosedLoop(t *testing.T) {
+	// 1. 全量可用加速源：支持 Bearer access_token + Manifest + 1B Blob 读取（且 old/deleted:1.0 返回 404 测试顺延）
+	var fullSrv *httptest.Server
+	fullSrv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v2/":
+			w.Header().Set("Docker-Distribution-Api-Version", "registry/2.0")
+			w.Header().Set("Www-Authenticate", fmt.Sprintf(`Bearer realm="%s/token",service="mirror"`, fullSrv.URL))
+			w.WriteHeader(http.StatusUnauthorized)
+		case r.URL.Path == "/token":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"demo-jwt"}`))
+		case r.URL.Path == "/v2/louislam/uptime-kuma/manifests/2.5.11":
+			if r.Header.Get("Authorization") != "Bearer demo-jwt" {
+				w.Header().Set("Www-Authenticate", fmt.Sprintf(`Bearer realm="%s/token",service="mirror",scope="repository:louislam/uptime-kuma:pull"`, fullSrv.URL))
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			_, _ = w.Write([]byte(`{"schemaVersion":2,"layers":[{"digest":"sha256:abc123"}]}`))
+		case r.URL.Path == "/v2/louislam/uptime-kuma/blobs/sha256:abc123":
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write([]byte("X"))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer fullSrv.Close()
+
+	// 2. 白名单限制源：/v2/ 返回 200 假活，拉具体镜像时返回 403
+	whitelistSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v2/" {
+			w.Header().Set("Docker-Distribution-Api-Version", "registry/2.0")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer whitelistSrv.Close()
+
+	// 3. 缺库源：/v2/ 在线，但未同步 uptime-kuma 返回 404（与 fullSrv 同批交叉复核应归类为 restricted）
+	unsyncedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v2/" {
+			w.Header().Set("Docker-Distribution-Api-Version", "registry/2.0")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer unsyncedSrv.Close()
+
+	// 4. 关停源：返回 200 text/html 停服公告页
+	deadHTMLSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("<html>Mirror Closed</html>"))
+	}))
+	defer deadHTMLSrv.Close()
+
+	items := RunMirrorProbeBatch(context.Background(), fullSrv.Client(), platform.MirrorProbeRequest{
+		Source:         "docker.io",
+		URLs:           []string{fullSrv.URL, whitelistSrv.URL, unsyncedSrv.URL, deadHTMLSrv.URL},
+		HasSpecificApp: true,
+		Candidates: []platform.MirrorProbeCandidate{
+			{RepoPath: "old/deleted", Tag: "1.0"},
+			{RepoPath: "louislam/uptime-kuma", Tag: "2.5.11"},
+		},
+	})
+	if len(items) != 4 {
+		t.Fatalf("expected 4 items, got %d", len(items))
+	}
+	if !items[0].OK || items[0].Status != "ok" || items[0].TestedImage != "louislam/uptime-kuma:2.5.11" {
+		t.Fatalf("expected fullSrv ok after 404 candidate fallback, got %+v", items[0])
+	}
+	if items[1].OK || items[1].Status != "restricted" {
+		t.Fatalf("expected whitelistSrv restricted, got %+v", items[1])
+	}
+	if items[2].OK || items[2].Status != "restricted" {
+		t.Fatalf("expected unsyncedSrv upgraded from not_found to restricted via batch cross-check, got %+v", items[2])
+	}
+	if items[3].OK || items[3].Status != "dead" {
+		t.Fatalf("expected deadHTMLSrv dead, got %+v", items[3])
 	}
 }

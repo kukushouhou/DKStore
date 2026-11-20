@@ -437,20 +437,44 @@ type MirrorPair struct {
 	URLs   []string `json:"urls"`
 }
 
-// MirrorTestItem 表示单个加速镜像网址在目标设备上的连通测速结果。
-type MirrorTestItem struct {
-	URL       string `json:"url"`
-	OK        bool   `json:"ok"`
-	LatencyMs int64  `json:"latencyMs,omitempty"`
-	Error     string `json:"error,omitempty"`
+// HostMirrorContainerItem 表示目标设备上已存在的容器及其所属源仓库与镜像路径，供镜像源测速抽检与指定验证使用。
+type HostMirrorContainerItem struct {
+	Name   string `json:"name"`
+	Source string `json:"source"`
+	Image  string `json:"image"`
 }
 
-// MirrorAdapter 扩展 Adapter，提供设备底层镜像加速源读取、写入与从目标设备发起的连通测速能力。
+// MirrorProbeCandidate 表示单个用于实测加速源拉取能力的候选镜像仓库路径与标签。
+type MirrorProbeCandidate struct {
+	RepoPath string
+	Tag      string
+}
+
+// MirrorProbeRequest 描述对一组加速镜像网址执行连通与真实镜像拉取验证的输入参数。
+type MirrorProbeRequest struct {
+	Source         string
+	URLs           []string
+	Candidates     []MirrorProbeCandidate
+	HasSpecificApp bool
+}
+
+// MirrorTestItem 表示单个加速镜像网址在目标设备上的测速与镜像拉取验证结果。
+type MirrorTestItem struct {
+	URL         string `json:"url"`
+	OK          bool   `json:"ok"`
+	Status      string `json:"status"` // ok | basic_ok | restricted | not_found | dead
+	LatencyMs   int64  `json:"latencyMs,omitempty"`
+	TestedImage string `json:"testedImage,omitempty"`
+	HTTPStatus  int    `json:"httpStatus,omitempty"`
+	Error       string `json:"error,omitempty"`
+}
+
+// MirrorAdapter 扩展 Adapter，提供设备底层镜像加速源读取、写入与从目标设备发起的测速验证能力。
 type MirrorAdapter interface {
 	Adapter
 	GetDockerHubMirrors(ctx context.Context) ([]string, error)
 	ApplyMirrorPairs(ctx context.Context, pairs []MirrorPair) (restartsAllContainers bool, err error)
-	TestMirrorURLs(ctx context.Context, urls []string) ([]MirrorTestItem, error)
+	TestMirrorURLs(ctx context.Context, req MirrorProbeRequest) ([]MirrorTestItem, error)
 }
 
 // UpdateResult 是单服务更新完成后的核验结果。

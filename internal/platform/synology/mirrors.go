@@ -5,8 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/kukushouhou/DKStore/internal/platform"
 	"github.com/kukushouhou/DKStore/internal/platform/docker"
@@ -278,41 +278,25 @@ func updateSynoRegistryJSONMirrors(raw []byte, urls []string) ([]byte, bool) {
 	return out, true
 }
 
-// TestMirrorURLs 并发测试候选加速镜像网址的有效性与延迟。
-func (a *Adapter) TestMirrorURLs(ctx context.Context, urls []string) ([]platform.MirrorTestItem, error) {
-	if a.dock != nil {
-		return a.dock.TestMirrorURLs(ctx, urls)
+// NewHostHTTPClient 返回经由当前群晖主机底层传输发起请求的 HTTP 客户端。
+func (a *Adapter) NewHostHTTPClient(ctx context.Context) (*http.Client, func()) {
+	if a != nil && a.dock != nil {
+		return a.dock.NewHostHTTPClient(ctx)
 	}
-	cleaned := make([]string, 0, len(urls))
-	seen := make(map[string]bool, len(urls))
-	for _, raw := range urls {
-		u := docker.NormalizeMirrorURL(raw)
-		if u != "" && !seen[u] {
-			seen[u] = true
-			cleaned = append(cleaned, u)
+	if a != nil && a.tr != nil {
+		if mcTr, ok := a.tr.(transport.MirrorConfigTransport); ok {
+			return mcTr.NewHostHTTPClient(ctx)
 		}
 	}
-	out := make([]platform.MirrorTestItem, len(cleaned))
-	if len(cleaned) == 0 {
-		return out, nil
+	return transport.DefaultMirrorHTTPClient()
+}
+
+// TestMirrorURLs 并发测试候选加速镜像网址的有效性、拉取能力与延迟。
+func (a *Adapter) TestMirrorURLs(ctx context.Context, req platform.MirrorProbeRequest) ([]platform.MirrorTestItem, error) {
+	if a.dock != nil {
+		return a.dock.TestMirrorURLs(ctx, req)
 	}
-	sem := make(chan struct{}, 4)
-	var wg sync.WaitGroup
-	for i, u := range cleaned {
-		wg.Add(1)
-		go func(idx int, targetURL string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			ok, ms, rawErr := transport.ProbeMirrorViaGoHTTP(ctx, targetURL)
-			out[idx] = platform.MirrorTestItem{
-				URL:       targetURL,
-				OK:        ok,
-				LatencyMs: ms,
-				Error:     rawErr,
-			}
-		}(i, u)
-	}
-	wg.Wait()
-	return out, nil
+	hc, cleanup := a.NewHostHTTPClient(ctx)
+	defer cleanup()
+	return docker.RunMirrorProbeBatch(ctx, hc, req), nil
 }
