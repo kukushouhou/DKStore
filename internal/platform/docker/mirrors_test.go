@@ -136,8 +136,8 @@ func TestRunMirrorProbeBatchClosedLoop(t *testing.T) {
 	if items[1].OK || items[1].Status != "restricted" {
 		t.Fatalf("expected whitelistSrv restricted, got %+v", items[1])
 	}
-	if items[2].OK || items[2].Status != "restricted" {
-		t.Fatalf("expected unsyncedSrv upgraded from not_found to restricted via batch cross-check, got %+v", items[2])
+	if items[2].OK || items[2].Status != "not_found" {
+		t.Fatalf("expected unsyncedSrv not_found, got %+v", items[2])
 	}
 	if items[3].OK || items[3].Status != "dead" {
 		t.Fatalf("expected deadHTMLSrv dead, got %+v", items[3])

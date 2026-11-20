@@ -348,19 +348,6 @@ func RunMirrorProbeBatch(ctx context.Context, hc *http.Client, req platform.Mirr
 		}(i, u)
 	}
 	wg.Wait()
-
-	// 交叉复核：若同批次已有其他加速源成功拉取了同一镜像，说明该镜像真实存在，则将返回 404 的加速源准确归类为「该源未收录」(restricted)
-	confirmedExists := make(map[string]bool)
-	for _, it := range out {
-		if it.OK && it.TestedImage != "" {
-			confirmedExists[it.TestedImage] = true
-		}
-	}
-	for i := range out {
-		if out[i].Status == "not_found" && confirmedExists[out[i].TestedImage] {
-			out[i].Status = "restricted"
-		}
-	}
 	return out
 }
 

@@ -841,15 +841,20 @@ function HostMirrorModalBody({
 
     const status = tested.status || (tested.ok ? 'ok' : 'dead')
     const normSrc = normalizeSourceDomain(pair.source) || 'docker.io'
-    const fullImg = tested.testedImage
-      ? `${normSrc}/${tested.testedImage}`
-      : normSrc
+    const matchedLocal = !pair.selectedTarget
+      ? localContainers.find(
+          (c) => c.source === normSrc && c.image === tested.testedImage,
+        )
+      : undefined
+    const friendlyTarget = matchedLocal
+      ? t.hosts.mirrorTargetLocalPrefix.replace('{name}', matchedLocal.name)
+      : (tested.testedImage || normSrc).replace(/:latest$/i, '')
 
     let bg = token.colorSuccessBg
     let fg = token.colorSuccessText
     let label = `● ${tested.latencyMs ?? 1} ms`
     let tipTitle = t.hosts.mirrorTipOkTitle
-    let tipBody = t.hosts.mirrorTipOkBody.replace('{image}', fullImg)
+    let tipBody = t.hosts.mirrorTipOkBody.replace('{target}', friendlyTarget)
 
     if (status === 'basic_ok') {
       bg = token.colorSuccessBg
@@ -858,25 +863,23 @@ function HostMirrorModalBody({
       tipTitle = t.hosts.mirrorTipBasicTitle
       tipBody = t.hosts.mirrorTipBasicBody
     } else if (status === 'restricted') {
-      bg = token.colorWarningBg
-      fg = token.colorWarningText
-      label = `▲ ${t.hosts.mirrorStateRestricted}`
+      bg = token.colorErrorBg
+      fg = token.colorErrorText
+      label = `✖ ${t.hosts.mirrorStateRestricted}`
       tipTitle = t.hosts.mirrorTipRestrictedTitle
-      tipBody = t.hosts.mirrorTipRestrictedBody
-        .replace('{image}', fullImg)
-        .replace('{detail}', tested.error || `HTTP ${tested.httpStatus || 403}`)
+      tipBody = t.hosts.mirrorTipRestrictedBody.replace('{target}', friendlyTarget)
     } else if (status === 'not_found') {
-      bg = token.colorWarningBg
-      fg = token.colorWarningText
-      label = `▲ ${t.hosts.mirrorStateNotFound}`
+      bg = token.colorErrorBg
+      fg = token.colorErrorText
+      label = `✖ ${t.hosts.mirrorStateNotFound}`
       tipTitle = t.hosts.mirrorTipNotFoundTitle
-      tipBody = t.hosts.mirrorTipNotFoundBody.replace('{image}', fullImg)
+      tipBody = t.hosts.mirrorTipNotFoundBody.replace('{target}', friendlyTarget)
     } else if (status === 'dead' || !tested.ok) {
       bg = token.colorErrorBg
       fg = token.colorErrorText
       label = `✖ ${t.hosts.mirrorStateBad}`
       tipTitle = t.hosts.mirrorTipDeadTitle
-      tipBody = tested.error || t.hosts.mirrorTipDeadFallback
+      tipBody = t.hosts.mirrorTipDeadFallback
     }
 
     return (
