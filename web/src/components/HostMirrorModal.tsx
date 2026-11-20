@@ -162,8 +162,9 @@ function HostMirrorModalBody({
   const [alsoApply, setAlsoApply] = useState(false)
   const [selectedPeerIds, setSelectedPeerIds] = useState<string[]>([])
 
-  // 右上角「▾」弹出菜单状态
+  // 右上角「▾」弹出菜单状态与新卡片自动聚焦展开状态
   const [openMenuKey, setOpenMenuKey] = useState<string | null>(null)
+  const [autoFocusPairKey, setAutoFocusPairKey] = useState<string | null>(null)
   const [searchKeyword, setSearchKeyword] = useState('')
   const [remoteSearchItems, setRemoteSearchItems] = useState<string[]>([])
   const [searchingRemote, setSearchingRemote] = useState(false)
@@ -229,8 +230,8 @@ function HostMirrorModalBody({
     }
   }, [hostId])
 
-  const presetSourceOptions = useMemo(() => {
-    const presets = [
+  const presetSources = useMemo(
+    () => [
       { domain: 'docker.io', desc: t.hosts.presetDockerHub },
       { domain: 'ghcr.io', desc: t.hosts.presetGhcr },
       { domain: 'lscr.io', desc: t.hosts.presetLscr },
@@ -238,19 +239,39 @@ function HostMirrorModalBody({
       { domain: 'gcr.io', desc: t.hosts.presetGcr },
       { domain: 'registry.k8s.io', desc: t.hosts.presetK8s },
       { domain: 'mcr.microsoft.com', desc: t.hosts.presetMcr },
-    ]
-    return presets.map((p) => ({
-      value: p.domain,
-      label: (
-        <Flex align="center" justify="space-between" gap={12}>
-          <span style={{ fontFamily: token.fontFamilyCode, fontWeight: 500 }}>{p.domain}</span>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            {p.desc}
-          </Typography.Text>
-        </Flex>
-      ),
-    }))
-  }, [t.hosts, token.fontFamilyCode])
+    ],
+    [t.hosts],
+  )
+
+  const buildSourceOptionsForRow = (pairIdx: number, currentVal: string) => {
+    const usedOthers = new Set<string>()
+    rows.forEach((r, idx) => {
+      if (idx !== pairIdx) {
+        const norm = normalizeSourceDomain(r.source)
+        if (norm) usedOthers.add(norm)
+      }
+    })
+    const q = currentVal.trim().toLowerCase()
+    return presetSources
+      .filter(
+        (p) =>
+          !usedOthers.has(p.domain) &&
+          (!q || p.domain.includes(q) || p.desc.toLowerCase().includes(q)),
+      )
+      .map((p) => ({
+        value: p.domain,
+        label: (
+          <Flex align="center" justify="space-between" gap={12}>
+            <span style={{ fontFamily: token.fontFamilyCode, fontWeight: 500 }}>
+              {p.domain}
+            </span>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {p.desc}
+            </Typography.Text>
+          </Flex>
+        ),
+      }))
+  }
 
   const buildCleanedPairs = (): MirrorPair[] => {
     const out: MirrorPair[] = []
@@ -565,10 +586,12 @@ function HostMirrorModalBody({
   }
 
   const addBlankPair = () => {
+    const newKey = nextKey('pair')
+    setAutoFocusPairKey(newKey)
     setRows((prev) => [
       ...prev,
       {
-        key: nextKey('pair'),
+        key: newKey,
         source: '',
         selectedTarget: '',
         testing: false,
@@ -946,9 +969,22 @@ function HostMirrorModalBody({
                       </Typography.Text>
                       <AutoComplete
                         value={pair.source}
-                        options={presetSourceOptions}
+                        autoFocus={pair.key === autoFocusPairKey}
+                        defaultOpen={pair.key === autoFocusPairKey}
+                        popupMatchSelectWidth={290}
+                        options={buildSourceOptionsForRow(pairIdx, pair.source)}
                         onChange={(val) => updateRowSource(pairIdx, val)}
-                        onBlur={() => normalizeRowSourceOnBlur(pairIdx)}
+                        onSelect={() => {
+                          if (autoFocusPairKey === pair.key) {
+                            setAutoFocusPairKey(null)
+                          }
+                        }}
+                        onBlur={() => {
+                          if (autoFocusPairKey === pair.key) {
+                            setAutoFocusPairKey(null)
+                          }
+                          normalizeRowSourceOnBlur(pairIdx)
+                        }}
                         placeholder={t.hosts.mirrorSourcePlaceholder}
                         style={{
                           width: screens.sm ? 250 : '100%',
