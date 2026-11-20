@@ -1,8 +1,10 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,6 +13,8 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -26,18 +30,584 @@ type MirrorConfigTransport interface {
 	ProbeMirrorURLFromHost(ctx context.Context, mirrorURL string) (ok bool, latencyMs int64, rawErr string)
 }
 
-const reloadDockerScript = `PATH="$PATH:/usr/local/bin:/usr/sbin:/sbin:/bin:/usr/bin"; ` +
-	`if command -v systemctl >/dev/null 2>&1 && systemctl reload docker >/dev/null 2>&1; then exit 0; fi; ` +
-	`if command -v pidof >/dev/null 2>&1; then pids=$(pidof dockerd 2>/dev/null || true); if [ -n "$pids" ]; then kill -HUP $pids && exit 0; fi; fi; ` +
-	`if command -v pkill >/dev/null 2>&1 && pkill -HUP -x dockerd >/dev/null 2>&1; then exit 0; fi; ` +
-	`if [ -f /var/run/docker.pid ]; then kill -HUP "$(cat /var/run/docker.pid)" && exit 0; fi; ` +
-	`exit 1`
+// HostDaemonConfigState 描述目标宿主机当前实际运行的 dockerd 配置文件路径及内容（兼容 --config-file 与 OpenWrt UCI）。
+type HostDaemonConfigState struct {
+	ActiveConfigPath  string
+	ConfigBytes       []byte
+	Exists            bool
+	DefaultJSONBytes  []byte
+	DefaultJSONExists bool
+	HasOpenWrtUCI     bool
+	OpenWrtUCIBytes   []byte
+}
+
+// ApplyDaemonMirrorPlan 描述一次对宿主机 Docker 镜像源配置的原子写入与热重载计划。
+type ApplyDaemonMirrorPlan struct {
+	WriteActiveConfig   bool
+	ActiveConfigPath    string
+	ActiveConfigBytes   []byte
+	WriteDefaultJSON    bool
+	DefaultJSONBytes    []byte
+	WriteOpenWrtUCI     bool
+	OpenWrtUCIBytes     []byte
+	ReloadDaemon        bool
+	ManageCertsDir      bool
+	CustomCertHostsTOML map[string][]byte
+}
+
+// DaemonConfigTransport 扩展ExecutableTransport，支持探测 dockerd 实际配置文件（含 OpenWrt UCI 与容器部署穿透宿主机）并原子应用。
+type DaemonConfigTransport interface {
+	InspectDockerDaemonConfig(ctx context.Context) (*HostDaemonConfigState, error)
+	ApplyDockerDaemonConfig(ctx context.Context, plan ApplyDaemonMirrorPlan) error
+}
+
+const findDockerdPidsFunc = `
+find_dockerd_pids() {
+  found=""
+  for d in /proc/[0-9]*; do
+    [ -r "$d/comm" ] || continue
+    cname=$(cat "$d/comm" 2>/dev/null || true)
+    if [ "$cname" = "dockerd" ]; then
+      p=${d#/proc/}
+      found="$found $p"
+    fi
+  done
+  if [ -z "$found" ] && command -v pidof >/dev/null 2>&1; then
+    found=$(pidof dockerd 2>/dev/null || true)
+  fi
+  if [ -z "$found" ] && [ -f "${HOST_ROOT:-}/var/run/docker.pid" ]; then
+    found=$(cat "${HOST_ROOT:-}/var/run/docker.pid" 2>/dev/null || true)
+  fi
+  printf '%s' "$found"
+}
+`
+
+func buildReloadDockerScript(hostRoot string) string {
+	return fmt.Sprintf(`LC_ALL=C; PATH="$PATH:/usr/local/bin:/usr/sbin:/sbin:/bin:/usr/bin"
+HOST_ROOT=%s
+if [ "$(id -u)" != "0" ]; then
+  echo "permission denied: root required to reload dockerd" >&2
+  exit 13
+fi
+%s
+if [ -z "$HOST_ROOT" ] && command -v systemctl >/dev/null 2>&1 && systemctl reload docker >/dev/null 2>&1; then
+  exit 0
+fi
+pids=$(find_dockerd_pids)
+if [ -n "$pids" ]; then
+  kill -HUP $pids && exit 0
+fi
+if [ -z "$HOST_ROOT" ] && command -v pkill >/dev/null 2>&1 && pkill -HUP -x dockerd >/dev/null 2>&1; then
+  exit 0
+fi
+echo "dockerd process not found for reload" >&2
+exit 1`, shellQuote(hostRoot), findDockerdPidsFunc)
+}
+
+const (
+	markerInspectMeta   = "__DKSTORE_CFG_META__"
+	markerActiveBegin   = "__DKSTORE_ACTIVE_BEGIN__"
+	markerActiveEnd     = "__DKSTORE_ACTIVE_END__"
+	markerDefaultBegin  = "__DKSTORE_DEFAULT_BEGIN__"
+	markerDefaultEnd    = "__DKSTORE_DEFAULT_END__"
+	markerOpenWrtBegin  = "__DKSTORE_OPENWRT_UCI_BEGIN__"
+	markerOpenWrtEnd    = "__DKSTORE_OPENWRT_UCI_END__"
+	heredocApplyContent = "__DKSTORE_EOF_9F8A7B6C__"
+)
+
+func buildInspectDaemonConfigScript(hostRoot string) string {
+	return fmt.Sprintf(`LC_ALL=C; PATH="$PATH:/usr/local/bin:/usr/sbin:/sbin:/bin:/usr/bin"
+HOST_ROOT=%s
+%s
+pids=$(find_dockerd_pids)
+first_pid=""
+for p in $pids; do first_pid="$p"; break; done
+cfg=""
+if [ -n "$first_pid" ] && [ -r "/proc/$first_pid/cmdline" ]; then
+  prev=""
+  while IFS= read -r arg; do
+    if [ "$prev" = "--config-file" ]; then
+      cfg="$arg"
+      break
+    fi
+    case "$arg" in
+      --config-file=*)
+        cfg=${arg#--config-file=}
+        break
+        ;;
+      --config-file)
+        prev="--config-file"
+        ;;
+    esac
+  done <<__DK_CMDLINE__
+$(tr '\000' '\n' < "/proc/$first_pid/cmdline" 2>/dev/null)
+__DK_CMDLINE__
+fi
+case "$cfg" in
+  /*) active_path="$cfg" ;;
+  *)  active_path="/etc/docker/daemon.json" ;;
+esac
+
+real_active="${HOST_ROOT}${active_path}"
+active_exists=0
+if [ -e "$real_active" ]; then
+  if [ ! -r "$real_active" ]; then
+    echo "permission denied: $active_path" >&2
+    exit 13
+  fi
+  active_exists=1
+fi
+
+real_def="${HOST_ROOT}/etc/docker/daemon.json"
+def_exists=0
+if [ "$active_path" != "/etc/docker/daemon.json" ] && [ -e "$real_def" ]; then
+  if [ ! -r "$real_def" ]; then
+    echo "permission denied: /etc/docker/daemon.json" >&2
+    exit 13
+  fi
+  def_exists=1
+fi
+
+real_uci="${HOST_ROOT}/etc/config/dockerd"
+uci_exists=0
+if [ -f "$real_uci" ]; then
+  if [ ! -r "$real_uci" ]; then
+    echo "permission denied: /etc/config/dockerd" >&2
+    exit 13
+  fi
+  uci_exists=1
+fi
+
+printf '%s\t%%s\t%%d\t%%d\t%%d\n' "$active_path" "$active_exists" "$def_exists" "$uci_exists"
+if [ "$active_exists" = "1" ]; then
+  printf '%s\n'
+  cat -- "$real_active"
+  printf '\n%s\n'
+fi
+if [ "$def_exists" = "1" ]; then
+  printf '%s\n'
+  cat -- "$real_def"
+  printf '\n%s\n'
+fi
+if [ "$uci_exists" = "1" ]; then
+  printf '%s\n'
+  cat -- "$real_uci"
+  printf '\n%s\n'
+fi
+`, shellQuote(hostRoot), findDockerdPidsFunc, markerInspectMeta,
+		markerActiveBegin, markerActiveEnd,
+		markerDefaultBegin, markerDefaultEnd,
+		markerOpenWrtBegin, markerOpenWrtEnd)
+}
+
+func extractMarkedBlock(s, beginMarker, endMarker string) []byte {
+	bIdx := strings.Index(s, beginMarker+"\n")
+	if bIdx < 0 {
+		return nil
+	}
+	rest := s[bIdx+len(beginMarker)+1:]
+	eIdx := strings.Index(rest, "\n"+endMarker)
+	if eIdx < 0 {
+		return nil
+	}
+	return []byte(rest[:eIdx])
+}
+
+func parseInspectDaemonConfigOutput(raw string) (*HostDaemonConfigState, error) {
+	norm := strings.ReplaceAll(raw, "\r\n", "\n")
+	st := &HostDaemonConfigState{ActiveConfigPath: "/etc/docker/daemon.json"}
+	gotMeta := false
+	for _, line := range strings.Split(norm, "\n") {
+		if strings.HasPrefix(line, markerInspectMeta+"\t") {
+			parts := strings.Split(line, "\t")
+			if len(parts) >= 5 {
+				gotMeta = true
+				if p := strings.TrimSpace(parts[1]); strings.HasPrefix(p, "/") {
+					st.ActiveConfigPath = p
+				}
+				st.Exists = parts[2] == "1"
+				st.DefaultJSONExists = parts[3] == "1"
+				st.HasOpenWrtUCI = parts[4] == "1"
+			}
+			break
+		}
+	}
+	if !gotMeta {
+		return nil, fmt.Errorf("unexpected daemon config inspect output")
+	}
+	if st.Exists {
+		st.ConfigBytes = extractMarkedBlock(norm, markerActiveBegin, markerActiveEnd)
+	}
+	if st.DefaultJSONExists {
+		st.DefaultJSONBytes = extractMarkedBlock(norm, markerDefaultBegin, markerDefaultEnd)
+	}
+	if st.HasOpenWrtUCI {
+		st.OpenWrtUCIBytes = extractMarkedBlock(norm, markerOpenWrtBegin, markerOpenWrtEnd)
+	}
+	return st, nil
+}
+
+func appendAtomicHeredocWrite(sb *strings.Builder, hostRoot, posixPath string, content []byte) {
+	fullPath := hostRoot + posixPath
+	tmpPath := fullPath + ".dkstore.tmp"
+	dir := posixParentDir(fullPath)
+	if dir != "" && dir != "." && dir != "/" {
+		sb.WriteString("mkdir -p -- " + shellQuote(dir) + "\n")
+	}
+	sb.WriteString(fmt.Sprintf("{ cp -p -- %s %s 2>/dev/null || :; }\n", shellQuote(fullPath), shellQuote(tmpPath)))
+	text := strings.ReplaceAll(string(content), "\r\n", "\n")
+	text = strings.ReplaceAll(text, heredocApplyContent, "")
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
+	}
+	sb.WriteString(fmt.Sprintf("cat <<'%s' > %s\n%s%s\n", heredocApplyContent, shellQuote(tmpPath), text, heredocApplyContent))
+	sb.WriteString(fmt.Sprintf("mv -f -- %s %s\n", shellQuote(tmpPath), shellQuote(fullPath)))
+}
+
+func buildApplyDaemonConfigScript(hostRoot string, plan ApplyDaemonMirrorPlan) string {
+	var sb strings.Builder
+	sb.WriteString("set -e\nLC_ALL=C; PATH=\"$PATH:/usr/local/bin:/usr/sbin:/sbin:/bin:/usr/bin\"\n")
+	sb.WriteString("HOST_ROOT=" + shellQuote(hostRoot) + "\n")
+	sb.WriteString("if [ \"$(id -u)\" != \"0\" ]; then\n  echo \"permission denied: root required\" >&2\n  exit 13\nfi\n")
+	sb.WriteString(findDockerdPidsFunc + "\n")
+
+	if plan.WriteActiveConfig && strings.HasPrefix(plan.ActiveConfigPath, "/") {
+		appendAtomicHeredocWrite(&sb, hostRoot, plan.ActiveConfigPath, plan.ActiveConfigBytes)
+	}
+	if plan.WriteDefaultJSON && plan.ActiveConfigPath != "/etc/docker/daemon.json" {
+		appendAtomicHeredocWrite(&sb, hostRoot, "/etc/docker/daemon.json", plan.DefaultJSONBytes)
+	}
+	if plan.WriteOpenWrtUCI {
+		appendAtomicHeredocWrite(&sb, hostRoot, "/etc/config/dockerd", plan.OpenWrtUCIBytes)
+	}
+
+	if plan.ManageCertsDir {
+		var srcs []string
+		for s := range plan.CustomCertHostsTOML {
+			srcs = append(srcs, s)
+		}
+		sort.Strings(srcs)
+		for _, src := range srcs {
+			tomlBytes := plan.CustomCertHostsTOML[src]
+			if len(tomlBytes) > 0 {
+				appendAtomicHeredocWrite(&sb, hostRoot, "/etc/docker/certs.d/"+src+"/hosts.toml", tomlBytes)
+			}
+		}
+		certsBase := hostRoot + "/etc/docker/certs.d"
+		sb.WriteString(fmt.Sprintf("if [ -d %s ]; then\n", shellQuote(certsBase)))
+		sb.WriteString(fmt.Sprintf("  for d in %s/*; do\n", shellQuote(certsBase)))
+		sb.WriteString("    [ -d \"$d\" ] || continue\n")
+		sb.WriteString("    name=${d##*/}\n")
+		sb.WriteString("    keep=0\n")
+		if len(srcs) > 0 {
+			quotedKeep := make([]string, 0, len(srcs))
+			for _, s := range srcs {
+				quotedKeep = append(quotedKeep, shellQuote(s))
+			}
+			sb.WriteString(fmt.Sprintf("    for k in %s; do [ \"$name\" = \"$k\" ] && keep=1; done\n", strings.Join(quotedKeep, " ")))
+		}
+		sb.WriteString("    if [ \"$keep\" = \"0\" ] && [ -f \"$d/hosts.toml\" ]; then\n")
+		sb.WriteString("      first_line=$(head -n 1 \"$d/hosts.toml\" 2>/dev/null || true)\n")
+		sb.WriteString("      if [ \"$first_line\" = \"# Managed by DKStore\" ]; then\n")
+		sb.WriteString("        rm -f -- \"$d/hosts.toml\"\n")
+		sb.WriteString("        rmdir -- \"$d\" 2>/dev/null || true\n")
+		sb.WriteString("      fi\n")
+		sb.WriteString("    fi\n")
+		sb.WriteString("  done\nfi\n")
+	}
+
+	if plan.ReloadDaemon {
+		sb.WriteString("reloaded=0\n")
+		sb.WriteString("if [ -z \"$HOST_ROOT\" ] && command -v systemctl >/dev/null 2>&1 && systemctl reload docker >/dev/null 2>&1; then reloaded=1; fi\n")
+		sb.WriteString("if [ \"$reloaded\" = \"0\" ]; then\n")
+		sb.WriteString("  pids=$(find_dockerd_pids)\n")
+		sb.WriteString("  if [ -n \"$pids\" ]; then kill -HUP $pids && reloaded=1; fi\n")
+		sb.WriteString("fi\n")
+		sb.WriteString("if [ \"$reloaded\" = \"0\" ] && [ -z \"$HOST_ROOT\" ] && command -v pkill >/dev/null 2>&1 && pkill -HUP -x dockerd >/dev/null 2>&1; then reloaded=1; fi\n")
+		sb.WriteString("if [ \"$reloaded\" = \"0\" ]; then echo \"dockerd process not found for reload\" >&2; exit 1; fi\n")
+	}
+	return sb.String()
+}
+
+var containerIDHexRe = regexp.MustCompile(`(?i)(?:containers/|docker-)([0-9a-f]{64})`)
+
+func isRunningInsideContainer() bool {
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return true
+	}
+	if _, err := os.Stat("/run/.containerenv"); err == nil {
+		return true
+	}
+	return false
+}
+
+func (l *LocalTransport) resolveSelfHelperImage(ctx context.Context) (string, error) {
+	tryInspect := func(idOrName string) string {
+		idOrName = strings.TrimSpace(idOrName)
+		if idOrName == "" {
+			return ""
+		}
+		resp, err := l.RequestDocker(ctx, http.MethodGet, "/containers/"+url.PathEscape(idOrName)+"/json", nil, nil)
+		if err != nil {
+			return ""
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return ""
+		}
+		var info struct {
+			Image string `json:"Image"`
+		}
+		if json.NewDecoder(resp.Body).Decode(&info) == nil && strings.TrimSpace(info.Image) != "" {
+			return strings.TrimSpace(info.Image)
+		}
+		return ""
+	}
+
+	for _, procFile := range []string{"/proc/self/mountinfo", "/proc/self/cgroup"} {
+		if b, err := os.ReadFile(procFile); err == nil {
+			if m := containerIDHexRe.FindSubmatch(b); len(m) == 2 {
+				if img := tryInspect(string(m[1])); img != "" {
+					return img, nil
+				}
+			}
+		}
+	}
+	if hn, err := os.Hostname(); err == nil {
+		if img := tryInspect(hn); img != "" {
+			return img, nil
+		}
+	}
+	resp, err := l.RequestDocker(ctx, http.MethodGet, "/containers/json?all=1", nil, nil)
+	if err == nil {
+		defer resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			var list []struct {
+				ImageID string            `json:"ImageID"`
+				Image   string            `json:"Image"`
+				Command string            `json:"Command"`
+				Labels  map[string]string `json:"Labels"`
+			}
+			if json.NewDecoder(resp.Body).Decode(&list) == nil {
+				for _, c := range list {
+					if c.Labels["dkstore.self"] == "true" && strings.TrimSpace(c.ImageID) != "" {
+						return strings.TrimSpace(c.ImageID), nil
+					}
+				}
+				for _, c := range list {
+					if strings.Contains(strings.ToLower(c.Command), "dkstore") && strings.TrimSpace(c.ImageID) != "" {
+						return strings.TrimSpace(c.ImageID), nil
+					}
+				}
+			}
+		}
+	}
+	return "", fmt.Errorf("cannot locate local helper container image")
+}
+
+func demuxDockerLogs(r io.Reader) (stdout, stderr []byte) {
+	var outBuf, errBuf bytes.Buffer
+	var hdr [8]byte
+	for {
+		if _, err := io.ReadFull(r, hdr[:]); err != nil {
+			if outBuf.Len() == 0 && errBuf.Len() == 0 {
+				rest, _ := io.ReadAll(io.LimitReader(r, 256<<10))
+				outBuf.Write(rest)
+			}
+			break
+		}
+		sz := binary.BigEndian.Uint32(hdr[4:8])
+		if sz == 0 {
+			continue
+		}
+		if sz > 4<<20 {
+			break
+		}
+		chunk := make([]byte, sz)
+		if _, err := io.ReadFull(r, chunk); err != nil {
+			break
+		}
+		if hdr[0] == 2 {
+			errBuf.Write(chunk)
+		} else {
+			outBuf.Write(chunk)
+		}
+	}
+	return outBuf.Bytes(), errBuf.Bytes()
+}
+
+func (l *LocalTransport) runContainerHostScript(ctx context.Context, script string) ([]byte, error) {
+	img, err := l.resolveSelfHelperImage(ctx)
+	if err != nil {
+		return nil, err
+	}
+	createSpec := map[string]any{
+		"Image":      img,
+		"User":       "0:0",
+		"Entrypoint": []string{"/bin/sh", "-c"},
+		"Cmd":        []string{script},
+		"HostConfig": map[string]any{
+			"PidMode":     "host",
+			"NetworkMode": "none",
+			"Binds":       []string{"/:/host_root"},
+		},
+	}
+	bodyBytes, err := json.Marshal(createSpec)
+	if err != nil {
+		return nil, err
+	}
+	cResp, err := l.RequestDocker(ctx, http.MethodPost, "/containers/create", bytes.NewReader(bodyBytes), map[string]string{
+		"Content-Type": "application/json",
+	})
+	if err != nil {
+		return nil, err
+	}
+	cBody, _ := io.ReadAll(io.LimitReader(cResp.Body, 16<<10))
+	_ = cResp.Body.Close()
+	if cResp.StatusCode < 200 || cResp.StatusCode >= 300 {
+		return nil, fmt.Errorf("create host config helper failed (HTTP %d): %s", cResp.StatusCode, strings.TrimSpace(string(cBody)))
+	}
+	var created struct {
+		ID string `json:"Id"`
+	}
+	if err := json.Unmarshal(cBody, &created); err != nil || strings.TrimSpace(created.ID) == "" {
+		return nil, fmt.Errorf("invalid helper container response")
+	}
+	cid := strings.TrimSpace(created.ID)
+	defer func() {
+		dCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if dResp, dErr := l.RequestDocker(dCtx, http.MethodDelete, "/containers/"+url.PathEscape(cid)+"?force=1&v=1", nil, nil); dErr == nil && dResp != nil {
+			_ = dResp.Body.Close()
+		}
+	}()
+
+	sResp, err := l.RequestDocker(ctx, http.MethodPost, "/containers/"+url.PathEscape(cid)+"/start", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	sBody, _ := io.ReadAll(io.LimitReader(sResp.Body, 16<<10))
+	_ = sResp.Body.Close()
+	if sResp.StatusCode < 200 || sResp.StatusCode >= 300 {
+		return nil, fmt.Errorf("start host config helper failed (HTTP %d): %s", sResp.StatusCode, strings.TrimSpace(string(sBody)))
+	}
+
+	wResp, err := l.RequestDocker(ctx, http.MethodPost, "/containers/"+url.PathEscape(cid)+"/wait", nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	wBody, _ := io.ReadAll(io.LimitReader(wResp.Body, 16<<10))
+	_ = wResp.Body.Close()
+	var waitRes struct {
+		StatusCode int `json:"StatusCode"`
+	}
+	_ = json.Unmarshal(wBody, &waitRes)
+
+	var stdout, stderr []byte
+	if lResp, lErr := l.RequestDocker(ctx, http.MethodGet, "/containers/"+url.PathEscape(cid)+"/logs?stdout=1&stderr=1", nil, nil); lErr == nil && lResp != nil {
+		stdout, stderr = demuxDockerLogs(lResp.Body)
+		_ = lResp.Body.Close()
+	}
+	if waitRes.StatusCode != 0 {
+		msg := strings.TrimSpace(string(stderr))
+		if msg == "" {
+			msg = strings.TrimSpace(string(stdout))
+		}
+		if msg != "" {
+			return stdout, fmt.Errorf("exit status %d (%s)", waitRes.StatusCode, msg)
+		}
+		return stdout, fmt.Errorf("exit status %d", waitRes.StatusCode)
+	}
+	return stdout, nil
+}
+
+// InspectDockerDaemonConfig 探测本机（或容器所属宿主机）实际生效的 dockerd 配置文件及 OpenWrt UCI 配置。
+func (l *LocalTransport) InspectDockerDaemonConfig(ctx context.Context) (*HostDaemonConfigState, error) {
+	ictx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if isRunningInsideContainer() {
+		out, err := l.runContainerHostScript(ictx, buildInspectDaemonConfigScript("/host_root"))
+		if err != nil {
+			return nil, err
+		}
+		return parseInspectDaemonConfigOutput(string(out))
+	}
+	cmd := exec.CommandContext(ictx, "sh", "-c", buildInspectDaemonConfigScript(""))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("%w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	return parseInspectDaemonConfigOutput(string(out))
+}
+
+// ApplyDockerDaemonConfig 在本机（或容器所属宿主机）原子写入镜像源配置并热重载 dockerd。
+func (l *LocalTransport) ApplyDockerDaemonConfig(ctx context.Context, plan ApplyDaemonMirrorPlan) error {
+	actx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if isRunningInsideContainer() {
+		_, err := l.runContainerHostScript(actx, buildApplyDaemonConfigScript("/host_root", plan))
+		return err
+	}
+	cmd := exec.CommandContext(actx, "sh", "-c", buildApplyDaemonConfigScript("", plan))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if msg := strings.TrimSpace(string(out)); msg != "" {
+			return fmt.Errorf("%w (%s)", err, msg)
+		}
+		return err
+	}
+	return nil
+}
+
+// InspectDockerDaemonConfig 通过 SSH（含自动 sudo 提权回退）探测远端主机实际生效的 dockerd 配置文件及 OpenWrt UCI 配置。
+func (t *SSHTransport) InspectDockerDaemonConfig(ctx context.Context) (*HostDaemonConfigState, error) {
+	if err := t.ensureClient(ctx); err != nil {
+		return nil, err
+	}
+	ictx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	out, err := t.runHostProbeWithSudoFallback(ictx, buildInspectDaemonConfigScript(""), func(s string, e error) bool {
+		if e != nil {
+			return true
+		}
+		_, pErr := parseInspectDaemonConfigOutput(s)
+		return pErr != nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return parseInspectDaemonConfigOutput(out)
+}
+
+// ApplyDockerDaemonConfig 通过 SSH（含自动 sudo 提权回退）原子写入远端主机镜像源配置并热重载 dockerd。
+func (t *SSHTransport) ApplyDockerDaemonConfig(ctx context.Context, plan ApplyDaemonMirrorPlan) error {
+	if err := t.ensureClient(ctx); err != nil {
+		return err
+	}
+	actx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	script := buildApplyDaemonConfigScript("", plan)
+	out, err := t.runPrivilegedCmd(actx, "sh -c "+shellQuote(script), nil)
+	if err != nil {
+		if msg := strings.TrimSpace(string(out)); msg != "" {
+			return fmt.Errorf("%w (%s)", err, msg)
+		}
+		return err
+	}
+	return nil
+}
 
 // ReloadDockerDaemon 在本机通过 SIGHUP 热重载 dockerd 配置（不中断运行中容器）。
 func (l *LocalTransport) ReloadDockerDaemon(ctx context.Context) error {
-	rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	rctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(rctx, "sh", "-c", reloadDockerScript)
+	if isRunningInsideContainer() {
+		if _, err := l.runContainerHostScript(rctx, buildReloadDockerScript("/host_root")); err != nil {
+			return fmt.Errorf("reload docker daemon: %w", err)
+		}
+		return nil
+	}
+	cmd := exec.CommandContext(rctx, "sh", "-c", buildReloadDockerScript(""))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if msg := strings.TrimSpace(string(out)); msg != "" {
@@ -55,7 +625,7 @@ func (t *SSHTransport) ReloadDockerDaemon(ctx context.Context) error {
 	}
 	rctx, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
-	out, err := t.runPrivilegedCmd(rctx, "sh -c "+shellQuote(reloadDockerScript), nil)
+	out, err := t.runPrivilegedCmd(rctx, "sh -c "+shellQuote(buildReloadDockerScript("")), nil)
 	if err != nil {
 		if msg := strings.TrimSpace(string(out)); msg != "" {
 			return fmt.Errorf("reload docker daemon: %w (%s)", err, msg)

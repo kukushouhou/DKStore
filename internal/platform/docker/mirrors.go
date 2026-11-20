@@ -174,8 +174,151 @@ func UpdateDaemonJSONMirrors(existing []byte, urls []string) ([]byte, bool, erro
 	return encoded, hasContainerdStore, nil
 }
 
+// ExtractMirrorsFromOpenWrtUCI 从 OpenWrt / iStoreOS 的 /etc/config/dockerd 中提取 globals 段的 registry_mirrors 列表。
+func ExtractMirrorsFromOpenWrtUCI(raw []byte) []string {
+	lines := strings.Split(strings.ReplaceAll(string(raw), "\r\n", "\n"), "\n")
+	inGlobals := false
+	var out []string
+	seen := make(map[string]bool)
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) >= 2 && fields[0] == "config" {
+			secType := strings.Trim(fields[1], `"'`)
+			secName := ""
+			if len(fields) >= 3 {
+				secName = strings.Trim(fields[2], `"'`)
+			}
+			inGlobals = secType == "globals" || secName == "globals"
+			continue
+		}
+		if !inGlobals || len(fields) < 3 {
+			continue
+		}
+		if (fields[0] == "list" || fields[0] == "option") && fields[1] == "registry_mirrors" {
+			valIdx := strings.Index(trimmed, "registry_mirrors")
+			valRaw := strings.TrimSpace(trimmed[valIdx+len("registry_mirrors"):])
+			valRaw = strings.Trim(valRaw, `"'`)
+			if u := NormalizeMirrorURL(valRaw); u != "" && !seen[u] {
+				seen[u] = true
+				out = append(out, u)
+			}
+		}
+	}
+	return out
+}
+
+// UpdateOpenWrtDockerdUCI 在保留 /etc/config/dockerd 其余配置与注释的前提下更新 globals 段的 registry_mirrors。
+func UpdateOpenWrtDockerdUCI(existing []byte, urls []string) ([]byte, bool) {
+	var clean []string
+	seen := make(map[string]bool, len(urls))
+	for _, raw := range urls {
+		if u := NormalizeMirrorURL(raw); u != "" && !seen[u] {
+			seen[u] = true
+			clean = append(clean, u)
+		}
+	}
+	prev := ExtractMirrorsFromOpenWrtUCI(existing)
+	if equalStringSlices(prev, clean) {
+		return existing, false
+	}
+
+	rawStr := strings.ReplaceAll(string(existing), "\r\n", "\n")
+	lines := strings.Split(rawStr, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	buildListLines := func() []string {
+		res := make([]string, 0, len(clean))
+		for _, u := range clean {
+			escaped := strings.ReplaceAll(u, "'", "'\\''")
+			res = append(res, "\tlist registry_mirrors '"+escaped+"'")
+		}
+		return res
+	}
+
+	var out []string
+	inGlobals := false
+	foundGlobals := false
+	inserted := false
+
+	flushGlobalsMirrors := func() {
+		if inGlobals && !inserted {
+			out = append(out, buildListLines()...)
+			inserted = true
+		}
+	}
+
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		fields := strings.Fields(trimmed)
+		if !strings.HasPrefix(trimmed, "#") && len(fields) >= 2 && fields[0] == "config" {
+			if inGlobals {
+				flushGlobalsMirrors()
+			}
+			secType := strings.Trim(fields[1], `"'`)
+			secName := ""
+			if len(fields) >= 3 {
+				secName = strings.Trim(fields[2], `"'`)
+			}
+			inGlobals = secType == "globals" || secName == "globals"
+			if inGlobals {
+				foundGlobals = true
+			}
+			out = append(out, line)
+			continue
+		}
+		if inGlobals && !strings.HasPrefix(trimmed, "#") && len(fields) >= 2 &&
+			(fields[0] == "list" || fields[0] == "option") && fields[1] == "registry_mirrors" {
+			if !inserted {
+				out = append(out, buildListLines()...)
+				inserted = true
+			}
+			continue
+		}
+		out = append(out, line)
+	}
+	if inGlobals {
+		flushGlobalsMirrors()
+	}
+	if !foundGlobals && len(clean) > 0 {
+		if len(out) > 0 && strings.TrimSpace(out[len(out)-1]) != "" {
+			out = append(out, "")
+		}
+		out = append(out, "config globals 'globals'")
+		out = append(out, buildListLines()...)
+	}
+	encoded := strings.Join(out, "\n") + "\n"
+	return []byte(encoded), true
+}
+
 // GetDockerHubMirrors 读取目标 Docker 宿主机当前配置的 docker.io 镜像加速源列表。
 func (a *Adapter) GetDockerHubMirrors(ctx context.Context) ([]string, error) {
+	if dcTr, ok := a.tr.(transport.DaemonConfigTransport); ok {
+		if st, err := dcTr.InspectDockerDaemonConfig(ctx); err == nil && st != nil {
+			if st.Exists && len(bytes.TrimSpace(st.ConfigBytes)) > 0 {
+				if urls, valid := ExtractMirrorsFromDaemonJSON(st.ConfigBytes); valid {
+					if len(urls) > 0 || !st.HasOpenWrtUCI {
+						return urls, nil
+					}
+				}
+			}
+			if st.HasOpenWrtUCI {
+				if uciURLs := ExtractMirrorsFromOpenWrtUCI(st.OpenWrtUCIBytes); len(uciURLs) > 0 {
+					return uciURLs, nil
+				}
+			}
+			if st.DefaultJSONExists && len(bytes.TrimSpace(st.DefaultJSONBytes)) > 0 {
+				if urls, valid := ExtractMirrorsFromDaemonJSON(st.DefaultJSONBytes); valid && len(urls) > 0 {
+					return urls, nil
+				}
+			}
+		}
+	}
 	if b, err := a.tr.ReadFile(ctx, defaultDaemonJSONPath); err == nil && len(bytes.TrimSpace(b)) > 0 {
 		if urls, ok := ExtractMirrorsFromDaemonJSON(b); ok {
 			return urls, nil
@@ -199,6 +342,7 @@ func (a *Adapter) GetDockerHubMirrors(ctx context.Context) ([]string, error) {
 
 func buildHostsTOML(source string, mirrorURLs []string) []byte {
 	var sb strings.Builder
+	sb.WriteString("# Managed by DKStore\n")
 	upstream := "https://" + source
 	if source == "docker.io" {
 		upstream = "https://registry-1.docker.io"
@@ -210,8 +354,24 @@ func buildHostsTOML(source string, mirrorURLs []string) []byte {
 	return []byte(sb.String())
 }
 
+func (a *Adapter) hasContainerdSnapshotter(ctx context.Context, hasInJSON bool) bool {
+	if hasInJSON {
+		return true
+	}
+	var info dockerInfoMirrorResp
+	if a.getJSON(ctx, "/info", &info) == nil {
+		for _, kv := range info.DriverStatus {
+			if strings.Contains(strings.ToLower(kv[0]), "driver-type") && strings.Contains(strings.ToLower(kv[1]), "containerd") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // ApplyMirrorPairs 将配对列表应用到当前 Docker 宿主机：
-// docker.io 写入 /etc/docker/daemon.json 并热重载 dockerd；若宿主机启用了 containerd 镜像存储，同时将自定义源仓库写入 /etc/docker/certs.d/<source>/hosts.toml。
+// 自动识别 dockerd 实际配置文件（兼容飞牛 fnOS data-root 保留、OpenWrt /etc/config/dockerd 与容器部署穿透宿主机）并热重载 dockerd；
+// 若宿主机启用了 containerd 镜像存储，同步维护与清理 /etc/docker/certs.d/<source>/hosts.toml。
 func (a *Adapter) ApplyMirrorPairs(ctx context.Context, pairs []platform.MirrorPair) (bool, error) {
 	execTr, ok := a.tr.(transport.ExecutableTransport)
 	if !ok {
@@ -229,25 +389,86 @@ func (a *Adapter) ApplyMirrorPairs(ctx context.Context, pairs []platform.MirrorP
 		}
 	}
 
-	existingBytes, _ := a.tr.ReadFile(ctx, defaultDaemonJSONPath)
+	if dcTr, ok := a.tr.(transport.DaemonConfigTransport); ok {
+		st, err := dcTr.InspectDockerDaemonConfig(ctx)
+		if err != nil {
+			return false, err
+		}
+		prevURLs, prevValid := ExtractMirrorsFromDaemonJSON(st.ConfigBytes)
+		newActiveBytes, hasContainerdInJSON, err := UpdateDaemonJSONMirrors(st.ConfigBytes, dockerHubURLs)
+		if err != nil {
+			return false, err
+		}
+		hasContainerd := a.hasContainerdSnapshotter(ctx, hasContainerdInJSON)
+
+		needWriteActive := false
+		if st.Exists {
+			needWriteActive = !prevValid || !equalStringSlices(prevURLs, dockerHubURLs)
+		} else if len(dockerHubURLs) > 0 {
+			needWriteActive = true
+		}
+
+		needWriteDef := false
+		var newDefBytes []byte
+		if st.DefaultJSONExists && st.ActiveConfigPath != defaultDaemonJSONPath {
+			defPrev, defValid := ExtractMirrorsFromDaemonJSON(st.DefaultJSONBytes)
+			if !defValid || !equalStringSlices(defPrev, dockerHubURLs) {
+				if updatedDef, _, dErr := UpdateDaemonJSONMirrors(st.DefaultJSONBytes, dockerHubURLs); dErr == nil {
+					needWriteDef = true
+					newDefBytes = updatedDef
+				}
+			}
+		}
+
+		needWriteUCI := false
+		var newUCIBytes []byte
+		if st.HasOpenWrtUCI {
+			if updatedUCI, changed := UpdateOpenWrtDockerdUCI(st.OpenWrtUCIBytes, dockerHubURLs); changed {
+				needWriteUCI = true
+				newUCIBytes = updatedUCI
+			}
+		}
+
+		var certTOMLs map[string][]byte
+		if hasContainerd {
+			certTOMLs = make(map[string][]byte, len(customPairs))
+			for src, urls := range customPairs {
+				if isSafeRegistryHostForCertsDir(src) {
+					certTOMLs[src] = buildHostsTOML(src, urls)
+				}
+			}
+		}
+
+		if needWriteActive || needWriteDef || needWriteUCI || hasContainerd {
+			plan := transport.ApplyDaemonMirrorPlan{
+				WriteActiveConfig:   needWriteActive,
+				ActiveConfigPath:    st.ActiveConfigPath,
+				ActiveConfigBytes:   newActiveBytes,
+				WriteDefaultJSON:    needWriteDef,
+				DefaultJSONBytes:    newDefBytes,
+				WriteOpenWrtUCI:     needWriteUCI,
+				OpenWrtUCIBytes:     newUCIBytes,
+				ReloadDaemon:        needWriteActive || needWriteUCI,
+				ManageCertsDir:      hasContainerd,
+				CustomCertHostsTOML: certTOMLs,
+			}
+			if err := dcTr.ApplyDockerDaemonConfig(ctx, plan); err != nil {
+				return false, err
+			}
+		}
+		return false, nil
+	}
+
+	existingBytes, readErr := a.tr.ReadFile(ctx, defaultDaemonJSONPath)
+	if readErr != nil && !transport.IsNotExistError(readErr) {
+		return false, readErr
+	}
 	prevURLs, prevValid := ExtractMirrorsFromDaemonJSON(existingBytes)
 	newBytes, hasContainerdInJSON, err := UpdateDaemonJSONMirrors(existingBytes, dockerHubURLs)
 	if err != nil {
 		return false, err
 	}
-
-	hasContainerd := hasContainerdInJSON
-	if !hasContainerd {
-		var info dockerInfoMirrorResp
-		if a.getJSON(ctx, "/info", &info) == nil {
-			for _, kv := range info.DriverStatus {
-				if strings.Contains(strings.ToLower(kv[0]), "driver-type") && strings.Contains(strings.ToLower(kv[1]), "containerd") {
-					hasContainerd = true
-					break
-				}
-			}
-		}
-	}
+	hasContainerd := a.hasContainerdSnapshotter(ctx, hasContainerdInJSON)
 
 	if !prevValid || !equalStringSlices(prevURLs, dockerHubURLs) {
 		if err := execTr.WriteFileAtomic(ctx, defaultDaemonJSONPath, newBytes, ""); err != nil {
@@ -266,7 +487,9 @@ func (a *Adapter) ApplyMirrorPairs(ctx context.Context, pairs []platform.MirrorP
 				continue
 			}
 			tomlPath := "/etc/docker/certs.d/" + src + "/hosts.toml"
-			_ = execTr.WriteFileAtomic(ctx, tomlPath, buildHostsTOML(src, urls), "")
+			if err := execTr.WriteFileAtomic(ctx, tomlPath, buildHostsTOML(src, urls), ""); err != nil {
+				return false, err
+			}
 		}
 	}
 	return false, nil
@@ -363,11 +586,30 @@ func SplitImageRegistryAndRepoPath(imageRef string) (regHost, repoPath, tag stri
 	return splitImageRegistryAndRepoPath(imageRef)
 }
 
-// splitImageRegistryAndRepoPath 拆分镜像引用的源仓库域名（默认 docker.io）、仓库路径与标签。
+// splitImageRegistryAndRepoPath 拆分镜像引用的源仓库域名（默认 docker.io）、仓库路径与标签（兼容 tag@sha256:... 格式）。
 func splitImageRegistryAndRepoPath(imageRef string) (regHost, repoPath, tag string) {
-	base, t := splitPullImageAndTag(strings.TrimSpace(imageRef))
+	raw := strings.TrimSpace(imageRef)
+	beforeAt, digestPart, hasAt := strings.Cut(raw, "@")
+	beforeAt = strings.TrimSpace(beforeAt)
+	digestPart = strings.TrimSpace(digestPart)
+
+	base := beforeAt
+	t := ""
+	lastSlash := strings.LastIndexByte(beforeAt, '/')
+	lastColon := strings.LastIndexByte(beforeAt, ':')
+	if lastColon > lastSlash {
+		base = strings.TrimSpace(beforeAt[:lastColon])
+		t = strings.TrimSpace(beforeAt[lastColon+1:])
+	}
 	if t == "" {
-		t = "latest"
+		if hasAt && strings.HasPrefix(strings.ToLower(digestPart), "sha256:") {
+			t = digestPart
+		} else {
+			t = "latest"
+		}
+	}
+	if base == "" {
+		return "", "", ""
 	}
 	first, rest, hasSlash := strings.Cut(base, "/")
 	if !hasSlash {
@@ -390,7 +632,9 @@ func buildMirrorPullRef(mirrorURL, repoPath, tag string) string {
 	}
 	prefix := strings.TrimRight(u.Host+u.Path, "/")
 	ref := prefix + "/" + strings.TrimLeft(repoPath, "/")
-	if tag != "" {
+	if strings.HasPrefix(strings.ToLower(tag), "sha256:") {
+		ref += "@" + tag
+	} else if tag != "" {
 		ref += ":" + tag
 	}
 	return ref

@@ -57,6 +57,49 @@ func TestNormalizeMirrorPairsAndBuildMirrorRef(t *testing.T) {
 	if ref != "ghcr.nju.edu.cn/owner/app:v1.2.3" {
 		t.Fatalf("unexpected mirror pull ref: %s", ref)
 	}
+
+	// Docker 29+ containerd snapshotter 镜像名常带 tag@sha256:... 后缀，应提取出纯标签而不将 sha256 混入冒号标签
+	reg2, repo2, tag2 := splitImageRegistryAndRepoPath("mysql:8.4.11@sha256:6ea90827b1100f8f2ae306a539f86d2c264a26ed435a2a9f75551dd5c3aeb242")
+	if reg2 != "docker.io" || repo2 != "library/mysql" || tag2 != "8.4.11" {
+		t.Fatalf("unexpected tag@digest split: %s / %s / %s", reg2, repo2, tag2)
+	}
+	// 纯摘要无标签引用应保留 sha256:... 并在代拉时使用 @ 连接
+	reg3, repo3, tag3 := splitImageRegistryAndRepoPath("ghcr.io/owner/app@sha256:abcd1234")
+	if reg3 != "ghcr.io" || repo3 != "owner/app" || tag3 != "sha256:abcd1234" {
+		t.Fatalf("unexpected untagged digest split: %s / %s / %s", reg3, repo3, tag3)
+	}
+	if dRef := buildMirrorPullRef("https://ghcr.nju.edu.cn", repo3, tag3); dRef != "ghcr.nju.edu.cn/owner/app@sha256:abcd1234" {
+		t.Fatalf("unexpected digest mirror pull ref: %s", dRef)
+	}
+}
+
+func TestOpenWrtDockerdUCIMirrorsReadWrite(t *testing.T) {
+	origUCI := []byte("# OpenWrt dockerd config\nconfig globals 'globals'\n\toption data_root '/opt/docker/'\n\toption log_level 'warn'\n\tlist registry_mirrors 'https://old-mirror.example.com/'\n\toption iptables '1'\n\nconfig firewall 'firewall'\n\toption device 'docker0'\n")
+	extracted := ExtractMirrorsFromOpenWrtUCI(origUCI)
+	if len(extracted) != 1 || extracted[0] != "https://old-mirror.example.com" {
+		t.Fatalf("unexpected extracted UCI mirrors: %v", extracted)
+	}
+
+	updated, changed := UpdateOpenWrtDockerdUCI(origUCI, []string{"docker.1ms.run", "https://m.daocloud.io/"})
+	if !changed {
+		t.Fatalf("expected UCI changed=true")
+	}
+	uStr := string(updated)
+	if !strings.Contains(uStr, "option data_root '/opt/docker/'") || !strings.Contains(uStr, "config firewall 'firewall'") {
+		t.Fatalf("expected existing UCI sections preserved, got:\n%s", uStr)
+	}
+	after := ExtractMirrorsFromOpenWrtUCI(updated)
+	if len(after) != 2 || after[0] != "https://docker.1ms.run" || after[1] != "https://m.daocloud.io" {
+		t.Fatalf("unexpected updated UCI mirrors: %v", after)
+	}
+
+	cleared, changed2 := UpdateOpenWrtDockerdUCI(updated, nil)
+	if !changed2 || len(ExtractMirrorsFromOpenWrtUCI(cleared)) != 0 {
+		t.Fatalf("expected UCI mirrors cleared cleanly, got:\n%s", string(cleared))
+	}
+	if !strings.Contains(string(cleared), "option iptables '1'") {
+		t.Fatalf("expected other options intact after clearing mirrors")
+	}
 }
 
 func TestRunMirrorProbeBatchClosedLoop(t *testing.T) {

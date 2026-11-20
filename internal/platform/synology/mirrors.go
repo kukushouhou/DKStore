@@ -192,11 +192,16 @@ func (a *Adapter) ApplyMirrorPairs(ctx context.Context, pairs []platform.MirrorP
 		if execTr, ok := a.tr.(transport.ExecutableTransport); ok {
 			var targetDockerdPath string
 			var existingBytes []byte
+			var readAccessErr error
 			for _, p := range synoDockerdJSONCandidates {
-				if b, err := a.tr.ReadFile(ctx, p); err == nil && len(bytes.TrimSpace(b)) > 0 {
+				b, err := a.tr.ReadFile(ctx, p)
+				if err == nil && len(bytes.TrimSpace(b)) > 0 {
 					targetDockerdPath = p
 					existingBytes = b
 					break
+				}
+				if err != nil && !transport.IsNotExistError(err) && readAccessErr == nil {
+					readAccessErr = err
 				}
 			}
 			if targetDockerdPath != "" {
@@ -225,6 +230,12 @@ func (a *Adapter) ApplyMirrorPairs(ctx context.Context, pairs []platform.MirrorP
 					}
 				}
 				return false, nil
+			}
+			if readAccessErr != nil {
+				if a.dsmCli != nil {
+					return a.dsmCli.SetDockerHubMirrors(ctx, dockerHubURLs)
+				}
+				return false, readAccessErr
 			}
 			if a.dock != nil {
 				return a.dock.ApplyMirrorPairs(ctx, normalized)

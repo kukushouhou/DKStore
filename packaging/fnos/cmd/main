@@ -37,7 +37,7 @@ start_app() {
     chmod +x "${APP_BIN}" 2>/dev/null || true
     rm -f "${SOCKET_PATH}"
     TRIM_APPNAME="dkstore" \
-    DKSTORE_LISTEN=":8090" \
+    DKSTORE_LISTEN="${DKSTORE_LISTEN:-:8090}" \
     DKSTORE_UNIX_SOCKET="${SOCKET_PATH}" \
     DKSTORE_DATA_DIR="${DATA_DIR}" \
     nohup "${APP_BIN}" >> "${LOG_FILE}" 2>&1 &

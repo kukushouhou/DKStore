@@ -761,7 +761,7 @@ func (t *SSHTransport) ReadFile(ctx context.Context, path string) ([]byte, error
 	if err := t.ensureClient(ctx); err != nil {
 		return nil, err
 	}
-	baseCmd := "cat -- " + shellQuote(path)
+	baseCmd := "LC_ALL=C cat -- " + shellQuote(path)
 	// 通过 LimitReader 流式读取，最多读取 maxFileSize 字节（审计 L12）
 	out, err := t.runReadOnlyCmd(ctx, baseCmd, maxFileSize)
 	if err != nil {
@@ -777,9 +777,9 @@ func writeFileScript(path string) string {
 	dir := posixParentDir(path)
 	mkdirPart := ""
 	if dir != "" && dir != "." && dir != "/" {
-		mkdirPart = "mkdir -p -- " + shellQuote(dir) + " && "
+		mkdirPart = "LC_ALL=C mkdir -p -- " + shellQuote(dir) + " && "
 	}
-	return fmt.Sprintf("%s{ cp -p -- %s %s 2>/dev/null || :; } && cat > %s && mv -f -- %s %s",
+	return fmt.Sprintf("%s{ LC_ALL=C cp -p -- %s %s 2>/dev/null || :; } && LC_ALL=C cat > %s && LC_ALL=C mv -f -- %s %s",
 		mkdirPart, shellQuote(path), shellQuote(tmpPath), shellQuote(tmpPath), shellQuote(tmpPath), shellQuote(path))
 }
 
@@ -1105,12 +1105,31 @@ func sudoStdin(pass string, payload []byte) io.Reader {
 	return bytes.NewReader(b)
 }
 
+// IsNotExistError 判断本机或远程 SSH 读文件错误是否确系“目标文件不存在”（区分于权限不足或连接故障）。
+func IsNotExistError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "no such file or directory") ||
+		strings.Contains(s, "cannot find the file") ||
+		strings.Contains(s, "没有那个文件或目录")
+}
+
 func isShellPermissionDenied(err error, out []byte) bool {
 	s := strings.ToLower(string(out))
 	if err != nil {
 		s += " " + strings.ToLower(err.Error())
 	}
-	return strings.Contains(s, "permission denied") || strings.Contains(s, "operation not permitted")
+	return strings.Contains(s, "permission denied") ||
+		strings.Contains(s, "operation not permitted") ||
+		strings.Contains(s, "access denied") ||
+		strings.Contains(s, "权限不够") ||
+		strings.Contains(s, "不允许的操作") ||
+		strings.Contains(s, "拒绝访问")
 }
 
 func (t *SSHTransport) runReadOnlyCmd(ctx context.Context, baseCmd string, limit int64) ([]byte, error) {

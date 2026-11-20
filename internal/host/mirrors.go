@@ -262,6 +262,9 @@ func (r *Registry) ListHostMirrorContainers(ctx context.Context, hostID string) 
 				continue
 			}
 			fullImg := repoPath + ":" + tag
+			if strings.HasPrefix(strings.ToLower(tag), "sha256:") {
+				fullImg = repoPath + "@" + tag
+			}
 			key := src + "|" + fullImg
 			if seen[key] {
 				continue
