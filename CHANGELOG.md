@@ -6,6 +6,22 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+## [v0.8.0] - 2026-11-21
+
+### 新功能
+- **设备 Docker 镜像源管理**：在设备卡片的「Docker 版本」下方新增可点击的「Docker 镜像源」入口（上方增加分隔线与系统底层环境区分），支持为 `docker.io` 及其他镜像仓库分别配置加速网址（点击「为其他仓库添加镜像」自动展开过滤后的常用仓库候选并支持手动输入域名、多行粘贴自动拆分与上移调整优先级）；每张仓库卡片右侧配备分段闪电测速按钮，默认优先抽检本机该仓库容器执行真实拉取验证（换取拉取令牌、读取镜像清单与试读镜像层首字节，无本机容器时 `docker.io` 自动回退官方基础镜像，其他仓库区分显示基础连通），支持点开菜单指定本机容器或实时搜索、输入目标镜像精确验证，并以通俗说明区分「连接失败」「找不到镜像」与「拒绝拉取」；保存时支持勾选同时应用到其他设备，自动适配飞牛 fnOS（完整保留 `data-root` 与文件权限）、OpenWrt / iStoreOS（同步更新 `/etc/config/dockerd` 与运行时配置）、Docker 容器部署模式及远程非 `root` 管理员 SSH 提权写入，Linux 设备热重载生效且不重启运行中的容器，修改群晖 `docker.io` 镜像源时提前弹窗提示群晖系统会重启该设备上的所有容器，其他仓库的加速镜像同步维护 `certs.d` 配置并在删除时自动清理残留、更新时自动代拉并还原为原镜像名 ([`da33243`](https://github.com/kukushouhou/DKStore/commit/da33243), [`b333262`](https://github.com/kukushouhou/DKStore/commit/b333262), [`2b3d0d6`](https://github.com/kukushouhou/DKStore/commit/2b3d0d6), [`b5b1cad`](https://github.com/kukushouhou/DKStore/commit/b5b1cad), [`7d9bd4f`](https://github.com/kukushouhou/DKStore/commit/7d9bd4f))
+
+### 问题修复
+- **更新失败提示与错误卡片重写**：修复拉取镜像在连接握手阶段返回 `EOF` 时被误报为「网络连接中途断开，已下载的部分会保留」的问题，准确区分无法连接镜像源与下载中断，并在终端日志中附带当前设备已配置的镜像源列表与底层原始报错；重写应用卡片与更新队列的失败状态显示，去除重复冒号前缀、内部多余分割线与重复主按钮，统一展示简明错误标题、次要原因说明与右上角快捷入口（如「镜像源设置 · 日志」「仓库凭据 · 日志」），并将卡片底部主按钮自动切换为「重试」 ([`da33243`](https://github.com/kukushouhou/DKStore/commit/da33243))
+
+---
+
+### Features
+- **Device Docker Mirror Management**: Added a clickable `Docker Mirrors` row right below `Docker Version` on each device card (separated from the host OS section by a divider), supporting per-registry mirror configuration (`Add Mirrors for Another Registry` opens a filtered preset dropdown while accepting any custom domain, alongside multi-line paste auto-splitting and priority ordering); each registry card includes a split lightning speed-test button that verifies real image pullability from the target device (Bearer token exchange, manifest read, and 1-byte layer probe using the device's own containers by default, falling back to official `alpine` on `docker.io` or basic connectivity on empty devices) with an optional popover to pick a local container or live-search/enter a target image and plain-language explanations distinguishing `Connection Failed`, `Image Not Found`, `Pull Refused`, and `Basic`; supports applying changes to selected devices on save across fnOS (preserving `data-root` and file permissions), OpenWrt / iStoreOS (syncing both `/etc/config/dockerd` UCI and active `--config-file`), containerized DKStore deployments, and remote non-`root` password-`sudo` SSH hosts, hot-reloading `dockerd` on Linux devices without restarting running containers, prompting a clear confirmation before saving `docker.io` mirror changes on Synology DSM (where Container Manager restarts all running containers on that NAS), and maintaining/cleaning `certs.d` configs as well as pulling non-`docker.io` mirrors with automatic re-tagging during updates ([`da33243`](https://github.com/kukushouhou/DKStore/commit/da33243), [`b333262`](https://github.com/kukushouhou/DKStore/commit/b333262), [`2b3d0d6`](https://github.com/kukushouhou/DKStore/commit/2b3d0d6), [`b5b1cad`](https://github.com/kukushouhou/DKStore/commit/b5b1cad), [`7d9bd4f`](https://github.com/kukushouhou/DKStore/commit/7d9bd4f))
+
+### Fixes
+- **Update Error Classification & Card Display Rewrite**: Fixed image pull `/v2/` handshake `EOF` failures being misclassified as mid-transfer disconnections, accurately distinguishing unreachable mirrors/registries from interrupted layer downloads and printing configured device mirrors alongside the raw Docker error in terminal logs; rewrote failed states on both app cards and the update queue panel to remove double-colon prefixes, redundant inner dividers, and duplicate primary `Retry` buttons in favor of a concise error title, secondary cause summary, inline quick links (`Mirrors · Log`, `Credentials · Log`), and switching the card footer primary button to `Retry` ([`da33243`](https://github.com/kukushouhou/DKStore/commit/da33243))
+
 ## [v0.7.1] - 2026-11-19
 
 ### 新功能
