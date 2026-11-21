@@ -6,6 +6,16 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+## [v0.8.1] - 2026-11-22
+
+### 问题修复
+- **仓库访问报错与镜像源空状态修复**：将无法连通仓库时的错误标题统一修正为「无法访问容器仓库」（超时为「访问容器仓库超时」），未配置镜像源时仅正常提示检查设备网络连接并只保留「日志」入口，仅当该设备已配置镜像源时补充「也可能是已配置的镜像源异常」说明与「镜像源设置」快捷入口（修改或清空镜像源保存后首页卡片与更新队列同步刷新）；修复镜像源弹窗在设备未配置任何镜像源时仍默认预塞空 `docker.io` 编辑卡片的问题，新增清晰的未配置空状态与「+ 添加镜像源」按钮，并支持通过卡片右上角 `✕` 或删除最后一行网址回到未配置状态 ([`7d50c24`](https://github.com/kukushouhou/DKStore/commit/7d50c24))
+
+---
+
+### Fixes
+- **Registry Access Error Copy & Mirror Modal Empty State**: Unified unreachable registry errors to `Cannot access container registry` (`Container registry timed out` on timeouts), showing plain network check wording with only the `Log` link when no mirrors are configured, and adding `configured mirrors may also be unavailable` plus the `Mirrors` quick link only when mirrors are configured (refreshing open failed cards and queue items immediately after saving mirror changes); replaced the pre-filled blank `docker.io` card on unconfigured devices with a clear empty state (`No mirrors configured on this device` + `+ Add Mirror`) and allowed removing the last card or URL row back to the empty state ([`7d50c24`](https://github.com/kukushouhou/DKStore/commit/7d50c24))
+
 ## [v0.8.0] - 2026-11-21
 
 ### 新功能
