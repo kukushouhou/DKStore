@@ -365,12 +365,26 @@ export default function UpdateQueuePanel({ mode, onCollapse }: UpdateQueuePanelP
 
                 <Space size={8} align="center" style={{ flexShrink: 0 }}>
                   {job.status === 'failed' ? (
-                    <Typography.Link
-                      onClick={() => setActiveLogJobId(job.id)}
-                      style={{ fontSize: 12, whiteSpace: 'nowrap' }}
+                    <Space
+                      size={6}
+                      align="center"
+                      separator={<Typography.Text type="secondary">·</Typography.Text>}
                     >
-                      {t.home.errLinkLog}
-                    </Typography.Link>
+                      {job.errorAction === 'mirror' && job.hostId && (
+                        <Typography.Link
+                          onClick={() => useUIStore.getState().setActiveMirrorHostId(job.hostId)}
+                          style={{ fontSize: 12, fontWeight: 500, whiteSpace: 'nowrap' }}
+                        >
+                          {t.home.errLinkMirror}
+                        </Typography.Link>
+                      )}
+                      <Typography.Link
+                        onClick={() => setActiveLogJobId(job.id)}
+                        style={{ fontSize: 12, whiteSpace: 'nowrap' }}
+                      >
+                        {t.home.errLinkLog}
+                      </Typography.Link>
+                    </Space>
                   ) : (
                     <Button size="small" onClick={() => setActiveLogJobId(job.id)}>
                       {t.queue.detailBtn}

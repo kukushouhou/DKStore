@@ -90,7 +90,7 @@ func NormalizeMirrorPairs(in []platform.MirrorPair) []platform.MirrorPair {
 	out := make([]platform.MirrorPair, 0, len(order))
 	for _, src := range order {
 		urls := bySource[src]
-		if len(urls) == 0 && src != "docker.io" {
+		if len(urls) == 0 {
 			continue
 		}
 		out = append(out, platform.MirrorPair{

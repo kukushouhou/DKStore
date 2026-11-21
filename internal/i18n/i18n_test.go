@@ -45,8 +45,8 @@ func TestFormatUpdateError_HumanizedPlainLanguage(t *testing.T) {
 		{"pull_failed", "EOF", "网络连接中途断开，已下载的部分会保留", "network connection dropped"},
 		{"pull_failed", "homeassistant/home-assistant:latest — EOF", "网络连接中途断开，已下载的部分会保留", "network connection dropped"},
 		{"pull_failed", "unexpected EOF", "网络连接中途断开，已下载的部分会保留", "network connection dropped"},
-		{"pull_failed", "HTTP 500: {\"message\":\"Get \\\"https://registry-1.docker.io/v2/\\\": EOF\"}", "无法连接镜像源", "Cannot connect to image source"},
-		{"pull_failed", "Get \"https://registry-1.docker.io/v2/\": net/http: TLS handshake timeout", "下载新镜像超时", "Image download timed out"},
+		{"pull_failed", "HTTP 500: {\"message\":\"Get \\\"https://registry-1.docker.io/v2/\\\": EOF\"}", "无法访问容器仓库", "Cannot access container registry"},
+		{"pull_failed", "Get \"https://registry-1.docker.io/v2/\": net/http: TLS handshake timeout", "访问容器仓库超时", "Container registry timed out"},
 		{"pull_failed", "toomanyrequests: You have reached your pull rate limit", "临时限流", "rate-limited"},
 		{"pull_failed", "unauthorized: authentication required", "需要登录或当前账号无访问权限", "authentication required"},
 		{"pull_failed", "manifest unknown", "找不到该版本镜像", "version not found"},
@@ -101,16 +101,30 @@ func TestBilingualAndLegacyStrip(t *testing.T) {
 }
 
 func TestFormatStructuredUpdateError(t *testing.T) {
-	st := FormatStructuredUpdateError(
+	// 1) 已配置镜像源时：统一报「无法访问容器仓库」，简明提示可能是已配置镜像源异常（不列具体 URL），并提供 mirror 快捷动作
+	stWithMirror := FormatStructuredUpdateError(
 		ZhCN,
 		"pull_failed",
 		`HTTP 500: {"message":"Get \"https://registry-1.docker.io/v2/\": EOF"}`,
 		"软路由模拟器",
 		0,
-		[]string{"https://docker.mirrors.ustc.edu.cn"},
+		[]string{"https://docker.mirrors.ustc.edu.cn", "https://docker.1ms.run"},
 	)
-	if st.Title != "无法连接镜像源" || st.Action != "mirror" || !strings.Contains(st.Detail, "docker.mirrors.ustc.edu.cn") {
-		t.Fatalf("unexpected structured mirror error: %+v", st)
+	if stWithMirror.Title != "无法访问容器仓库" || stWithMirror.Action != "mirror" || stWithMirror.Detail != "请检查设备网络连接，也可能是已配置的镜像源异常" {
+		t.Fatalf("unexpected structured error with mirrors: %+v", stWithMirror)
+	}
+
+	// 2) 未配置任何镜像源时：正常报「无法访问容器仓库」，不提镜像源且不返回 mirror 动作
+	stNoMirror := FormatStructuredUpdateError(
+		ZhCN,
+		"pull_failed",
+		`HTTP 500: {"message":"Get \"https://registry-1.docker.io/v2/\": EOF"}`,
+		"软路由模拟器",
+		0,
+		nil,
+	)
+	if stNoMirror.Title != "无法访问容器仓库" || stNoMirror.Action != "" || stNoMirror.Detail != "请检查设备网络连接，或稍后重试" {
+		t.Fatalf("unexpected structured error without mirrors: %+v", stNoMirror)
 	}
 
 	drop := FormatStructuredUpdateError(ZhCN, "pull_failed", "unexpected EOF", "软路由模拟器", 4096, nil)

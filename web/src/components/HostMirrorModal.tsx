@@ -185,41 +185,33 @@ function HostMirrorModalBody({
       .getHostMirrors(hostId)
       .then((res) => {
         if (cancelled) return
-        const pairs = res.pairs?.length
-          ? res.pairs
-          : [{ source: 'docker.io', urls: [] }]
-        const hubPair = pairs.find((p) => normalizeSourceDomain(p.source) === 'docker.io')
+        const validPairs = (res.pairs ?? []).filter((p) =>
+          (p.urls ?? []).some((u) => u.trim() !== ''),
+        )
+        const hubPair = validPairs.find(
+          (p) => normalizeSourceDomain(p.source) === 'docker.io',
+        )
         setInitialDockerHubUrls(
           (hubPair?.urls ?? []).map(normalizeMirrorUrl).filter(Boolean),
         )
         setLocalContainers(res.localContainers ?? [])
         setRows(
-          pairs.map((p) => ({
+          validPairs.map((p) => ({
             key: nextKey('pair'),
             source: p.source || 'docker.io',
             selectedTarget: '',
             testing: false,
             testMap: {},
-            urls:
-              p.urls && p.urls.length > 0
-                ? p.urls.map((u) => ({ key: nextKey('url'), url: u }))
-                : [{ key: nextKey('url'), url: '' }],
+            urls: p.urls
+              .filter((u) => u.trim() !== '')
+              .map((u) => ({ key: nextKey('url'), url: u })),
           })),
         )
       })
       .catch((e) => {
         if (!cancelled) {
           showApiError(e)
-          setRows([
-            {
-              key: nextKey('pair'),
-              source: 'docker.io',
-              selectedTarget: '',
-              testing: false,
-              testMap: {},
-              urls: [{ key: nextKey('url'), url: '' }],
-            },
-          ])
+          setRows([])
         }
       })
       .finally(() => {
@@ -292,13 +284,16 @@ function HostMirrorModalBody({
         }
       }
     }
-    if (!bySource.has('docker.io')) {
-      order.unshift('docker.io')
-      bySource.set('docker.io', [])
+    if (bySource.has('docker.io')) {
+      const idx = order.indexOf('docker.io')
+      if (idx > 0) {
+        order.splice(idx, 1)
+        order.unshift('docker.io')
+      }
     }
     for (const src of order) {
       const urls = bySource.get(src) ?? []
-      if (urls.length === 0 && src !== 'docker.io') continue
+      if (urls.length === 0) continue
       out.push({ source: src, urls })
     }
     return out
@@ -426,6 +421,26 @@ function HostMirrorModalBody({
         qc.invalidateQueries({ queryKey: ['hosts'] }),
         qc.invalidateQueries({ queryKey: ['updates'] }),
       ])
+      const st = useUIStore.getState()
+      const trackedFailedIds = new Set<string>()
+      for (const j of Object.values(st.updateQueueJobs)) {
+        if (j.status === 'failed') trackedFailedIds.add(j.id)
+      }
+      for (const j of Object.values(st.lastFinishedJobs)) {
+        if (j.status === 'failed') trackedFailedIds.add(j.id)
+      }
+      if (trackedFailedIds.size > 0) {
+        api
+          .listUpdates()
+          .then((res) => {
+            for (const item of res.items ?? []) {
+              if (trackedFailedIds.has(item.id) && item.status === 'failed') {
+                useUIStore.getState().upsertUpdateJob(item)
+              }
+            }
+          })
+          .catch(() => {})
+      }
       message.success(
         applyPeerIds.length > 0
           ? t.hosts.mirrorSavedWithSyncMsg
@@ -563,16 +578,18 @@ function HostMirrorModalBody({
   }
 
   const removeUrl = (pairIdx: number, urlIdx: number) => {
-    setRows((prev) =>
-      prev.map((item, idx) => {
-        if (idx !== pairIdx) return item
-        const nextUrls = item.urls.filter((_, i) => i !== urlIdx)
-        if (nextUrls.length === 0) {
-          nextUrls.push({ key: nextKey('url'), url: '' })
-        }
-        return { ...item, urls: nextUrls }
-      }),
-    )
+    setRows((prev) => {
+      const target = prev[pairIdx]
+      if (!target) return prev
+      if (target.urls.length <= 1) {
+        return prev.filter((_, idx) => idx !== pairIdx)
+      }
+      return prev.map((item, idx) =>
+        idx === pairIdx
+          ? { ...item, urls: item.urls.filter((_, i) => i !== urlIdx) }
+          : item,
+      )
+    })
   }
 
   const addBlankUrl = (pairIdx: number) => {
@@ -943,181 +960,214 @@ function HostMirrorModalBody({
         </div>
       ) : (
         <>
-          {/* 配对卡片列表 */}
-          <Flex
-            vertical
-            gap={12}
-            style={{ maxHeight: 400, overflowY: 'auto', paddingRight: 2 }}
-          >
-            {rows.map((pair, pairIdx) => {
-              const isMenuOpen = openMenuKey === pair.key
-              return (
-                <div
-                  key={pair.key}
-                  style={{
-                    background: token.colorFillAlter,
-                    border: `1px solid ${token.colorBorderSecondary}`,
-                    borderRadius: token.borderRadiusLG,
-                    padding: 14,
-                  }}
-                >
-                  {/* 卡片头：左「源仓库」 + 右「⚡ | ▾」分段图标按钮 */}
-                  <Flex align="center" justify="space-between" gap={12}>
-                    <Flex align="center" gap={10} style={{ minWidth: 0, flex: 1 }}>
-                      <Typography.Text
-                        type="secondary"
-                        style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}
-                      >
-                        {t.hosts.mirrorSourceLabel}
-                      </Typography.Text>
-                      <AutoComplete
-                        value={pair.source}
-                        autoFocus={pair.key === autoFocusPairKey}
-                        defaultOpen={pair.key === autoFocusPairKey}
-                        popupMatchSelectWidth={290}
-                        options={buildSourceOptionsForRow(pairIdx, pair.source)}
-                        onChange={(val) => updateRowSource(pairIdx, val)}
-                        onSelect={() => {
-                          if (autoFocusPairKey === pair.key) {
-                            setAutoFocusPairKey(null)
-                          }
-                        }}
-                        onBlur={() => {
-                          if (autoFocusPairKey === pair.key) {
-                            setAutoFocusPairKey(null)
-                          }
-                          normalizeRowSourceOnBlur(pairIdx)
-                        }}
-                        placeholder={t.hosts.mirrorSourcePlaceholder}
-                        style={{
-                          width: screens.sm ? 250 : '100%',
-                          maxWidth: '100%',
-                          fontFamily: token.fontFamilyCode,
-                        }}
-                      />
-                    </Flex>
-
-                    <Flex align="center" gap={8} style={{ flexShrink: 0 }}>
-                      <Space.Compact>
-                        <Tooltip title={t.hosts.mirrorTestTip}>
-                          <Button
-                            icon={<ThunderboltOutlined />}
-                            loading={pair.testing}
-                            disabled={saving}
-                            aria-label={t.hosts.mirrorTestTip}
-                            onClick={() => void handleTestPair(pairIdx)}
-                          />
-                        </Tooltip>
-                        <Popover
-                          open={isMenuOpen}
-                          onOpenChange={(open) => handleMenuOpenChange(pair.key, open)}
-                          trigger="click"
-                          placement="bottomRight"
-                          arrow={false}
-                          styles={{ container: { padding: 10, width: 365 } }}
-                          content={renderTargetPopover(pair, pairIdx)}
-                        >
-                          <Tooltip title={t.hosts.mirrorPickTargetTip}>
-                            <Button
-                              icon={<DownOutlined style={{ fontSize: 10 }} />}
-                              disabled={pair.testing || saving}
-                              aria-label={t.hosts.mirrorPickTargetTip}
-                              style={{ position: 'relative', width: 30 }}
-                            >
-                              {pair.selectedTarget ? (
-                                <span
-                                  style={{
-                                    position: 'absolute',
-                                    top: 5,
-                                    right: 5,
-                                    width: 6,
-                                    height: 6,
-                                    borderRadius: '50%',
-                                    background: token.colorPrimary,
-                                  }}
-                                />
-                              ) : null}
-                            </Button>
-                          </Tooltip>
-                        </Popover>
-                      </Space.Compact>
-
-                      {rows.length > 1 && (
-                        <Tooltip title={t.hosts.mirrorDelPairBtn}>
-                          <Button
-                            type="text"
-                            icon={<CloseOutlined style={{ fontSize: 12 }} />}
-                            onClick={() => removePair(pairIdx)}
-                          />
-                        </Tooltip>
-                      )}
-                    </Flex>
-                  </Flex>
-
-                  {/* 卡片主体：全宽展示该仓库的加速镜像网址列表 */}
-                  <Flex vertical gap={8} style={{ marginTop: 10 }}>
-                    {pair.urls.map((uItem, urlIdx) => (
-                      <Flex key={uItem.key} align="center" gap={6}>
-                        <Input
-                          value={uItem.url}
-                          onChange={(e) =>
-                            updateUrlText(pairIdx, urlIdx, e.target.value)
-                          }
-                          onBlur={() => normalizeUrlOnBlur(pairIdx, urlIdx)}
-                          onPaste={(e) => handlePasteUrls(e, pairIdx, urlIdx)}
-                          placeholder={t.hosts.mirrorUrlPlaceholder}
-                          style={{
-                            flex: 1,
-                            minWidth: 0,
-                            fontFamily: token.fontFamilyCode,
-                          }}
-                          suffix={renderUrlResultPill(pair, uItem.url)}
-                        />
-                        <Tooltip title={t.hosts.mirrorMoveUpTip}>
-                          <Button
-                            type="text"
-                            size="small"
-                            icon={<ArrowUpOutlined />}
-                            disabled={urlIdx === 0}
-                            onClick={() => moveUrlUp(pairIdx, urlIdx)}
-                          />
-                        </Tooltip>
-                        <Button
-                          type="text"
-                          danger
-                          size="small"
-                          onClick={() => removeUrl(pairIdx, urlIdx)}
-                        >
-                          {t.hosts.mirrorDeleteBtn}
-                        </Button>
-                      </Flex>
-                    ))}
-
-                    <div>
-                      <Typography.Link
-                        style={{ fontSize: token.fontSizeSM }}
-                        onClick={() => addBlankUrl(pairIdx)}
-                      >
-                        {t.hosts.mirrorAddUrlBtn}
-                      </Typography.Link>
-                    </div>
-                  </Flex>
-                </div>
-              )
-            })}
-          </Flex>
-
-          {/* 新增配对卡片 */}
-          <div>
-            <Button
-              type="dashed"
-              size="small"
-              icon={<PlusOutlined />}
-              onClick={addBlankPair}
+          {rows.length === 0 ? (
+            <div
+              style={{
+                border: `1px dashed ${token.colorBorder}`,
+                borderRadius: token.borderRadiusLG,
+                padding: '28px 16px',
+                textAlign: 'center',
+              }}
             >
-              {t.hosts.mirrorAddPairBtn}
-            </Button>
-          </div>
+              <Flex vertical align="center" gap={6}>
+                <Typography.Text strong style={{ fontSize: token.fontSize }}>
+                  {t.hosts.mirrorEmptyTitle}
+                </Typography.Text>
+                <Typography.Text
+                  type="secondary"
+                  style={{ fontSize: token.fontSizeSM }}
+                >
+                  {t.hosts.mirrorEmptyDesc}
+                </Typography.Text>
+                <div style={{ marginTop: 6 }}>
+                  <Button
+                    type="primary"
+                    icon={<PlusOutlined />}
+                    onClick={addBlankPair}
+                  >
+                    {t.hosts.mirrorEmptyAddBtn}
+                  </Button>
+                </div>
+              </Flex>
+            </div>
+          ) : (
+            <>
+              {/* 配对卡片列表 */}
+              <Flex
+                vertical
+                gap={12}
+                style={{ maxHeight: 400, overflowY: 'auto', paddingRight: 2 }}
+              >
+                {rows.map((pair, pairIdx) => {
+                  const isMenuOpen = openMenuKey === pair.key
+                  return (
+                    <div
+                      key={pair.key}
+                      style={{
+                        background: token.colorFillAlter,
+                        border: `1px solid ${token.colorBorderSecondary}`,
+                        borderRadius: token.borderRadiusLG,
+                        padding: 14,
+                      }}
+                    >
+                      {/* 卡片头：左「源仓库」 + 右「⚡ | ▾」分段图标按钮 */}
+                      <Flex align="center" justify="space-between" gap={12}>
+                        <Flex align="center" gap={10} style={{ minWidth: 0, flex: 1 }}>
+                          <Typography.Text
+                            type="secondary"
+                            style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}
+                          >
+                            {t.hosts.mirrorSourceLabel}
+                          </Typography.Text>
+                          <AutoComplete
+                            value={pair.source}
+                            autoFocus={pair.key === autoFocusPairKey}
+                            defaultOpen={pair.key === autoFocusPairKey}
+                            popupMatchSelectWidth={290}
+                            options={buildSourceOptionsForRow(pairIdx, pair.source)}
+                            onChange={(val) => updateRowSource(pairIdx, val)}
+                            onSelect={() => {
+                              if (autoFocusPairKey === pair.key) {
+                                setAutoFocusPairKey(null)
+                              }
+                            }}
+                            onBlur={() => {
+                              if (autoFocusPairKey === pair.key) {
+                                setAutoFocusPairKey(null)
+                              }
+                              normalizeRowSourceOnBlur(pairIdx)
+                            }}
+                            placeholder={t.hosts.mirrorSourcePlaceholder}
+                            style={{
+                              width: screens.sm ? 250 : '100%',
+                              maxWidth: '100%',
+                              fontFamily: token.fontFamilyCode,
+                            }}
+                          />
+                        </Flex>
+
+                        <Flex align="center" gap={6} style={{ flexShrink: 0 }}>
+                          <Space.Compact>
+                            <Tooltip title={t.hosts.mirrorTestTip}>
+                              <Button
+                                icon={<ThunderboltOutlined />}
+                                loading={pair.testing}
+                                disabled={saving}
+                                aria-label={t.hosts.mirrorTestTip}
+                                onClick={() => void handleTestPair(pairIdx)}
+                              />
+                            </Tooltip>
+                            <Popover
+                              open={isMenuOpen}
+                              onOpenChange={(open) => handleMenuOpenChange(pair.key, open)}
+                              trigger="click"
+                              placement="bottomRight"
+                              arrow={false}
+                              styles={{ container: { padding: 10, width: 365 } }}
+                              content={renderTargetPopover(pair, pairIdx)}
+                            >
+                              <Tooltip title={t.hosts.mirrorPickTargetTip}>
+                                <Button
+                                  icon={<DownOutlined style={{ fontSize: 10 }} />}
+                                  disabled={pair.testing || saving}
+                                  aria-label={t.hosts.mirrorPickTargetTip}
+                                  style={{ position: 'relative', width: 30 }}
+                                >
+                                  {pair.selectedTarget ? (
+                                    <span
+                                      style={{
+                                        position: 'absolute',
+                                        top: 5,
+                                        right: 5,
+                                        width: 6,
+                                        height: 6,
+                                        borderRadius: '50%',
+                                        background: token.colorPrimary,
+                                      }}
+                                    />
+                                  ) : null}
+                                </Button>
+                              </Tooltip>
+                            </Popover>
+                          </Space.Compact>
+
+                          <Tooltip title={t.hosts.mirrorDelPairBtn}>
+                            <Button
+                              type="text"
+                              aria-label={t.hosts.mirrorDelPairBtn}
+                              icon={<CloseOutlined style={{ fontSize: 12 }} />}
+                              onClick={() => removePair(pairIdx)}
+                            />
+                          </Tooltip>
+                        </Flex>
+                      </Flex>
+
+                      {/* 卡片主体：全宽展示该仓库的加速镜像网址列表 */}
+                      <Flex vertical gap={8} style={{ marginTop: 10 }}>
+                        {pair.urls.map((uItem, urlIdx) => (
+                          <Flex key={uItem.key} align="center" gap={6}>
+                            <Input
+                              value={uItem.url}
+                              onChange={(e) =>
+                                updateUrlText(pairIdx, urlIdx, e.target.value)
+                              }
+                              onBlur={() => normalizeUrlOnBlur(pairIdx, urlIdx)}
+                              onPaste={(e) => handlePasteUrls(e, pairIdx, urlIdx)}
+                              placeholder={t.hosts.mirrorUrlPlaceholder}
+                              style={{
+                                flex: 1,
+                                minWidth: 0,
+                                fontFamily: token.fontFamilyCode,
+                              }}
+                              suffix={renderUrlResultPill(pair, uItem.url)}
+                            />
+                            <Tooltip title={t.hosts.mirrorMoveUpTip}>
+                              <Button
+                                type="text"
+                                size="small"
+                                icon={<ArrowUpOutlined />}
+                                disabled={urlIdx === 0}
+                                onClick={() => moveUrlUp(pairIdx, urlIdx)}
+                              />
+                            </Tooltip>
+                            <Button
+                              type="text"
+                              danger
+                              size="small"
+                              onClick={() => removeUrl(pairIdx, urlIdx)}
+                            >
+                              {t.hosts.mirrorDeleteBtn}
+                            </Button>
+                          </Flex>
+                        ))}
+
+                        <div>
+                          <Typography.Link
+                            style={{ fontSize: token.fontSizeSM }}
+                            onClick={() => addBlankUrl(pairIdx)}
+                          >
+                            {t.hosts.mirrorAddUrlBtn}
+                          </Typography.Link>
+                        </div>
+                      </Flex>
+                    </div>
+                  )
+                })}
+              </Flex>
+
+              {/* 新增配对卡片 */}
+              <div>
+                <Button
+                  type="dashed"
+                  size="small"
+                  icon={<PlusOutlined />}
+                  onClick={addBlankPair}
+                >
+                  {t.hosts.mirrorAddPairBtn}
+                </Button>
+              </div>
+            </>
+          )}
 
           {/* 随保存一并同步应用到其他设备 */}
           {peerHosts.length > 0 && (

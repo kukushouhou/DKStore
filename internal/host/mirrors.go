@@ -51,10 +51,12 @@ func ensureDockerHubFirst(pairs []platform.MirrorPair, liveHubURLs []string, has
 		}
 	}
 	out := make([]platform.MirrorPair, 0, 1+len(others))
-	out = append(out, platform.MirrorPair{
-		Source: "docker.io",
-		URLs:   hubURLs,
-	})
+	if len(hubURLs) > 0 {
+		out = append(out, platform.MirrorPair{
+			Source: "docker.io",
+			URLs:   hubURLs,
+		})
+	}
 	out = append(out, others...)
 	return out
 }

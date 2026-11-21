@@ -655,8 +655,8 @@ func humanizeUpdateError(lang Lang, code, detail string) (string, bool) {
 			strings.Contains(lower, "http 504") ||
 			strings.Contains(lower, "status code 504") {
 			return pick(
-				"下载新镜像超时：连接镜像仓库过慢，请检查网络或镜像加速设置",
-				"Image download timed out: registry connection is too slow; check network or mirror settings",
+				"访问容器仓库超时：请检查设备网络连接，或稍后重试",
+				"Container registry timed out: check device network connection or try again later",
 			)
 		}
 		if strings.Contains(lower, "/v2/") ||
@@ -668,8 +668,8 @@ func humanizeUpdateError(lang Lang, code, detail string) (string, bool) {
 			strings.Contains(lower, "status code 502") ||
 			strings.Contains(lower, "status code 503") {
 			return pick(
-				"无法连接镜像源：加速源或官方仓库连接失败，请检查该设备的「Docker 镜像源」或网络设置",
-				"Cannot connect to image source: mirror or registry connection failed; check Docker Mirrors or device network",
+				"无法访问容器仓库：请检查设备网络连接，或稍后重试",
+				"Cannot access container registry: check device network connection or try again later",
 			)
 		}
 		if isRawEOFDetail(lower) ||
@@ -774,20 +774,12 @@ type StructuredUpdateError struct {
 	Action string `json:"action,omitempty"` // "" | "mirror" | "cred"
 }
 
-func stripURLSchemeHost(raw string) string {
-	s := strings.TrimSpace(raw)
-	s = strings.TrimPrefix(s, "https://")
-	s = strings.TrimPrefix(s, "http://")
-	s = strings.TrimRight(s, "/")
-	return s
-}
-
 // FormatStructuredUpdateError 生成去套娃的双层错误结构（所有错误类型统一为「短标题 + 清晰原因」）。
 func FormatStructuredUpdateError(
 	lang Lang,
 	code string,
 	rawDetail string,
-	hostName string,
+	_ string,
 	downloadedBytes int64,
 	configuredMirrors []string,
 ) StructuredUpdateError {
@@ -852,12 +844,21 @@ func FormatStructuredUpdateError(
 			strings.Contains(lower, "rate limit") ||
 			strings.Contains(lower, "429 too many requests") ||
 			strings.Contains(lower, "http 429") {
+			if len(configuredMirrors) > 0 {
+				return pick(
+					"镜像拉取触发限流",
+					"请求过于频繁被临时限流，也可能是已配置的镜像源触发限流",
+					"Registry rate limit reached",
+					"Pull rate limit reached; configured mirrors may also be rate-limited",
+					"mirror",
+				)
+			}
 			return pick(
 				"镜像拉取触发限流",
-				"仓库请求过于频繁被临时限流，可配置镜像加速源或登录仓库账号",
+				"仓库请求过于频繁被临时限流，请稍后重试或登录仓库账号",
 				"Registry rate limit reached",
-				"Pull rate limit reached; configure Docker Mirrors or registry credentials",
-				"mirror",
+				"Pull rate limit reached; try again later or configure registry credentials",
+				"",
 			)
 		}
 		if strings.Contains(lower, "repository does not exist") ||
@@ -883,25 +884,39 @@ func FormatStructuredUpdateError(
 			strings.Contains(lower, "not found: manifest") ||
 			strings.Contains(lower, "http 404") ||
 			strings.Contains(lower, "status code 404") {
-			action := ""
 			if len(configuredMirrors) > 0 {
-				action = "mirror"
+				return pick(
+					"找不到目标版本镜像",
+					"该版本可能已被移除，也可能是已配置的镜像源尚未同步",
+					"Target version not found",
+					"Version may have been removed or not yet synced to your configured mirrors",
+					"mirror",
+				)
 			}
 			return pick(
 				"找不到目标版本镜像",
-				"该版本可能已被移除，或所配置的镜像加速源尚未同步",
+				"仓库中未找到该版本镜像，可能已被作者移除",
 				"Target version not found",
-				"Version may have been removed or not yet synced to your mirror",
-				action,
+				"Target image version was not found in the registry",
+				"",
 			)
 		}
 		if strings.Contains(lower, "x509:") || strings.Contains(lower, "certificate") {
+			if len(configuredMirrors) > 0 {
+				return pick(
+					"安全证书校验失败",
+					"请检查设备系统时间是否准确，也可能是已配置的镜像源证书异常",
+					"TLS certificate check failed",
+					"Check device system time; configured mirror certificates may also be invalid",
+					"mirror",
+				)
+			}
 			return pick(
 				"安全证书校验失败",
-				"请检查设备系统时间是否准确，或核查镜像源与代理证书配置",
+				"请检查设备系统时间是否准确或网络证书环境",
 				"TLS certificate check failed",
-				"Verify device system time or mirror/proxy certificate settings",
-				"mirror",
+				"Check device system time or network TLS certificate settings",
+				"",
 			)
 		}
 		if strings.Contains(lower, "i/o timeout") ||
@@ -911,13 +926,22 @@ func FormatStructuredUpdateError(
 			strings.Contains(lower, "gateway timeout") ||
 			strings.Contains(lower, "http 504") ||
 			strings.Contains(lower, "status code 504") {
-			zhDet := "连接镜像仓库响应超时，请检查镜像加速源或设备网络设置"
-			enDet := "Registry connection timed out; check Docker Mirrors or device network"
-			if len(configuredMirrors) > 0 && strings.TrimSpace(hostName) != "" {
-				zhDet = hostName + " 的镜像加速源或直连仓库响应超时，请检查镜像源配置"
-				enDet = "Mirror or registry timed out on " + hostName + "; check Docker Mirrors"
+			if len(configuredMirrors) > 0 {
+				return pick(
+					"访问容器仓库超时",
+					"请检查设备网络连接，也可能是已配置的镜像源异常",
+					"Container registry timed out",
+					"Check device network connection; configured mirrors may also be unavailable",
+					"mirror",
+				)
 			}
-			return pick("连接镜像源超时", zhDet, "Mirror connection timed out", enDet, "mirror")
+			return pick(
+				"访问容器仓库超时",
+				"请检查设备网络连接，或稍后重试",
+				"Container registry timed out",
+				"Check device network connection or try again later",
+				"",
+			)
 		}
 
 		isEndpointFail := strings.Contains(lower, "/v2/") ||
@@ -936,27 +960,22 @@ func FormatStructuredUpdateError(
 			strings.Contains(lower, "no route to host") ||
 			(downloadedBytes == 0 && strings.Contains(lower, "http 500"))
 		if isEndpointFail {
-			zhDet := "无法连通镜像仓库，请检查该设备的「Docker 镜像源」或网络代理"
-			enDet := "Cannot reach image registry; check Docker Mirrors or network proxy"
 			if len(configuredMirrors) > 0 {
-				first := stripURLSchemeHost(configuredMirrors[0])
-				if len(configuredMirrors) == 1 && first != "" {
-					if strings.TrimSpace(hostName) != "" {
-						zhDet = hostName + " 的加速源（" + first + "）不可用，且直连仓库失败"
-					} else {
-						zhDet = "已配置的加速源（" + first + "）不可用，且直连仓库失败"
-					}
-					enDet = "Configured mirror (" + first + ") is unreachable and direct registry connection failed"
-				} else {
-					if strings.TrimSpace(hostName) != "" {
-						zhDet = hostName + " 配置的镜像加速源不可用，且直连仓库失败"
-					} else {
-						zhDet = "已配置的镜像加速源不可用，且直连仓库失败"
-					}
-					enDet = "Configured mirrors are unreachable and direct registry connection failed"
-				}
+				return pick(
+					"无法访问容器仓库",
+					"请检查设备网络连接，也可能是已配置的镜像源异常",
+					"Cannot access container registry",
+					"Check device network connection; configured mirrors may also be unavailable",
+					"mirror",
+				)
 			}
-			return pick("无法连接镜像源", zhDet, "Cannot connect to image source", enDet, "mirror")
+			return pick(
+				"无法访问容器仓库",
+				"请检查设备网络连接，或稍后重试",
+				"Cannot access container registry",
+				"Check device network connection or try again later",
+				"",
+			)
 		}
 
 		if isRawEOFDetail(lower) ||

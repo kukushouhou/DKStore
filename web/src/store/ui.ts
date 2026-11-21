@@ -208,6 +208,7 @@ export const useUIStore = create<UIState>((set) => ({
       const job: UpdateJobItem = {
         ...existing,
         ...rawJob,
+        errorAction: rawJob.errorAction ?? '',
         progress: cleanProgress,
         logChunk: undefined,
       }
