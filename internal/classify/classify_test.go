@@ -182,4 +182,21 @@ func TestAppendixD_PrecisionScopingAndDigestFormattingAndStatefulRules(t *testin
 	if out8.Kind != KindDigestUpdate || out8.CurrentVersion != "latest (v3.9.1)" || out8.TargetVersion != "latest (v3.16.0)" {
 		t.Fatalf("expected latest (v3.9.1) -> latest (v3.16.0), got %+v", out8)
 	}
+
+	// 8. 同时输出补丁、次版本、主版本三档候选
+	refImmich, _ := version.ParseImageRef("ghcr.io/immich-app/immich-server:v1.118.0")
+	out9 := Evaluate(Input{
+		Ref:             refImmich,
+		LocalRepoDigest: "sha256:cur1180",
+		RemoteManifest:  &registry.ManifestResult{RepoDigest: "sha256:cur1180"},
+		CandidateTags: []registry.TagDigestEntry{
+			{Name: "v1.118.0", RepoDigest: "sha256:cur1180"},
+			{Name: "v1.118.4", RepoDigest: "sha256:pat1184"},
+			{Name: "v1.124.2", RepoDigest: "sha256:min1242"},
+			{Name: "v2.0.0", RepoDigest: "sha256:maj2000"},
+		},
+	})
+	if out9.Candidates == nil || out9.Candidates.Patch != "v1.118.4" || out9.Candidates.Minor != "v1.124.2" || out9.Candidates.Major != "v2.0.0" {
+		t.Fatalf("expected patch/minor/major candidates, got %+v", out9.Candidates)
+	}
 }

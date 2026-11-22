@@ -842,9 +842,12 @@ func (s *Server) handleSearchServiceTags(w http.ResponseWriter, r *http.Request)
 		writeError(w, lang, http.StatusBadRequest, "bad_request", "missing serviceKey")
 		return
 	}
-	var imageRef string
+	var imageRef, repoDigest, curTagsJ, curResolvedTag string
 	err := s.d.Store.DB.QueryRowContext(r.Context(), `
-		SELECT COALESCE(image_ref,'') FROM service WHERE key=? AND gone_at IS NULL`, svcKey).Scan(&imageRef)
+		SELECT COALESCE(s.image_ref,''), COALESCE(s.repo_digest,''), COALESCE(s.current_tags_json,''), COALESCE(f.current_resolved_tag,'')
+		FROM service s
+		LEFT JOIN finding f ON f.service_key = s.key
+		WHERE s.key=? AND s.gone_at IS NULL`, svcKey).Scan(&imageRef, &repoDigest, &curTagsJ, &curResolvedTag)
 	if err != nil || strings.TrimSpace(imageRef) == "" {
 		writeError(w, lang, http.StatusNotFound, "not_found", "")
 		return
@@ -853,6 +856,14 @@ func (s *Server) handleSearchServiceTags(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		writeError(w, lang, http.StatusBadRequest, "bad_request", err.Error())
 		return
+	}
+	if curResolvedTag == "" && curTagsJ != "" {
+		var curTags []string
+		if json.Unmarshal([]byte(curTagsJ), &curTags) == nil && len(curTags) > 0 {
+			if best := version.SelectBestDisplayTag(ref.Tag, curTags); best != "" && version.ParseTag(best).Scheme != version.SchemeUnknown {
+				curResolvedTag = best
+			}
+		}
 	}
 
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
@@ -873,11 +884,13 @@ func (s *Server) handleSearchServiceTags(w http.ResponseWriter, r *http.Request)
 	}
 
 	res, err := s.d.Reg.SearchTagsEx(r.Context(), ref, registry.SearchOptions{
-		Query:             q,
-		Remote:            remote,
-		All:               all,
-		IncludePrerelease: includePrePtr,
-		SortBy:            sortBy,
+		Query:              q,
+		Remote:             remote,
+		All:                all,
+		IncludePrerelease:  includePrePtr,
+		SortBy:             sortBy,
+		CurrentResolvedTag: curResolvedTag,
+		CurrentRepoDigest:  repoDigest,
 	})
 	if err != nil {
 		writeError(w, lang, http.StatusBadGateway, "check_failed", i18n.LocalizeError(lang, err))
@@ -907,14 +920,18 @@ func (s *Server) handleSearchServiceTags(w http.ResponseWriter, r *http.Request)
 			SearchOrder:   e.SearchOrder,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"items":                out,
 		"highestTag":           res.HighestTag,
 		"highestStableTag":     res.HighestStableTag,
 		"highestPrereleaseTag": res.HighestPrereleaseTag,
 		"currentPrerelease":    res.CurrentPrerelease,
 		"hasTimestamps":        res.HasTimestamps,
-	})
+	}
+	if res.Candidates != nil && res.Candidates.Count() > 0 {
+		resp["candidates"] = res.Candidates
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleGetAppCompose(w http.ResponseWriter, r *http.Request) {

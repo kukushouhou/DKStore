@@ -695,3 +695,28 @@ func TestSearchTagsExFullModalPoolAndConcurrentPages(t *testing.T) {
 		t.Fatalf("expected fallback to full cached 62 items on 429, got err=%v len=%d", err, len(resFallback.Items))
 	}
 }
+
+func TestModalCandidatesAndPinnedFlavorIsolation(t *testing.T) {
+	ref, _ := version.ParseImageRef("python:3.13.1-alpine")
+	pool := []TagDigestEntry{
+		{Name: "3.13.1-alpine", RepoDigest: "sha256:cur"},
+		{Name: "3.13.4-alpine", RepoDigest: "sha256:patch"},
+		{Name: "3.13.5-alpine3.24", RepoDigest: "sha256:pinnedPatch"},
+		{Name: "3.14.2-alpine", RepoDigest: "sha256:minor"},
+		{Name: "3.14.2-alpine3.24", RepoDigest: "sha256:pinnedMinor"},
+		{Name: "4.0.0-alpine", RepoDigest: "sha256:major"},
+		{Name: "4.0.0-alpine3.24", RepoDigest: "sha256:pinnedMajor"},
+	}
+	res := buildFullModalSearchResult(pool, ref, "", false, false, "", "sha256:cur")
+	if res.HighestStableTag != "4.0.0-alpine" {
+		t.Fatalf("expected HighestStableTag=4.0.0-alpine without alpine3.24 pollution, got %q", res.HighestStableTag)
+	}
+	if res.Candidates == nil || res.Candidates.Patch != "3.13.4-alpine" || res.Candidates.Minor != "3.14.2-alpine" || res.Candidates.Major != "4.0.0-alpine" {
+		t.Fatalf("unexpected modal candidates: %+v", res.Candidates)
+	}
+	for _, it := range res.Items {
+		if it.StableVisible && version.HasFlavorVersionPin(version.ParseTag(it.Name).Variant) {
+			t.Fatalf("pinned flavor tag %q should not pollute default stableVisible list for floating 3.13.1-alpine", it.Name)
+		}
+	}
+}

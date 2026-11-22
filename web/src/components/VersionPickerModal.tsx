@@ -37,6 +37,7 @@ import {
   type ServiceVolumeItem,
   type SuggestedComposeDir,
   type TagSortMode,
+  type UpdateCandidates,
   type UpdatePolicyMode,
   type UpdateServiceConfigPayload,
 } from '../api/client'
@@ -277,6 +278,7 @@ function VersionPickerModalBody({
   )
 
   const [allTags, setAllTags] = useState<ServiceTagItem[]>([])
+  const [candidates, setCandidates] = useState<UpdateCandidates | undefined>(undefined)
   const [highestStableTag, setHighestStableTag] = useState<string>('')
   const [highestPrereleaseTag, setHighestPrereleaseTag] = useState<string>('')
   const [loading, setLoading] = useState(true)
@@ -484,6 +486,7 @@ function VersionPickerModalBody({
         const stHi = res.highestStableTag || res.highestTag || ''
         const preHi = res.highestPrereleaseTag || res.highestTag || ''
         setAllTags(items)
+        setCandidates(res.candidates)
         setHighestStableTag(stHi)
         setHighestPrereleaseTag(preHi)
 
@@ -496,6 +499,7 @@ function VersionPickerModalBody({
       } catch (e) {
         if (!cancelled) {
           setAllTags([])
+          setCandidates(undefined)
           showApiError(e)
         }
       } finally {
@@ -647,6 +651,90 @@ function VersionPickerModalBody({
     () => matchedAllTags.slice(0, visibleLimit),
     [matchedAllTags, visibleLimit],
   )
+
+  const candidateTracks = useMemo(() => {
+    if (!candidates) return []
+    const defs: {
+      kind: 'patch' | 'minor' | 'major'
+      tag?: string
+      label: string
+      tip: string
+      color: 'success' | 'processing' | 'warning'
+    }[] = [
+      {
+        kind: 'patch',
+        tag: candidates.patch,
+        label: t.versionPicker.candPatch,
+        tip: t.versionPicker.candPatchTip,
+        color: 'success',
+      },
+      {
+        kind: 'minor',
+        tag: candidates.minor,
+        label: t.versionPicker.candMinor,
+        tip: t.versionPicker.candMinorTip,
+        color: 'processing',
+      },
+      {
+        kind: 'major',
+        tag: candidates.major,
+        label: t.versionPicker.candMajor,
+        tip: t.versionPicker.candMajorTip,
+        color: 'warning',
+      },
+    ]
+    const seen = new Set<string>()
+    const out: {
+      kind: 'patch' | 'minor' | 'major'
+      tag: string
+      label: string
+      tip: string
+      color: 'success' | 'processing' | 'warning'
+    }[] = []
+    for (const d of defs) {
+      const tg = (d.tag || '').trim()
+      if (!tg || seen.has(tg)) continue
+      if (!showPrerelease && isPrereleaseTagStr(tg)) continue
+      seen.add(tg)
+      out.push({ ...d, tag: tg })
+    }
+    return out.length >= 2 ? out : []
+  }, [
+    candidates,
+    showPrerelease,
+    t.versionPicker.candMajor,
+    t.versionPicker.candMajorTip,
+    t.versionPicker.candMinor,
+    t.versionPicker.candMinorTip,
+    t.versionPicker.candPatch,
+    t.versionPicker.candPatchTip,
+  ])
+
+  const candidateByTag = useMemo(
+    () => new Map(candidateTracks.map((c) => [c.tag, c])),
+    [candidateTracks],
+  )
+
+  const handlePickCandidateTrack = (tag: string) => {
+    if (trimmedQuery && !tag.toLowerCase().includes(trimmedQuery.toLowerCase())) {
+      setQuery('')
+    }
+    applyTagSelection(tag)
+    const idx = matchedAllTags.findIndex((item) => item.tag === tag)
+    if (idx >= visibleLimit) {
+      setVisibleLimit(idx + PAGE_RENDER_STEP)
+    }
+    requestAnimationFrame(() => {
+      const box = listBoxRef.current
+      if (!box) return
+      const esc =
+        typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+          ? CSS.escape(tag)
+          : tag.replace(/["\\]/g, '\\$&')
+      const el = box.querySelector<HTMLElement>(`[data-tag-option="${esc}"]`)
+      el?.scrollIntoView({ block: 'nearest' })
+    })
+  }
 
   const handleListScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget
@@ -1216,9 +1304,11 @@ function VersionPickerModalBody({
                       const active = item.tag === selectedTag
                       const timeStr = formatTagTime(item.updatedAt)
                       const isPre = Boolean(item.prerelease || isPrereleaseTagStr(item.tag))
+                      const candBadge = candidateByTag.get(item.tag)
                       return (
                         <Flex
                           key={item.tag}
+                          data-tag-option={item.tag}
                           role="option"
                           aria-selected={active}
                           tabIndex={0}
@@ -1288,6 +1378,20 @@ function VersionPickerModalBody({
                                   </span>
                                 )}
                               </span>
+                              {candBadge && (
+                                <Tag
+                                  color={candBadge.color}
+                                  style={{
+                                    margin: 0,
+                                    fontSize: 11,
+                                    lineHeight: '16px',
+                                    paddingInline: 5,
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  {candBadge.label}
+                                </Tag>
+                              )}
                               {isPre && (
                                 <Tag
                                   color="warning"
@@ -1391,6 +1495,70 @@ function VersionPickerModalBody({
               }}
             >
               <Flex vertical gap={8}>
+                {candidateTracks.length >= 2 && (
+                  <div
+                    style={{
+                      paddingBottom: 12,
+                      marginBottom: 4,
+                      borderBottom: `1px solid ${token.colorSplit}`,
+                    }}
+                  >
+                    <Typography.Text
+                      type="secondary"
+                      style={{ fontSize: token.fontSizeSM, display: 'block', marginBottom: 8 }}
+                    >
+                      {t.versionPicker.candidatesHeader}
+                    </Typography.Text>
+                    <Flex wrap="wrap" gap={6}>
+                      {candidateTracks.map((cand) => {
+                        const active = selectedTag === cand.tag
+                        return (
+                          <Tooltip key={cand.kind} title={cand.tip}>
+                            <Button
+                              size="small"
+                              type="default"
+                              onClick={() => handlePickCandidateTrack(cand.tag)}
+                              style={{
+                                height: 'auto',
+                                padding: '3px 8px',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: 6,
+                                borderColor: active
+                                  ? token.colorPrimary
+                                  : token.colorBorderSecondary,
+                                background: active ? token.colorPrimaryBg : token.colorBgContainer,
+                              }}
+                            >
+                              <Tag
+                                color={cand.color}
+                                style={{
+                                  margin: 0,
+                                  fontSize: 11,
+                                  lineHeight: '16px',
+                                  paddingInline: 5,
+                                }}
+                              >
+                                {cand.label}
+                              </Tag>
+                              <span
+                                style={{
+                                  fontFamily: token.fontFamilyCode,
+                                  fontSize: token.fontSizeSM,
+                                  fontWeight: active ? 600 : 400,
+                                  color: active ? token.colorPrimary : token.colorText,
+                                }}
+                              >
+                                {cand.tag}
+                              </span>
+                            </Button>
+                          </Tooltip>
+                        )
+                      })}
+                    </Flex>
+                  </div>
+                )}
+
                 <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
                   {t.versionPicker.policyHeader}
                 </Typography.Text>

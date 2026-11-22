@@ -457,6 +457,12 @@ export interface ServiceTagItem {
   searchOrder?: number
 }
 
+export interface UpdateCandidates {
+  patch?: string
+  minor?: string
+  major?: string
+}
+
 export interface ServiceTagsResponse {
   items: ServiceTagItem[]
   highestTag?: string
@@ -464,6 +470,7 @@ export interface ServiceTagsResponse {
   highestPrereleaseTag?: string
   currentPrerelease?: boolean
   hasTimestamps?: boolean
+  candidates?: UpdateCandidates
 }
 
 export interface SearchServiceTagsOpts {

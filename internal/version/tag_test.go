@@ -112,3 +112,66 @@ func TestPrereleaseParsingCompareAndCompatibility(t *testing.T) {
 		t.Fatalf("expected beta-slim -> 3.0.0-beta.1-slim, got %q", got)
 	}
 }
+
+func TestSelectUpdateCandidatesAndFlavorVersionPinning(t *testing.T) {
+	pool := []string{
+		"v1.118.1",
+		"v1.118.4",
+		"v1.119.0",
+		"v1.124.2",
+		"v2.0.0-rc.1",
+		"v2.0.0",
+		"v2.1.0",
+		"v1.118.9-alpine",
+	}
+	cands := SelectUpdateCandidates("v1.118.0", pool)
+	if cands.Patch != "v1.118.4" || cands.Minor != "v1.124.2" || cands.Major != "v2.1.0" || cands.Count() != 3 {
+		t.Fatalf("unexpected candidates for v1.118.0: %+v", cands)
+	}
+
+	// LinuxServer -ls 构建号补丁识别
+	lsCands := SelectUpdateCandidates("1.2.3-ls10", []string{"1.2.3-ls12", "1.2.4-ls11", "1.3.0-ls5"})
+	if lsCands.Patch != "1.2.4-ls11" || lsCands.Minor != "1.3.0-ls5" || lsCands.Major != "" {
+		t.Fatalf("unexpected ls candidates: %+v", lsCands)
+	}
+
+	// 0.x.y 早期版本号：0.5.1 -> 补丁 0.5.4、次版本 0.6.2、主版本 1.0.0 互不覆盖
+	zeroCands := SelectUpdateCandidates("0.5.1", []string{"0.5.4", "0.6.2", "1.0.0"})
+	if zeroCands.Patch != "0.5.4" || zeroCands.Minor != "0.6.2" || zeroCands.Major != "1.0.0" {
+		t.Fatalf("unexpected 0.x candidates: %+v", zeroCands)
+	}
+
+	// 发行版后缀锁死版本识别与双向防串台（3-alpine vs 3-alpine3.24 / 3-alpine.3.24 / ubuntu.24.04）
+	for _, pinned := range []string{"alpine3.24", "alpine-3.24", "alpine.3.24", "ubuntu.24.04", "debian12", "slim-openssl3.1"} {
+		if !HasFlavorVersionPin(pinned) {
+			t.Fatalf("expected HasFlavorVersionPin(%q) == true", pinned)
+		}
+	}
+	for _, floating := range []string{"", "alpine", "slim", "bookworm", "ls", "amd64", "arm64v8"} {
+		if HasFlavorVersionPin(floating) {
+			t.Fatalf("expected HasFlavorVersionPin(%q) == false", floating)
+		}
+	}
+
+	pairs := [][2]string{
+		{"3-alpine", "3-alpine3.24"},
+		{"3-alpine3.24", "3-alpine"},
+		{"3-alpine", "3-alpine.3.24"},
+		{"1.2.3-ubuntu", "1.2.4-ubuntu.24.04"},
+		{"3.14-rc1-alpine", "3.14-alpine3.24"},
+		{"3.14-rc1-alpine3.24", "3.14-alpine"},
+	}
+	for _, p := range pairs {
+		cur := ParseTag(p[0])
+		cand := ParseTag(p[1])
+		if CompatibleCandidate(cur, cand) {
+			t.Fatalf("expected %q and %q to be incompatible across floating/pinned flavor boundary", p[0], p[1])
+		}
+	}
+	if !CompatibleCandidate(ParseTag("3.14-rc1-alpine"), ParseTag("3.14-alpine")) {
+		t.Fatalf("expected 3.14-rc1-alpine -> 3.14-alpine to be compatible")
+	}
+	if !CompatibleCandidate(ParseTag("3.14-rc1-alpine3.24"), ParseTag("3.14-alpine3.24")) {
+		t.Fatalf("expected 3.14-rc1-alpine3.24 -> 3.14-alpine3.24 to be compatible")
+	}
+}

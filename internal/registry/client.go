@@ -735,11 +735,13 @@ const (
 
 // SearchOptions 控制版本弹窗的标签列表查询、预发布过滤与排序方式。
 type SearchOptions struct {
-	Query             string
-	Remote            bool
-	All               bool   // true 时并发拉取完整标签池并全量返回前端（不提前过滤丢弃或截断 50 条）
-	IncludePrerelease *bool  // nil 时自动按容器当前标签是否为预发布版本决定
-	SortBy            string // "version"（默认）| "time"
+	Query              string
+	Remote             bool
+	All                bool   // true 时并发拉取完整标签池并全量返回前端（不提前过滤丢弃或截断 50 条）
+	IncludePrerelease  *bool  // nil 时自动按容器当前标签是否为预发布版本决定
+	SortBy             string // "version"（默认）| "time"
+	CurrentResolvedTag string // 本地已识别出的精确版本标签（用于滚动/短标签计算三档候选）
+	CurrentRepoDigest  string // 本地当前镜像 Digest（排除同镜像标签）
 }
 
 // TaggedSearchItem 是携带预发布标记、通道实际指向版本及本地筛选排序元数据的标签项。
@@ -760,6 +762,7 @@ type SearchResult struct {
 	HighestPrereleaseTag string
 	CurrentPrerelease    bool
 	HasTimestamps        bool
+	Candidates           *version.UpdateCandidates
 }
 
 // SearchTags 兼容简化调用签名，返回标签列表与作用域内最高版本标签 highestTag。
@@ -883,7 +886,7 @@ func (c *Client) SearchTagsEx(ctx context.Context, ref version.ParsedRef, opts S
 	}
 
 	if opts.All {
-		return buildFullModalSearchResult(combined, ref, scopePrefix, curPrerelease, hasTimestamps), nil
+		return buildFullModalSearchResult(combined, ref, scopePrefix, curPrerelease, hasTimestamps, opts.CurrentResolvedTag, opts.CurrentRepoDigest), nil
 	}
 
 	effectiveSort := sortBy
@@ -891,7 +894,11 @@ func (c *Client) SearchTagsEx(ctx context.Context, ref version.ParsedRef, opts S
 		effectiveSort = "version"
 	}
 
-	cleanedDefault := buildCleanDefaultTags(combined, ref, scopePrefix, includePre, effectiveSort)
+	cleanedFull := buildCleanDefaultTags(combined, ref, scopePrefix, includePre, "version")
+	cleanedDefault := cleanedFull
+	if effectiveSort == "time" {
+		cleanedDefault = buildCleanDefaultTags(combined, ref, scopePrefix, includePre, effectiveSort)
+	}
 	highestStable := pickScopedHighestTag(cleanedDefault, combined, ref, scopePrefix, false)
 	highestPre := pickScopedHighestTag(cleanedDefault, combined, ref, scopePrefix, true)
 	highest := highestStable
@@ -924,6 +931,7 @@ func (c *Client) SearchTagsEx(ctx context.Context, ref version.ParsedRef, opts S
 	}
 
 	digestGroup := buildDigestTagGroup(combined)
+	candidates := computeModalCandidates(cleanedFull, combined, ref, opts.CurrentResolvedTag, opts.CurrentRepoDigest, digestGroup)
 	items := make([]TaggedSearchItem, 0, len(chosen))
 	for i, e := range chosen {
 		alias := resolveEntryAliasOfWithGroup(e, digestGroup)
@@ -948,6 +956,7 @@ func (c *Client) SearchTagsEx(ctx context.Context, ref version.ParsedRef, opts S
 		HighestPrereleaseTag: highestPre,
 		CurrentPrerelease:    curPrerelease,
 		HasTimestamps:        hasTimestamps,
+		Candidates:           candidates,
 	}, nil
 }
 
@@ -1014,6 +1023,8 @@ func buildFullModalSearchResult(
 	scopePrefix string,
 	curPrerelease bool,
 	hasTimestamps bool,
+	resolvedTag string,
+	localDigest string,
 ) *SearchResult {
 	unique := mergeUniqueTagEntries(combined)
 	cleanStable := buildCleanDefaultTags(unique, ref, scopePrefix, false, "version")
@@ -1131,6 +1142,11 @@ func buildFullModalSearchResult(
 	}
 
 	digestGroup := buildDigestTagGroup(unique)
+	candPool := cleanStable
+	if curPrerelease {
+		candPool = cleanPre
+	}
+	candidates := computeModalCandidates(candPool, unique, ref, resolvedTag, localDigest, digestGroup)
 	items := make([]TaggedSearchItem, 0, len(orderedAll))
 	for _, e := range orderedAll {
 		alias := resolveEntryAliasOfWithGroup(e, digestGroup)
@@ -1155,7 +1171,60 @@ func buildFullModalSearchResult(
 		HighestPrereleaseTag: highestPre,
 		CurrentPrerelease:    curPrerelease,
 		HasTimestamps:        hasTimestamps,
+		Candidates:           candidates,
 	}
+}
+
+func computeModalCandidates(
+	cleanPool []TagDigestEntry,
+	rawPool []TagDigestEntry,
+	ref version.ParsedRef,
+	resolvedTag string,
+	localDigest string,
+	digestGroup map[string][]string,
+) *version.UpdateCandidates {
+	baseTag := ""
+	pRef := version.ParseTag(ref.Tag)
+	pRes := version.ParseTag(resolvedTag)
+	switch {
+	case pRef.Scheme != version.SchemeUnknown && pRef.Precision >= 3:
+		baseTag = ref.Tag
+	case pRes.Scheme != version.SchemeUnknown && pRes.Precision >= 2 && (pRef.Scheme == version.SchemeUnknown || pRes.Precision > pRef.Precision):
+		baseTag = resolvedTag
+	case pRef.Scheme != version.SchemeUnknown && pRef.Precision >= 2:
+		baseTag = ref.Tag
+	}
+	if baseTag == "" && ref.Tag != "" {
+		for _, e := range rawPool {
+			if e.Name == ref.Tag && e.RepoDigest != "" {
+				if alias := resolveAliasFromCandidates(e.Name, digestGroup[e.RepoDigest]); alias != "" {
+					if pa := version.ParseTag(alias); pa.Scheme != version.SchemeUnknown && pa.Precision >= 2 {
+						baseTag = alias
+					}
+				}
+				break
+			}
+		}
+	}
+	if baseTag == "" {
+		return nil
+	}
+	normLocal := NormalizeDigest(localDigest)
+	names := make([]string, 0, len(cleanPool))
+	for _, e := range cleanPool {
+		if e.Name == "" {
+			continue
+		}
+		if normLocal != "" && NormalizeDigest(e.RepoDigest) == normLocal {
+			continue
+		}
+		names = append(names, e.Name)
+	}
+	cands := version.SelectUpdateCandidates(baseTag, names)
+	if cands.Count() == 0 {
+		return nil
+	}
+	return &cands
 }
 
 func buildDigestTagGroup(pool []TagDigestEntry) map[string][]string {
@@ -1426,6 +1495,10 @@ func buildCleanDefaultTags(entries []TagDigestEntry, ref version.ParsedRef, scop
 		return out
 	}
 
+	curPinnedFlavor := version.HasFlavorVersionPin(curParsed.Variant)
+	if curParsed.Scheme == version.SchemeUnknown {
+		curPinnedFlavor = version.HasFlavorVersionPin(curTagName)
+	}
 	filterSemVer := func(strictFlavor bool) ([]TagDigestEntry, *TagDigestEntry, *TagDigestEntry, []TagDigestEntry) {
 		var semverItems []TagDigestEntry
 		var curEntry *TagDigestEntry
@@ -1464,6 +1537,9 @@ func buildCleanDefaultTags(entries []TagDigestEntry, ref version.ParsedRef, scop
 				continue
 			}
 			if strictFlavor && !allowedFlavors[fl] {
+				continue
+			}
+			if strictFlavor && curFlavor != "" && e.Name != curTagName && version.HasFlavorVersionPin(pt.Variant) != curPinnedFlavor {
 				continue
 			}
 			semverItems = append(semverItems, e)
@@ -1543,8 +1619,18 @@ func buildCleanDefaultTags(entries []TagDigestEntry, ref version.ParsedRef, scop
 		if pi.Precision != pj.Precision {
 			return pi.Precision > pj.Precision
 		}
+		iExactVar := pi.Variant == curParsed.Variant
+		jExactVar := pj.Variant == curParsed.Variant
+		if iExactVar != jExactVar {
+			return iExactVar
+		}
 		if (pi.Variant == "") != (pj.Variant == "") {
 			return pi.Variant == ""
+		}
+		iPinned := version.HasFlavorVersionPin(pi.Variant)
+		jPinned := version.HasFlavorVersionPin(pj.Variant)
+		if iPinned != jPinned {
+			return !iPinned
 		}
 		if deduped[i].UpdatedAt != deduped[j].UpdatedAt {
 			return deduped[i].UpdatedAt > deduped[j].UpdatedAt
@@ -1618,6 +1704,7 @@ func minInt(a, b int) int {
 }
 
 func pickScopedHighestTag(cleaned []TagDigestEntry, raw []TagDigestEntry, ref version.ParsedRef, scopePrefix string, includePrerelease bool) string {
+	curParsed := version.ParseTag(strings.TrimSpace(ref.Tag))
 	pickFrom := func(pool []TagDigestEntry, prefix string) string {
 		var best version.ParsedTag
 		hasBest := false
@@ -1635,7 +1722,20 @@ func pickScopedHighestTag(cleaned []TagDigestEntry, raw []TagDigestEntry, ref ve
 			if prefix != "" && !version.MatchesPrefix(pt, prefix) {
 				continue
 			}
-			if !hasBest || version.Compare(pt, best) > 0 || (version.Compare(pt, best) == 0 && pt.Precision > best.Precision) {
+			better := !hasBest
+			if !better {
+				cmp := version.Compare(pt, best)
+				if cmp > 0 || (cmp == 0 && pt.Precision > best.Precision) {
+					better = true
+				} else if cmp == 0 && pt.Precision == best.Precision {
+					if pt.Variant == curParsed.Variant && best.Variant != curParsed.Variant {
+						better = true
+					} else if !version.HasFlavorVersionPin(pt.Variant) && version.HasFlavorVersionPin(best.Variant) {
+						better = true
+					}
+				}
+			}
+			if better {
 				best = pt
 				hasBest = true
 			}

@@ -161,7 +161,17 @@ var (
 	rePrereleasePart = regexp.MustCompile(`^(?i)(alpha|beta|rc|dev|preview|snapshot|nightly|canary|test)(?:[.]?(\d+(?:\.\d+)*))?$`)
 	rePureDigits     = regexp.MustCompile(`^\d+(?:\.\d+)*$`)
 	reNightlyChannel = regexp.MustCompile(`^(?i)(alpha|beta|rc|dev|devel|develop|next|preview|snapshot|nightly|canary|edge|testing)\d*$`)
+	rePinnedFlavor   = regexp.MustCompile(`(?i)(?:^|[-_])(alpine|debian|ubuntu|oracle|ubi|centos|rocky|alma|fedora|openssl)[-_.]?\d+(?:\.\d+)*`)
 )
+
+// HasFlavorVersionPin 判断变体后缀是否显式锁定了基础发行版或运行时版本号（如 alpine3.24、alpine-3.24、alpine.3.24、ubuntu.24.04）。
+func HasFlavorVersionPin(variant string) bool {
+	v := strings.TrimSpace(variant)
+	if v == "" {
+		return false
+	}
+	return rePinnedFlavor.MatchString(v)
+}
 
 func prereleaseStageWeight(kw string) int {
 	switch strings.ToLower(kw) {
@@ -405,6 +415,101 @@ func SameSeries(current, candidate ParsedTag, seriesMode string) bool {
 		return at(sa, 0) == at(sb, 0) && at(sa, 1) == at(sb, 1)
 	}
 	return at(sa, 0) == at(sb, 0)
+}
+
+// SemVerDiffKind 表示候选版本相对当前版本的更新幅度档位。
+type SemVerDiffKind string
+
+const (
+	DiffPatch SemVerDiffKind = "patch"
+	DiffMinor SemVerDiffKind = "minor"
+	DiffMajor SemVerDiffKind = "major"
+)
+
+// UpdateCandidates 记录同镜像下可用的最佳补丁、次版本与主版本候选标签。
+type UpdateCandidates struct {
+	Patch string `json:"patch,omitempty"`
+	Minor string `json:"minor,omitempty"`
+	Major string `json:"major,omitempty"`
+}
+
+// Count 返回非空候选档位的数量。
+func (c UpdateCandidates) Count() int {
+	n := 0
+	if c.Patch != "" {
+		n++
+	}
+	if c.Minor != "" {
+		n++
+	}
+	if c.Major != "" {
+		n++
+	}
+	return n
+}
+
+// DiffKind 计算兼容更高版本 candidate 相对 current 的更新幅度档位（patch / minor / major）。
+// 若不兼容或未高于 current 则返回空字符串。
+func DiffKind(current, candidate ParsedTag) SemVerDiffKind {
+	if !CompatibleCandidate(current, candidate) || Compare(candidate, current) <= 0 {
+		return ""
+	}
+	sa := segmentsOf(current)
+	sb := segmentsOf(candidate)
+	if len(sa) == 0 || len(sb) == 0 {
+		return ""
+	}
+	if sa[0] != sb[0] {
+		return DiffMajor
+	}
+	if len(sa) >= 2 && len(sb) >= 2 && sa[1] != sb[1] {
+		return DiffMinor
+	}
+	return DiffPatch
+}
+
+// SelectUpdateCandidates 从候选标签名列表中分别挑出相对 currentTag 最高的补丁、次版本和主版本标签。
+func SelectUpdateCandidates(currentTag string, candidateNames []string) UpdateCandidates {
+	cur := ParseTag(currentTag)
+	if cur.Scheme == SchemeUnknown || cur.Precision < 2 {
+		return UpdateCandidates{}
+	}
+	var (
+		bestPatch *ParsedTag
+		bestMinor *ParsedTag
+		bestMajor *ParsedTag
+	)
+	for _, raw := range candidateNames {
+		cand := ParseTag(raw)
+		switch DiffKind(cur, cand) {
+		case DiffPatch:
+			if bestPatch == nil || Compare(cand, *bestPatch) > 0 {
+				cp := cand
+				bestPatch = &cp
+			}
+		case DiffMinor:
+			if bestMinor == nil || Compare(cand, *bestMinor) > 0 {
+				cp := cand
+				bestMinor = &cp
+			}
+		case DiffMajor:
+			if bestMajor == nil || Compare(cand, *bestMajor) > 0 {
+				cp := cand
+				bestMajor = &cp
+			}
+		}
+	}
+	var out UpdateCandidates
+	if bestPatch != nil {
+		out.Patch = bestPatch.Raw
+	}
+	if bestMinor != nil {
+		out.Minor = bestMinor.Raw
+	}
+	if bestMajor != nil {
+		out.Major = bestMajor.Raw
+	}
+	return out
 }
 
 // SelectBestDisplayTag 从同一个 Digest 匹配到的多个标签中，选出最精细的标签用于展示（实施文档 §4.4 / §5.5 / 附录 D.1）。

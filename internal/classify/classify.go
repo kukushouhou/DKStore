@@ -61,9 +61,10 @@ type Output struct {
 	TargetVersion      string         `json:"targetVersion,omitempty"`
 	TargetResolvedTag  string         `json:"targetResolvedTag,omitempty"` // 真实识别到的可拉取精确目标版本标签
 	TargetRef          string         `json:"targetRef,omitempty"`
-	TargetDigest       string         `json:"targetDigest,omitempty"`
-	TargetTags         []string       `json:"targetTags,omitempty"`
-	Hint               string         `json:"hint,omitempty"`
+	TargetDigest       string                    `json:"targetDigest,omitempty"`
+	TargetTags         []string                  `json:"targetTags,omitempty"`
+	Candidates         *version.UpdateCandidates `json:"candidates,omitempty"`
+	Hint               string                    `json:"hint,omitempty"`
 	Links              rules.RepoLink `json:"links"`
 	IsDatabase         bool           `json:"isDatabase"`
 	DatabaseName       string         `json:"databaseName,omitempty"`
@@ -328,6 +329,30 @@ func Evaluate(in Input) Output {
 	seriesMode := "major"
 	if dbRule != nil && dbRule.Series != "" {
 		seriesMode = dbRule.Series
+	}
+	candBaseTag := ""
+	switch {
+	case curTag.Scheme != version.SchemeUnknown && curTag.Precision >= 3:
+		candBaseTag = in.Ref.Tag
+	case out.CurrentResolvedTag != "" && version.ParseTag(out.CurrentResolvedTag).Precision >= 2:
+		candBaseTag = out.CurrentResolvedTag
+	case curTag.Scheme != version.SchemeUnknown && curTag.Precision >= 2:
+		candBaseTag = in.Ref.Tag
+	}
+	if candBaseTag != "" && len(in.CandidateTags) > 0 {
+		candNames := make([]string, 0, len(in.CandidateTags))
+		for _, ct := range in.CandidateTags {
+			if ct.Name == "" {
+				continue
+			}
+			if localRepoDigest != "" && registry.NormalizeDigest(ct.RepoDigest) == localRepoDigest {
+				continue
+			}
+			candNames = append(candNames, ct.Name)
+		}
+		if cands := version.SelectUpdateCandidates(candBaseTag, candNames); cands.Count() > 0 {
+			out.Candidates = &cands
+		}
 	}
 	if curTag.Scheme != version.SchemeUnknown {
 		// 附录 D.1：单段（如 :2 / :16）严格限定在该主版本前缀内；两段（如 :8.3 / :16.4）严格限定在该 major.minor 前缀内，绝不越界推荐 3.x / 9.x / 8.4
