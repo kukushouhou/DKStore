@@ -175,3 +175,24 @@ func TestSelectUpdateCandidatesAndFlavorVersionPinning(t *testing.T) {
 		t.Fatalf("expected 2.8-rc1-alpine3.20 -> 2.8-alpine3.20 to be compatible")
 	}
 }
+
+func TestExactTagNeverOverwrittenByUnrelatedVersion(t *testing.T) {
+	if got := SelectBestDisplayTag("0.6.0", []string{"0.8.5"}); got != "" {
+		t.Fatalf("SelectBestDisplayTag(0.6.0, [0.8.5]) = %q, want empty", got)
+	}
+	if got := SelectBestDisplayTag("8.4", []string{"9.0.1"}); got != "" {
+		t.Fatalf("SelectBestDisplayTag(8.4, [9.0.1]) = %q, want empty", got)
+	}
+	if got := SelectBestDisplayTag("8.4", []string{"8.4", "8.4.13"}); got != "8.4.13" {
+		t.Fatalf("SelectBestDisplayTag(8.4, [8.4, 8.4.13]) = %q, want 8.4.13", got)
+	}
+	if got := FormatTagVersionDisplay("0.6.0", "0.8.5", ""); got != "0.6.0" {
+		t.Fatalf("FormatTagVersionDisplay(0.6.0, 0.8.5) = %q, want 0.6.0", got)
+	}
+	if got := FormatTagVersionDisplay("8.4", "8.4.13", ""); got != "8.4 (8.4.13)" {
+		t.Fatalf("FormatTagVersionDisplay(8.4, 8.4.13) = %q, want 8.4 (8.4.13)", got)
+	}
+	if got := FormatTagVersionDisplay("latest", "0.8.5", ""); got != "latest (0.8.5)" {
+		t.Fatalf("FormatTagVersionDisplay(latest, 0.8.5) = %q, want latest (0.8.5)", got)
+	}
+}

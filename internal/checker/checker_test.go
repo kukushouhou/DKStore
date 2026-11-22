@@ -395,3 +395,71 @@ func TestRunCheck_ConcurrentAcrossRegistriesAndPerRegistryLimit(t *testing.T) {
 		t.Fatalf("expected all 12 services to report version updates in Normal group, got %d (failed=%+v)", len(ov.Normal), ov.Failed)
 	}
 }
+
+func TestStaleCurrentTagsClearedWhenContainerDowngradedExternally(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/tags/list") {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"name":"org/demo","tags":["0.6.0","0.8.5"]}`))
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/manifests/0.6.0") {
+			w.Header().Set("Docker-Content-Digest", "sha256:dig060")
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			_, _ = w.Write([]byte(`{"config":{"digest":"sha256:cfg060"}}`))
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/manifests/0.8.5") {
+			w.Header().Set("Docker-Content-Digest", "sha256:dig085")
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			_, _ = w.Write([]byte(`{"config":{"digest":"sha256:cfg085"}}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	chk, st := newTestChecker(t, map[string]string{
+		"ghcr.io": srv.URL,
+	})
+	ctx := context.Background()
+	now := time.Now().Unix()
+
+	_, err := st.DB.ExecContext(ctx, `INSERT INTO host(id, name, kind, transport, status, created_at) VALUES ('h1', 'Router', 'docker', 'ssh', 'online', ?)`, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = st.DB.ExecContext(ctx, `INSERT INTO app(key, host_id, name, source, updated_at) VALUES ('h1/standalone/demo', 'h1', 'demo', 'standalone', ?)`, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 模拟该容器此前曾升级到 0.8.5 导致 current_tags_json 残留 ["0.8.5"]，随后在外部被重建为 0.6.0（且本地摘要未命中任何远端标签）
+	_, err = st.DB.ExecContext(ctx, `
+		INSERT INTO service(key, app_key, name, state, image_ref, image_id, repo_digest, current_tags_json, platform, updated_at)
+		VALUES ('h1/standalone/demo/main', 'h1/standalone/demo', 'main', 'running', 'ghcr.io/org/demo:0.6.0', 'sha256:customid', 'sha256:customdig', '["0.8.5"]', 'linux/amd64', ?)`, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	chk.runCheck(ctx, "manual", "h1", true)
+
+	var curTagsRaw string
+	if err := st.DB.QueryRowContext(ctx, `SELECT COALESCE(current_tags_json,'') FROM service WHERE key='h1/standalone/demo/main'`).Scan(&curTagsRaw); err != nil {
+		t.Fatal(err)
+	}
+	if curTagsRaw != "" {
+		t.Fatalf("expected stale current_tags_json cleared to NULL, got %q", curTagsRaw)
+	}
+
+	ov, err := chk.Overview(ctx, "h1", i18n.ZhCN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ov.Caution) != 1 {
+		t.Fatalf("expected 1 caution card (0.6.0 -> 0.8.5), got %d", len(ov.Caution))
+	}
+	card := ov.Caution[0]
+	if card.SummaryCurrent != "0.6.0" || card.SummaryTarget != "0.8.5" {
+		t.Fatalf("expected 0.6.0 -> 0.8.5, got %q -> %q", card.SummaryCurrent, card.SummaryTarget)
+	}
+}

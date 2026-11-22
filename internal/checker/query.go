@@ -31,6 +31,8 @@ func (s *Service) saveFinding(
 	if len(curTags) > 0 {
 		b, _ := json.Marshal(curTags)
 		_, _ = s.st.DB.ExecContext(ctx, `UPDATE service SET current_tags_json=? WHERE key=?`, string(b), svc.Key)
+	} else if out.Kind != classify.KindCheckFailed {
+		_, _ = s.st.DB.ExecContext(ctx, `UPDATE service SET current_tags_json=NULL WHERE key=?`, svc.Key)
 	}
 
 	if out.CurrentVersion == "" {

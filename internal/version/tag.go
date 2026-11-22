@@ -536,6 +536,9 @@ func SelectBestDisplayTag(currentTag string, matchedTags []string) string {
 		if pt.Scheme == SchemeUnknown || pt.Prerelease {
 			continue
 		}
+		if cur.Scheme != SchemeUnknown && !MatchesPrefix(pt, cur.CoreVersion()) {
+			continue
+		}
 		if pt.Variant != wantVariant && !(wantVariant == "" && pt.Variant == "ls") {
 			continue
 		}
@@ -595,7 +598,10 @@ func SelectBestDisplayTag(currentTag string, matchedTags []string) string {
 		}
 	}
 
-	// 非标准数字版本兜底：挑选最佳非滚动别名标签（如 20261110-3、build-512、sha-8a3f1c2）
+	// 非标准数字版本兜底：仅当当前标签自身不是结构化数字版本时，才挑选非滚动别名标签（如 20261110-3、build-512、sha-8a3f1c2）
+	if cur.Scheme != SchemeUnknown {
+		return ""
+	}
 	bestAlias := ""
 	for _, raw := range matchedTags {
 		t := strings.TrimSpace(raw)
@@ -724,10 +730,12 @@ func FormatTagVersionDisplay(configuredTag, resolvedVer, fallbackDigest string) 
 
 	if res != "" && !strings.EqualFold(res, cfg) {
 		pRes := ParseTag(res)
-		if pRes.Scheme != SchemeUnknown && pRes.Precision > pCfg.Precision && MatchesPrefix(pRes, pCfg.CoreVersion()) {
-			return cfg + " (" + res + ")"
+		if pRes.Scheme != SchemeUnknown && MatchesPrefix(pRes, pCfg.CoreVersion()) {
+			if pRes.Precision > pCfg.Precision {
+				return cfg + " (" + res + ")"
+			}
+			return res
 		}
-		return res
 	}
 
 	if hash6 != "" {

@@ -107,6 +107,14 @@ func (s *Service) saveHostInventory(ctx context.Context, hostID string, info *pl
 				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
 				ON CONFLICT(key) DO UPDATE SET
 					name=excluded.name,
+					current_tags_json=CASE
+						WHEN service.gone_at IS NOT NULL
+						  OR COALESCE(service.image_ref,'') <> COALESCE(excluded.image_ref,'')
+						  OR COALESCE(service.image_id,'') <> COALESCE(excluded.image_id,'')
+						  OR (excluded.repo_digest <> '' AND COALESCE(service.repo_digest,'') <> '' AND service.repo_digest <> excluded.repo_digest)
+						THEN NULL
+						ELSE service.current_tags_json
+					END,
 					image_ref=excluded.image_ref,
 					image_id=excluded.image_id,
 					repo_digest=excluded.repo_digest,
