@@ -2,13 +2,17 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/kukushouhou/DKStore/internal/platform"
+	"github.com/kukushouhou/DKStore/internal/transport"
 )
 
 func TestUpdateDaemonJSONMirrorsPreservesOtherFields(t *testing.T) {
@@ -184,5 +188,82 @@ func TestRunMirrorProbeBatchClosedLoop(t *testing.T) {
 	}
 	if items[3].OK || items[3].Status != "dead" {
 		t.Fatalf("expected deadHTMLSrv dead, got %+v", items[3])
+	}
+}
+
+type stubMirrorReadTransport struct {
+	readFn func(path string) ([]byte, error)
+	doFn   func(path string) (*http.Response, error)
+}
+
+func (s *stubMirrorReadTransport) Mode() transport.Mode { return transport.ModeLocal }
+func (s *stubMirrorReadTransport) Close() error         { return nil }
+func (s *stubMirrorReadTransport) ReadFile(_ context.Context, path string) ([]byte, error) {
+	return s.readFn(path)
+}
+func (s *stubMirrorReadTransport) DoDocker(_ context.Context, path string) (*http.Response, error) {
+	return s.doFn(path)
+}
+
+func TestGetDockerHubMirrorsPropagatesReadFailure(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. 权限不足或 SSH 传输断开时绝不返回看似正常的空列表
+	adPermErr := New("h1", &stubMirrorReadTransport{
+		readFn: func(string) ([]byte, error) {
+			return nil, errors.New("permission denied")
+		},
+		doFn: func(string) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"RegistryConfig":{"Mirrors":[]}}`)),
+			}, nil
+		},
+	})
+	if urls, err := adPermErr.GetDockerHubMirrors(ctx); err == nil {
+		t.Fatalf("expected error on ReadFile permission denied, got nil err and urls=%v", urls)
+	}
+
+	// 2. daemon.json 不存在且 /info 请求也失败（Docker 离线/断连）时必须报错
+	adOffline := New("h2", &stubMirrorReadTransport{
+		readFn: func(string) ([]byte, error) {
+			return nil, os.ErrNotExist
+		},
+		doFn: func(string) (*http.Response, error) {
+			return nil, errors.New("dial unix /var/run/docker.sock: connect: connection refused")
+		},
+	})
+	if urls, err := adOffline.GetDockerHubMirrors(ctx); err == nil {
+		t.Fatalf("expected error when both daemon.json missing and /info fails, got nil err and urls=%v", urls)
+	}
+
+	// 3. daemon.json 语法损坏时必须报错
+	adBrokenJSON := New("h3", &stubMirrorReadTransport{
+		readFn: func(string) ([]byte, error) {
+			return []byte(`{"registry-mirrors": [broken`), nil
+		},
+		doFn: func(string) (*http.Response, error) {
+			return nil, errors.New("unused")
+		},
+	})
+	if urls, err := adBrokenJSON.GetDockerHubMirrors(ctx); err == nil {
+		t.Fatalf("expected error on malformed daemon.json, got nil err and urls=%v", urls)
+	}
+
+	// 4. daemon.json 不存在但 Docker /info 正常返回无加速源时，确认为真正未配置（返回空列表、无错误）
+	adUnconfigured := New("h4", &stubMirrorReadTransport{
+		readFn: func(string) ([]byte, error) {
+			return nil, os.ErrNotExist
+		},
+		doFn: func(string) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"RegistryConfig":{"Mirrors":null}}`)),
+			}, nil
+		},
+	})
+	urls, err := adUnconfigured.GetDockerHubMirrors(ctx)
+	if err != nil || len(urls) != 0 {
+		t.Fatalf("expected clean empty list when genuinely unconfigured, got urls=%v err=%v", urls, err)
 	}
 }

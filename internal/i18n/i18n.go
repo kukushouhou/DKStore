@@ -418,17 +418,170 @@ func formatAppSvc(it NotifyItem) string {
 	return it.AppName + "/" + it.ServiceName
 }
 
+// DiagnoseUpdateError 在任务失败收尾时（Write-Time）一次性结合阶段、底层报错与当时环境状态定性出细粒度错误码，
+// 写入 update_job 原有的 error_code 字段，避免读取历史记录时重复解析字符串或反查当前设备配置。
+func DiagnoseUpdateError(stageCode, rawDetail string, downloadedBytes int64, hasMirror bool) string {
+	switch stageCode {
+	case "docker_old_zstd",
+		"disk_full",
+		"storage_readonly",
+		"port_conflict",
+		"arch_mismatch",
+		"pull_rate_limited",
+		"pull_rate_limited_mirror",
+		"pull_repo_or_auth",
+		"pull_auth_required",
+		"pull_not_found",
+		"pull_not_found_mirror",
+		"pull_tls_failed",
+		"pull_tls_failed_mirror",
+		"pull_timeout",
+		"pull_timeout_mirror",
+		"pull_registry_unreachable",
+		"pull_registry_unreachable_mirror",
+		"pull_download_interrupted",
+		"net_disconnected",
+		"op_timeout",
+		"external_conflict",
+		"vendor_managed_readonly",
+		"capability_unsupported",
+		"dsm_tag_change_unsupported",
+		"dsm_cli_compose_unsupported",
+		"compose_services_removed",
+		"interrupted":
+		return stageCode
+	}
+
+	detail := strings.TrimSpace(LocalizeDetail(ZhCN, rawDetail))
+	if detail == "" {
+		return stageCode
+	}
+	lower := strings.ToLower(detail)
+
+	if (stageCode == "pull_failed" && strings.Contains(detail, "ApplyLayer") && strings.Contains(detail, "archive/tar: invalid tar header")) ||
+		(strings.Contains(lower, "zstd") && (strings.Contains(detail, "20.10.10") || strings.Contains(lower, "docker"))) {
+		return "docker_old_zstd"
+	}
+	if strings.Contains(lower, "no space left on device") ||
+		strings.Contains(lower, "disk quota exceeded") ||
+		strings.Contains(lower, "insufficient space") {
+		return "disk_full"
+	}
+	if strings.Contains(lower, "read-only file system") {
+		return "storage_readonly"
+	}
+	if strings.Contains(lower, "port is already allocated") ||
+		strings.Contains(lower, "address already in use") {
+		return "port_conflict"
+	}
+	if strings.Contains(lower, "no matching manifest for") ||
+		strings.Contains(lower, "exec format error") {
+		return "arch_mismatch"
+	}
+
+	if stageCode == "pull_failed" || strings.Contains(lower, "compose pull:") || strings.Contains(lower, "error pulling image") {
+		if strings.Contains(lower, "toomanyrequests") ||
+			strings.Contains(lower, "rate limit") ||
+			strings.Contains(lower, "429 too many requests") ||
+			strings.Contains(lower, "http 429") {
+			if hasMirror {
+				return "pull_rate_limited_mirror"
+			}
+			return "pull_rate_limited"
+		}
+		if strings.Contains(lower, "repository does not exist") {
+			return "pull_repo_or_auth"
+		}
+		if strings.Contains(lower, "unauthorized") ||
+			strings.Contains(lower, "authentication required") ||
+			strings.Contains(lower, "pull access denied") ||
+			strings.Contains(lower, "requested access to the resource is denied") ||
+			strings.Contains(lower, "insufficient_scope") ||
+			strings.Contains(lower, "http 401") ||
+			strings.Contains(lower, "http 403") ||
+			strings.Contains(lower, "status code 401") ||
+			strings.Contains(lower, "status code 403") {
+			return "pull_auth_required"
+		}
+		if strings.Contains(lower, "manifest unknown") ||
+			strings.Contains(lower, "tag not found") ||
+			strings.Contains(lower, "not found: manifest") ||
+			strings.Contains(lower, "http 404") ||
+			strings.Contains(lower, "status code 404") {
+			if hasMirror {
+				return "pull_not_found_mirror"
+			}
+			return "pull_not_found"
+		}
+		if strings.Contains(lower, "x509:") || strings.Contains(lower, "certificate") {
+			if hasMirror {
+				return "pull_tls_failed_mirror"
+			}
+			return "pull_tls_failed"
+		}
+		if strings.Contains(lower, "i/o timeout") ||
+			strings.Contains(lower, "tls handshake timeout") ||
+			strings.Contains(lower, "client.timeout") ||
+			strings.Contains(lower, "context deadline exceeded") ||
+			strings.Contains(lower, "gateway timeout") ||
+			strings.Contains(lower, "http 504") ||
+			strings.Contains(lower, "status code 504") {
+			if hasMirror {
+				return "pull_timeout_mirror"
+			}
+			return "pull_timeout"
+		}
+		if strings.Contains(lower, "/v2/") ||
+			strings.Contains(lower, "error getting v2 registry") ||
+			strings.Contains(lower, "bad gateway") ||
+			strings.Contains(lower, "service unavailable") ||
+			strings.Contains(lower, "http 502") ||
+			strings.Contains(lower, "http 503") ||
+			strings.Contains(lower, "status code 502") ||
+			strings.Contains(lower, "status code 503") ||
+			strings.Contains(lower, "no such host") ||
+			strings.Contains(lower, "temporary failure in name resolution") ||
+			strings.Contains(lower, "server misbehaving") ||
+			strings.Contains(lower, "connection refused") ||
+			strings.Contains(lower, "network is unreachable") ||
+			strings.Contains(lower, "no route to host") ||
+			(downloadedBytes == 0 && strings.Contains(lower, "http 500")) {
+			if hasMirror {
+				return "pull_registry_unreachable_mirror"
+			}
+			return "pull_registry_unreachable"
+		}
+		if isRawEOFDetail(lower) ||
+			strings.Contains(lower, "connection reset by peer") ||
+			strings.Contains(lower, "broken pipe") ||
+			strings.Contains(lower, "server sent goaway") ||
+			strings.Contains(lower, "stream error") ||
+			strings.Contains(lower, "tls: bad record mac") {
+			return "pull_download_interrupted"
+		}
+	}
+
+	if isRawEOFDetail(lower) ||
+		strings.Contains(lower, "connection reset by peer") ||
+		strings.Contains(lower, "broken pipe") {
+		return "net_disconnected"
+	}
+	if strings.Contains(lower, "i/o timeout") ||
+		strings.Contains(lower, "context deadline exceeded") {
+		return "op_timeout"
+	}
+	return stageCode
+}
+
 // FormatUpdateError 根据更新错误编码生成面向普通用户的可读错误说明（立项文档 §7.2）。
 func FormatUpdateError(lang Lang, code, detail string) string {
 	detail = strings.TrimSpace(LocalizeDetail(lang, detail))
-	if code == "pull_failed" && strings.Contains(detail, "ApplyLayer") && strings.Contains(detail, "archive/tar: invalid tar header") {
-		return EngineMessage(lang, MsgDockerPullOldZstd)
-	}
-	if msg, ok := humanizeUpdateError(lang, code, detail); ok {
+	resolved := DiagnoseUpdateError(code, detail, 0, false)
+	if msg, ok := formatUpdateErrorBySemanticCode(lang, resolved, detail); ok {
 		return msg
 	}
 	if lang == EnUS {
-		switch code {
+		switch resolved {
 		case "external_conflict":
 			return "External change conflict detected: container or Compose YAML was modified outside DKStore. Please rescan before updating."
 		case "vendor_managed_readonly":
@@ -471,7 +624,7 @@ func FormatUpdateError(lang Lang, code, detail string) string {
 			return "Update failed"
 		}
 	}
-	switch code {
+	switch resolved {
 	case "external_conflict":
 		return "检测到外部变更冲突：目标容器或 Compose 配置文件已被其他工具修改，为避免覆盖最新配置已中止操作，请先重新扫描。"
 	case "vendor_managed_readonly":
@@ -567,11 +720,7 @@ func HumanizeRawNetError(lang Lang, raw string) string {
 	}
 }
 
-func humanizeUpdateError(lang Lang, code, detail string) (string, bool) {
-	if detail == "" {
-		return "", false
-	}
-	lower := strings.ToLower(detail)
+func formatUpdateErrorBySemanticCode(lang Lang, code, detail string) (string, bool) {
 	pick := func(zh, en string) (string, bool) {
 		if lang == EnUS {
 			return en, true
@@ -579,158 +728,110 @@ func humanizeUpdateError(lang Lang, code, detail string) (string, bool) {
 		return zh, true
 	}
 
-	// 已本地化的旧版 Docker zstd 提示直接原样返回，避免重复套前缀
-	if strings.Contains(lower, "zstd") && (strings.Contains(detail, "20.10.10") || strings.Contains(lower, "docker")) {
-		return detail, true
-	}
-
-	// 1. 磁盘与文件系统故障（全阶段通用）
-	if strings.Contains(lower, "no space left on device") ||
-		strings.Contains(lower, "disk quota exceeded") ||
-		strings.Contains(lower, "insufficient space") {
+	switch code {
+	case "docker_old_zstd":
+		if strings.Contains(strings.ToLower(detail), "zstd") && detail != "" {
+			return detail, true
+		}
+		return EngineMessage(lang, MsgDockerPullOldZstd), true
+	case "disk_full":
 		return pick(
 			"设备存储空间不足：磁盘已满，请先清理无用镜像或文件",
 			"Insufficient disk space on target device: disk is full; please clean up unused images or files",
 		)
-	}
-	if strings.Contains(lower, "read-only file system") {
+	case "storage_readonly":
 		return pick(
 			"设备存储异常：存储目录处于只读状态，请检查磁盘健康状况或目录权限",
 			"Target storage is read-only; please check disk health or directory permissions",
 		)
-	}
-
-	// 2. 容器重建与启动冲突
-	if strings.Contains(lower, "port is already allocated") ||
-		strings.Contains(lower, "address already in use") {
+	case "port_conflict":
 		return pick(
 			"新容器启动失败：所需端口已被其他程序占用，请排查端口冲突",
 			"Failed to start new container: required port is already in use by another process",
 		)
-	}
-	if strings.Contains(lower, "no matching manifest for") ||
-		strings.Contains(lower, "exec format error") {
+	case "arch_mismatch":
 		return pick(
 			"无法安装该版本：此镜像不支持当前设备的芯片架构（如 ARM / x86 不匹配）",
 			"Cannot install this version: image does not support this device's CPU architecture",
 		)
-	}
-
-	// 3. 镜像仓库权限、限流与版本不存在（主要发生在 pull_failed 或 compose pull 阶段）
-	if code == "pull_failed" || strings.Contains(lower, "compose pull:") || strings.Contains(lower, "error pulling image") {
-		if strings.Contains(lower, "toomanyrequests") ||
-			strings.Contains(lower, "rate limit") ||
-			strings.Contains(lower, "429 too many requests") ||
-			strings.Contains(lower, "http 429") {
-			return pick(
-				"下载受限：镜像仓库请求过于频繁被临时限流，可配置仓库账号或镜像加速",
-				"Download rate-limited: registry request limit reached; configure registry credentials or a mirror",
-			)
-		}
-		if strings.Contains(lower, "repository does not exist") {
-			return pick(
-				"无法下载镜像：仓库中不存在该镜像，或私有仓库尚未配置登录凭据",
-				"Cannot download image: repository does not exist or requires registry credentials",
-			)
-		}
-		if strings.Contains(lower, "unauthorized") ||
-			strings.Contains(lower, "authentication required") ||
-			strings.Contains(lower, "pull access denied") ||
-			strings.Contains(lower, "requested access to the resource is denied") ||
-			strings.Contains(lower, "insufficient_scope") ||
-			strings.Contains(lower, "http 401") ||
-			strings.Contains(lower, "http 403") ||
-			strings.Contains(lower, "status code 401") ||
-			strings.Contains(lower, "status code 403") {
-			return pick(
-				"无法下载镜像：该仓库需要登录或当前账号无访问权限，请检查“仓库凭据”",
-				"Cannot download image: registry authentication required or access denied; check Registry Credentials",
-			)
-		}
-		if strings.Contains(lower, "i/o timeout") ||
-			strings.Contains(lower, "tls handshake timeout") ||
-			strings.Contains(lower, "client.timeout") ||
-			strings.Contains(lower, "context deadline exceeded") ||
-			strings.Contains(lower, "gateway timeout") ||
-			strings.Contains(lower, "http 504") ||
-			strings.Contains(lower, "status code 504") {
-			return pick(
-				"访问容器仓库超时：请检查设备网络连接，或稍后重试",
-				"Container registry timed out: check device network connection or try again later",
-			)
-		}
-		if strings.Contains(lower, "/v2/") ||
-			strings.Contains(lower, "error getting v2 registry") ||
-			strings.Contains(lower, "bad gateway") ||
-			strings.Contains(lower, "service unavailable") ||
-			strings.Contains(lower, "http 502") ||
-			strings.Contains(lower, "http 503") ||
-			strings.Contains(lower, "status code 502") ||
-			strings.Contains(lower, "status code 503") {
-			return pick(
-				"无法访问容器仓库：请检查设备网络连接，或稍后重试",
-				"Cannot access container registry: check device network connection or try again later",
-			)
-		}
-		if isRawEOFDetail(lower) ||
-			strings.Contains(lower, "connection reset by peer") ||
-			strings.Contains(lower, "broken pipe") ||
-			strings.Contains(lower, "server sent goaway") ||
-			strings.Contains(lower, "stream error") ||
-			strings.Contains(lower, "tls: bad record mac") {
-			return pick(
-				"下载新镜像中断：网络连接中途断开，已下载的部分会保留",
-				"Image download interrupted: network connection dropped mid-transfer; downloaded layers are preserved",
-			)
-		}
-		if strings.Contains(lower, "manifest unknown") ||
-			strings.Contains(lower, "tag not found") ||
-			strings.Contains(lower, "not found: manifest") ||
-			strings.Contains(lower, "http 404") ||
-			strings.Contains(lower, "status code 404") {
-			return pick(
-				"找不到该版本镜像：可能已被作者移除，或镜像加速源尚未同步",
-				"Target image version not found: it may have been removed or not yet synced to your mirror",
-			)
-		}
-		if strings.Contains(lower, "x509:") ||
-			strings.Contains(lower, "certificate") {
-			return pick(
-				"安全连接校验失败：请检查设备系统时间是否准确，或检查代理证书配置",
-				"TLS certificate check failed: please verify device system time or proxy certificate settings",
-			)
-		}
-		if strings.Contains(lower, "no such host") ||
-			strings.Contains(lower, "temporary failure in name resolution") ||
-			strings.Contains(lower, "server misbehaving") ||
-			strings.Contains(lower, "connection refused") ||
-			strings.Contains(lower, "network is unreachable") ||
-			strings.Contains(lower, "no route to host") {
-			return pick(
-				"连不上镜像仓库：请检查设备的网络连接、DNS 或代理设置",
-				"Cannot reach image registry: please check device network, DNS, or proxy settings",
-			)
-		}
-	}
-
-	// 4. 非拉取阶段的网络断连 / 超时兜底（如 SSH 中途断线）
-	if isRawEOFDetail(lower) ||
-		strings.Contains(lower, "connection reset by peer") ||
-		strings.Contains(lower, "broken pipe") {
+	case "pull_rate_limited":
+		return pick(
+			"下载受限：镜像仓库请求过于频繁被临时限流，可配置仓库账号或镜像加速",
+			"Download rate-limited: registry request limit reached; configure registry credentials or a mirror",
+		)
+	case "pull_rate_limited_mirror":
+		return pick(
+			"镜像拉取触发限流：请求过于频繁被临时限流，也可能是已配置的镜像源触发限流",
+			"Registry rate limit reached: pull rate limit reached; configured mirrors may also be rate-limited",
+		)
+	case "pull_repo_or_auth":
+		return pick(
+			"无法下载镜像：仓库中不存在该镜像，或私有仓库尚未配置登录凭据",
+			"Cannot download image: repository does not exist or requires registry credentials",
+		)
+	case "pull_auth_required":
+		return pick(
+			"无法下载镜像：该仓库需要登录或当前账号无访问权限，请检查“仓库凭据”",
+			"Cannot download image: registry authentication required or access denied; check Registry Credentials",
+		)
+	case "pull_timeout":
+		return pick(
+			"访问容器仓库超时：请检查设备网络连接，或稍后重试",
+			"Container registry timed out: check device network connection or try again later",
+		)
+	case "pull_timeout_mirror":
+		return pick(
+			"访问容器仓库超时：请检查设备网络连接，也可能是已配置的镜像源异常",
+			"Container registry timed out: check device network connection; configured mirrors may also be unavailable",
+		)
+	case "pull_registry_unreachable":
+		return pick(
+			"无法访问容器仓库：请检查设备网络连接，或稍后重试",
+			"Cannot access container registry: check device network connection or try again later",
+		)
+	case "pull_registry_unreachable_mirror":
+		return pick(
+			"无法访问容器仓库：请检查设备网络连接，也可能是已配置的镜像源异常",
+			"Cannot access container registry: check device network connection; configured mirrors may also be unavailable",
+		)
+	case "pull_download_interrupted":
+		return pick(
+			"下载新镜像中断：网络连接中途断开，已下载的部分会保留",
+			"Image download interrupted: network connection dropped mid-transfer; downloaded layers are preserved",
+		)
+	case "pull_not_found":
+		return pick(
+			"找不到该版本镜像：仓库中未找到该版本镜像，可能已被作者移除",
+			"Target image version not found: target image version was not found in the registry",
+		)
+	case "pull_not_found_mirror":
+		return pick(
+			"找不到该版本镜像：该版本可能已被移除，也可能是已配置的镜像源尚未同步",
+			"Target image version not found: version may have been removed or not yet synced to your configured mirrors",
+		)
+	case "pull_tls_failed":
+		return pick(
+			"安全连接校验失败：请检查设备系统时间是否准确，或检查网络证书环境",
+			"TLS certificate check failed: please verify device system time or network TLS certificate settings",
+		)
+	case "pull_tls_failed_mirror":
+		return pick(
+			"安全连接校验失败：请检查设备系统时间是否准确，也可能是已配置的镜像源证书异常",
+			"TLS certificate check failed: check device system time; configured mirror certificates may also be invalid",
+		)
+	case "net_disconnected":
 		return pick(
 			"与目标设备的连接中途断开：请确认设备在线且网络稳定",
 			"Connection to target device dropped mid-operation; please check device connectivity",
 		)
-	}
-	if strings.Contains(lower, "i/o timeout") ||
-		strings.Contains(lower, "context deadline exceeded") {
+	case "op_timeout":
 		return pick(
 			"更新操作超时：目标设备响应过慢或网络连接不稳定",
 			"Update operation timed out: target device responded too slowly or network was unstable",
 		)
+	default:
+		return "", false
 	}
-
-	return "", false
 }
 
 // FormatRollbackReason 根据回退不可用原因码生成对应语言的说明（立项文档 §8.2）。
@@ -774,17 +875,13 @@ type StructuredUpdateError struct {
 	Action string `json:"action,omitempty"` // "" | "mirror" | "cred"
 }
 
-// FormatStructuredUpdateError 生成去套娃的双层错误结构（所有错误类型统一为「短标题 + 清晰原因」）。
+// FormatStructuredUpdateError 纯按任务自身的细粒度错误码与错误消息渲染双语结构化展示（读取期零外部依赖）。
 func FormatStructuredUpdateError(
 	lang Lang,
 	code string,
 	rawDetail string,
-	_ string,
-	downloadedBytes int64,
-	configuredMirrors []string,
 ) StructuredUpdateError {
-	detail := strings.TrimSpace(LocalizeDetail(lang, rawDetail))
-	lower := strings.ToLower(detail)
+	resolved := DiagnoseUpdateError(code, rawDetail, 0, false)
 	pick := func(zhTitle, zhDetail, enTitle, enDetail, action string) StructuredUpdateError {
 		if lang == EnUS {
 			return StructuredUpdateError{Title: enTitle, Detail: enDetail, Action: action}
@@ -792,15 +889,11 @@ func FormatStructuredUpdateError(
 		return StructuredUpdateError{Title: zhTitle, Detail: zhDetail, Action: action}
 	}
 
-	if (code == "pull_failed" && strings.Contains(detail, "ApplyLayer") && strings.Contains(detail, "archive/tar: invalid tar header")) ||
-		(strings.Contains(lower, "zstd") && (strings.Contains(detail, "20.10.10") || strings.Contains(lower, "docker"))) {
-		full := FormatUpdateError(lang, code, rawDetail)
+	switch resolved {
+	case "docker_old_zstd":
+		full := FormatUpdateError(lang, resolved, rawDetail)
 		return pick("Docker 版本过旧", full, "Docker Engine outdated", full, "")
-	}
-
-	if strings.Contains(lower, "no space left on device") ||
-		strings.Contains(lower, "disk quota exceeded") ||
-		strings.Contains(lower, "insufficient space") {
+	case "disk_full":
 		return pick(
 			"设备存储空间不足",
 			"目标设备磁盘空间已满，请先清理无用镜像或文件",
@@ -808,8 +901,7 @@ func FormatStructuredUpdateError(
 			"Target device disk is full; please clean up unused images or files",
 			"",
 		)
-	}
-	if strings.Contains(lower, "read-only file system") {
+	case "storage_readonly":
 		return pick(
 			"设备存储目录只读",
 			"存储目录处于只读状态，请检查磁盘健康状况或目录权限",
@@ -817,9 +909,7 @@ func FormatStructuredUpdateError(
 			"Target storage directory is read-only; check disk health or permissions",
 			"",
 		)
-	}
-	if strings.Contains(lower, "port is already allocated") ||
-		strings.Contains(lower, "address already in use") {
+	case "port_conflict":
 		return pick(
 			"容器端口被占用",
 			"启动所需的端口已被其他程序占用，请排查端口冲突",
@@ -827,9 +917,7 @@ func FormatStructuredUpdateError(
 			"Required port is already bound by another process",
 			"",
 		)
-	}
-	if strings.Contains(lower, "no matching manifest for") ||
-		strings.Contains(lower, "exec format error") {
+	case "arch_mismatch":
 		return pick(
 			"镜像架构不兼容",
 			"该版本镜像不支持当前设备的 CPU 架构",
@@ -837,164 +925,105 @@ func FormatStructuredUpdateError(
 			"Target image does not support this device's CPU architecture",
 			"",
 		)
+	case "pull_rate_limited_mirror":
+		return pick(
+			"镜像拉取触发限流",
+			"请求过于频繁被临时限流，也可能是已配置的镜像源触发限流",
+			"Registry rate limit reached",
+			"Pull rate limit reached; configured mirrors may also be rate-limited",
+			"mirror",
+		)
+	case "pull_rate_limited":
+		return pick(
+			"镜像拉取触发限流",
+			"仓库请求过于频繁被临时限流，请稍后重试或登录仓库账号",
+			"Registry rate limit reached",
+			"Pull rate limit reached; try again later or configure registry credentials",
+			"",
+		)
+	case "pull_repo_or_auth", "pull_auth_required":
+		return pick(
+			"仓库需要登录凭据",
+			"该镜像仓库未登录或当前账号无访问权限",
+			"Registry credentials required",
+			"Authentication required or current account has no pull access",
+			"cred",
+		)
+	case "pull_not_found_mirror":
+		return pick(
+			"找不到目标版本镜像",
+			"该版本可能已被移除，也可能是已配置的镜像源尚未同步",
+			"Target version not found",
+			"Version may have been removed or not yet synced to your configured mirrors",
+			"mirror",
+		)
+	case "pull_not_found":
+		return pick(
+			"找不到目标版本镜像",
+			"仓库中未找到该版本镜像，可能已被作者移除",
+			"Target version not found",
+			"Target image version was not found in the registry",
+			"",
+		)
+	case "pull_tls_failed_mirror":
+		return pick(
+			"安全证书校验失败",
+			"请检查设备系统时间是否准确，也可能是已配置的镜像源证书异常",
+			"TLS certificate check failed",
+			"Check device system time; configured mirror certificates may also be invalid",
+			"mirror",
+		)
+	case "pull_tls_failed":
+		return pick(
+			"安全证书校验失败",
+			"请检查设备系统时间是否准确或网络证书环境",
+			"TLS certificate check failed",
+			"Check device system time or network TLS certificate settings",
+			"",
+		)
+	case "pull_timeout_mirror":
+		return pick(
+			"访问容器仓库超时",
+			"请检查设备网络连接，也可能是已配置的镜像源异常",
+			"Container registry timed out",
+			"Check device network connection; configured mirrors may also be unavailable",
+			"mirror",
+		)
+	case "pull_timeout":
+		return pick(
+			"访问容器仓库超时",
+			"请检查设备网络连接，或稍后重试",
+			"Container registry timed out",
+			"Check device network connection or try again later",
+			"",
+		)
+	case "pull_registry_unreachable_mirror":
+		return pick(
+			"无法访问容器仓库",
+			"请检查设备网络连接，也可能是已配置的镜像源异常",
+			"Cannot access container registry",
+			"Check device network connection; configured mirrors may also be unavailable",
+			"mirror",
+		)
+	case "pull_registry_unreachable":
+		return pick(
+			"无法访问容器仓库",
+			"请检查设备网络连接，或稍后重试",
+			"Cannot access container registry",
+			"Check device network connection or try again later",
+			"",
+		)
+	case "pull_download_interrupted":
+		return pick(
+			"镜像下载中断",
+			"镜像层传输中途网络连接断开，已下载的分层会保留",
+			"Image download interrupted",
+			"Network connection dropped mid-transfer; downloaded layers are preserved",
+			"",
+		)
 	}
 
-	if code == "pull_failed" || strings.Contains(lower, "compose pull:") || strings.Contains(lower, "error pulling image") {
-		if strings.Contains(lower, "toomanyrequests") ||
-			strings.Contains(lower, "rate limit") ||
-			strings.Contains(lower, "429 too many requests") ||
-			strings.Contains(lower, "http 429") {
-			if len(configuredMirrors) > 0 {
-				return pick(
-					"镜像拉取触发限流",
-					"请求过于频繁被临时限流，也可能是已配置的镜像源触发限流",
-					"Registry rate limit reached",
-					"Pull rate limit reached; configured mirrors may also be rate-limited",
-					"mirror",
-				)
-			}
-			return pick(
-				"镜像拉取触发限流",
-				"仓库请求过于频繁被临时限流，请稍后重试或登录仓库账号",
-				"Registry rate limit reached",
-				"Pull rate limit reached; try again later or configure registry credentials",
-				"",
-			)
-		}
-		if strings.Contains(lower, "repository does not exist") ||
-			strings.Contains(lower, "unauthorized") ||
-			strings.Contains(lower, "authentication required") ||
-			strings.Contains(lower, "pull access denied") ||
-			strings.Contains(lower, "requested access to the resource is denied") ||
-			strings.Contains(lower, "insufficient_scope") ||
-			strings.Contains(lower, "http 401") ||
-			strings.Contains(lower, "http 403") ||
-			strings.Contains(lower, "status code 401") ||
-			strings.Contains(lower, "status code 403") {
-			return pick(
-				"仓库需要登录凭据",
-				"该镜像仓库未登录或当前账号无访问权限",
-				"Registry credentials required",
-				"Authentication required or current account has no pull access",
-				"cred",
-			)
-		}
-		if strings.Contains(lower, "manifest unknown") ||
-			strings.Contains(lower, "tag not found") ||
-			strings.Contains(lower, "not found: manifest") ||
-			strings.Contains(lower, "http 404") ||
-			strings.Contains(lower, "status code 404") {
-			if len(configuredMirrors) > 0 {
-				return pick(
-					"找不到目标版本镜像",
-					"该版本可能已被移除，也可能是已配置的镜像源尚未同步",
-					"Target version not found",
-					"Version may have been removed or not yet synced to your configured mirrors",
-					"mirror",
-				)
-			}
-			return pick(
-				"找不到目标版本镜像",
-				"仓库中未找到该版本镜像，可能已被作者移除",
-				"Target version not found",
-				"Target image version was not found in the registry",
-				"",
-			)
-		}
-		if strings.Contains(lower, "x509:") || strings.Contains(lower, "certificate") {
-			if len(configuredMirrors) > 0 {
-				return pick(
-					"安全证书校验失败",
-					"请检查设备系统时间是否准确，也可能是已配置的镜像源证书异常",
-					"TLS certificate check failed",
-					"Check device system time; configured mirror certificates may also be invalid",
-					"mirror",
-				)
-			}
-			return pick(
-				"安全证书校验失败",
-				"请检查设备系统时间是否准确或网络证书环境",
-				"TLS certificate check failed",
-				"Check device system time or network TLS certificate settings",
-				"",
-			)
-		}
-		if strings.Contains(lower, "i/o timeout") ||
-			strings.Contains(lower, "tls handshake timeout") ||
-			strings.Contains(lower, "client.timeout") ||
-			strings.Contains(lower, "context deadline exceeded") ||
-			strings.Contains(lower, "gateway timeout") ||
-			strings.Contains(lower, "http 504") ||
-			strings.Contains(lower, "status code 504") {
-			if len(configuredMirrors) > 0 {
-				return pick(
-					"访问容器仓库超时",
-					"请检查设备网络连接，也可能是已配置的镜像源异常",
-					"Container registry timed out",
-					"Check device network connection; configured mirrors may also be unavailable",
-					"mirror",
-				)
-			}
-			return pick(
-				"访问容器仓库超时",
-				"请检查设备网络连接，或稍后重试",
-				"Container registry timed out",
-				"Check device network connection or try again later",
-				"",
-			)
-		}
-
-		isEndpointFail := strings.Contains(lower, "/v2/") ||
-			strings.Contains(lower, "error getting v2 registry") ||
-			strings.Contains(lower, "bad gateway") ||
-			strings.Contains(lower, "service unavailable") ||
-			strings.Contains(lower, "http 502") ||
-			strings.Contains(lower, "http 503") ||
-			strings.Contains(lower, "status code 502") ||
-			strings.Contains(lower, "status code 503") ||
-			strings.Contains(lower, "no such host") ||
-			strings.Contains(lower, "temporary failure in name resolution") ||
-			strings.Contains(lower, "server misbehaving") ||
-			strings.Contains(lower, "connection refused") ||
-			strings.Contains(lower, "network is unreachable") ||
-			strings.Contains(lower, "no route to host") ||
-			(downloadedBytes == 0 && strings.Contains(lower, "http 500"))
-		if isEndpointFail {
-			if len(configuredMirrors) > 0 {
-				return pick(
-					"无法访问容器仓库",
-					"请检查设备网络连接，也可能是已配置的镜像源异常",
-					"Cannot access container registry",
-					"Check device network connection; configured mirrors may also be unavailable",
-					"mirror",
-				)
-			}
-			return pick(
-				"无法访问容器仓库",
-				"请检查设备网络连接，或稍后重试",
-				"Cannot access container registry",
-				"Check device network connection or try again later",
-				"",
-			)
-		}
-
-		if isRawEOFDetail(lower) ||
-			strings.Contains(lower, "connection reset by peer") ||
-			strings.Contains(lower, "broken pipe") ||
-			strings.Contains(lower, "server sent goaway") ||
-			strings.Contains(lower, "stream error") ||
-			strings.Contains(lower, "tls: bad record mac") {
-			return pick(
-				"镜像下载中断",
-				"镜像层传输中途网络连接断开，已下载的分层会保留",
-				"Image download interrupted",
-				"Network connection dropped mid-transfer; downloaded layers are preserved",
-				"",
-			)
-		}
-	}
-
-	full := FormatUpdateError(lang, code, rawDetail)
+	full := FormatUpdateError(lang, resolved, rawDetail)
 	sep := "："
 	if lang == EnUS {
 		sep = ": "

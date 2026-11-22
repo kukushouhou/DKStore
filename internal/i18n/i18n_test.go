@@ -101,38 +101,36 @@ func TestBilingualAndLegacyStrip(t *testing.T) {
 }
 
 func TestFormatStructuredUpdateError(t *testing.T) {
-	// 1) 已配置镜像源时：统一报「无法访问容器仓库」，简明提示可能是已配置镜像源异常（不列具体 URL），并提供 mirror 快捷动作
-	stWithMirror := FormatStructuredUpdateError(
-		ZhCN,
-		"pull_failed",
-		`HTTP 500: {"message":"Get \"https://registry-1.docker.io/v2/\": EOF"}`,
-		"软路由模拟器",
-		0,
-		[]string{"https://docker.mirrors.ustc.edu.cn", "https://docker.1ms.run"},
-	)
+	rawUnreachable := `HTTP 500: {"message":"Get \"https://registry-1.docker.io/v2/\": EOF"}`
+
+	// 1) 执行当时已配置镜像源：写入期定性为 pull_registry_unreachable_mirror，读取期纯映射展示并提供 mirror 快捷动作
+	codeWithMirror := DiagnoseUpdateError("pull_failed", rawUnreachable, 0, true)
+	if codeWithMirror != "pull_registry_unreachable_mirror" {
+		t.Fatalf("expected pull_registry_unreachable_mirror, got %q", codeWithMirror)
+	}
+	stWithMirror := FormatStructuredUpdateError(ZhCN, codeWithMirror, rawUnreachable)
 	if stWithMirror.Title != "无法访问容器仓库" || stWithMirror.Action != "mirror" || stWithMirror.Detail != "请检查设备网络连接，也可能是已配置的镜像源异常" {
 		t.Fatalf("unexpected structured error with mirrors: %+v", stWithMirror)
 	}
 
-	// 2) 未配置任何镜像源时：正常报「无法访问容器仓库」，不提镜像源且不返回 mirror 动作
-	stNoMirror := FormatStructuredUpdateError(
-		ZhCN,
-		"pull_failed",
-		`HTTP 500: {"message":"Get \"https://registry-1.docker.io/v2/\": EOF"}`,
-		"软路由模拟器",
-		0,
-		nil,
-	)
+	// 2) 执行当时未配置镜像源：写入期定性为 pull_registry_unreachable，不提镜像源且不返回 mirror 动作
+	codeNoMirror := DiagnoseUpdateError("pull_failed", rawUnreachable, 0, false)
+	if codeNoMirror != "pull_registry_unreachable" {
+		t.Fatalf("expected pull_registry_unreachable, got %q", codeNoMirror)
+	}
+	stNoMirror := FormatStructuredUpdateError(ZhCN, codeNoMirror, rawUnreachable)
 	if stNoMirror.Title != "无法访问容器仓库" || stNoMirror.Action != "" || stNoMirror.Detail != "请检查设备网络连接，或稍后重试" {
 		t.Fatalf("unexpected structured error without mirrors: %+v", stNoMirror)
 	}
 
-	drop := FormatStructuredUpdateError(ZhCN, "pull_failed", "unexpected EOF", "软路由模拟器", 4096, nil)
+	dropCode := DiagnoseUpdateError("pull_failed", "unexpected EOF", 4096, false)
+	drop := FormatStructuredUpdateError(ZhCN, dropCode, "unexpected EOF")
 	if drop.Title != "镜像下载中断" || drop.Action != "" {
 		t.Fatalf("unexpected structured drop error: %+v", drop)
 	}
 
-	auth := FormatStructuredUpdateError(ZhCN, "pull_failed", "unauthorized: authentication required", "NAS", 0, nil)
+	authCode := DiagnoseUpdateError("pull_failed", "unauthorized: authentication required", 0, false)
+	auth := FormatStructuredUpdateError(ZhCN, authCode, "unauthorized: authentication required")
 	if auth.Title != "仓库需要登录凭据" || auth.Action != "cred" {
 		t.Fatalf("unexpected structured auth error: %+v", auth)
 	}

@@ -152,27 +152,52 @@ var synoRegistryJSONCandidates = []string{
 }
 
 // GetDockerHubMirrors 读取群晖设备上当前生效的 Docker Hub 镜像加速地址。
+// 实时读取失败时原样返回错误，不静默降级为空列表。
 func (a *Adapter) GetDockerHubMirrors(ctx context.Context) ([]string, error) {
+	if a == nil {
+		return nil, fmt.Errorf("synology adapter unavailable")
+	}
+	var lastErr error
 	if a.dsmCli != nil {
 		if urls, err := a.dsmCli.GetDockerHubMirrors(ctx); err == nil {
 			return urls, nil
-		} else if a.tr == nil {
-			return nil, err
+		} else {
+			lastErr = err
+			if a.tr == nil {
+				return nil, err
+			}
 		}
 	}
 	if a.tr != nil {
+		sawCandidate := false
 		for _, p := range synoDockerdJSONCandidates {
-			if b, err := a.tr.ReadFile(ctx, p); err == nil && len(bytes.TrimSpace(b)) > 0 {
-				if urls, ok := docker.ExtractMirrorsFromDaemonJSON(b); ok {
+			b, err := a.tr.ReadFile(ctx, p)
+			if err == nil {
+				sawCandidate = true
+				if len(bytes.TrimSpace(b)) > 0 {
+					urls, ok := docker.ExtractMirrorsFromDaemonJSON(b)
+					if !ok {
+						return nil, fmt.Errorf("invalid %s JSON", p)
+					}
 					return urls, nil
 				}
+				continue
 			}
+			if !transport.IsNotExistError(err) && lastErr == nil {
+				lastErr = err
+			}
+		}
+		if sawCandidate {
+			return nil, nil
 		}
 		if a.dock != nil {
 			return a.dock.GetDockerHubMirrors(ctx)
 		}
 	}
-	return nil, nil
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no mirror channel available for Synology host")
 }
 
 // ApplyMirrorPairs 将镜像源配对写入群晖设备：

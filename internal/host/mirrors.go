@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -168,6 +169,7 @@ func (r *Registry) saveCachedHostMirrors(ctx context.Context, hostID string, pai
 }
 
 // GetHostMirrors 实时读取目标设备底层的 docker.io 加速地址并与已保存的其他仓库配对合并后返回。
+// 实时连接或读取底层配置失败时必须返回错误，严禁吞错回退为旧缓存或空列表，防止前端误将“没读到”当作“未配置”保存而清空设备原有加速源。
 func (r *Registry) GetHostMirrors(ctx context.Context, hostID string) ([]platform.MirrorPair, error) {
 	if _, err := r.Get(ctx, hostID); err != nil {
 		return nil, err
@@ -176,22 +178,19 @@ func (r *Registry) GetHostMirrors(ctx context.Context, hostID string) ([]platfor
 
 	ad, _, err := r.OpenAdapter(ctx, hostID)
 	if err != nil {
-		if len(cached) > 0 {
-			return ensureDockerHubFirst(cached, nil, false), nil
-		}
 		return nil, err
 	}
 	defer ad.Close()
 
-	var liveHub []string
-	hasLive := false
-	if mAd, ok := ad.(platform.MirrorAdapter); ok {
-		if urls, mErr := mAd.GetDockerHubMirrors(ctx); mErr == nil {
-			liveHub = urls
-			hasLive = true
-		}
+	mAd, ok := ad.(platform.MirrorAdapter)
+	if !ok {
+		return nil, fmt.Errorf("host %s does not support mirror configuration", hostID)
 	}
-	merged := ensureDockerHubFirst(cached, liveHub, hasLive)
+	liveHub, err := mAd.GetDockerHubMirrors(ctx)
+	if err != nil {
+		return nil, err
+	}
+	merged := ensureDockerHubFirst(cached, liveHub, true)
 	_ = r.saveCachedHostMirrors(ctx, hostID, merged)
 	return merged, nil
 }

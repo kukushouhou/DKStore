@@ -368,8 +368,8 @@ func TestNormalizeOldDockerZstdError(t *testing.T) {
 	code, msg := normalizeUpdateError("pull_failed", raw, &host.Host{
 		Info: &platform.HostInfo{DockerVersion: "20.10.6"},
 	})
-	if code != "pull_failed" {
-		t.Fatalf("code = %q", code)
+	if code != "docker_old_zstd" {
+		t.Fatalf("code = %q, want docker_old_zstd", code)
 	}
 	zh := i18n.FormatUpdateError(i18n.ZhCN, code, msg)
 	en := i18n.FormatUpdateError(i18n.EnUS, code, msg)
@@ -384,6 +384,90 @@ func TestNormalizeOldDockerZstdError(t *testing.T) {
 	legacyZh := i18n.FormatUpdateError(i18n.ZhCN, "pull_failed", raw)
 	if !strings.Contains(legacyZh, "zstd") || strings.Contains(legacyZh, "invalid tar header") {
 		t.Fatalf("unexpected legacy zh error: %q", legacyZh)
+	}
+}
+
+func TestFailedJobErrorCodeFrozenAcrossSubsequentMirrorChanges(t *testing.T) {
+	up, st := newTestUpdater(t, nil)
+	ctx := context.Background()
+
+	_, err := st.DB.ExecContext(ctx, `INSERT INTO host(id, name, kind, transport, status, created_at) VALUES ('h-router', '软路由模拟器', 'docker', 'ssh', 'online', 1700000000)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. 未配置镜像源时任务失败：收尾时定性为 pull_registry_unreachable
+	job1 := Job{
+		ID:             "job-unconfigured-1",
+		Kind:           "upgrade",
+		HostID:         "h-router",
+		HostName:       "软路由模拟器",
+		AppKey:         "h-router/standalone/uptime-kuma",
+		AppName:        "uptime-kuma",
+		ServiceKey:     "h-router/standalone/uptime-kuma/main",
+		ServiceName:    "main",
+		Source:         "standalone",
+		Status:         "running",
+		Phase:          "pulling",
+		OldImageRef:    "louislam/uptime-kuma:2.5.11",
+		TargetImageRef: "louislam/uptime-kuma:2.5.12",
+		StartedAt:      1700000010,
+	}
+	if err := up.insertJob(ctx, job1); err != nil {
+		t.Fatal(err)
+	}
+	tracker1 := newJobProgressTracker(up, &job1)
+	tracker1.fail(job1, "pull_failed", `Get "https://registry-1.docker.io/v2/": dial tcp 199.59.148.20:443: connection refused`)
+
+	// 2. 用户随后在该设备上保存了镜像源
+	_, err = st.DB.ExecContext(ctx, `
+		INSERT INTO host_mirror(host_id, pairs_json, updated_at)
+		VALUES ('h-router', '[{"source":"docker.io","urls":["https://docker.1ms.run"]}]', 1700000020)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. 重新通过 GetJob 与 ListJobs 查询旧失败记录，必须保持当时的诊断（无镜像源异常提示、无 mirror 动作）
+	got1, err := up.GetJob(ctx, job1.ID, i18n.ZhCN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got1.ErrorCode != "pull_registry_unreachable" || got1.ErrorAction != "" || got1.ErrorDetail != "请检查设备网络连接，或稍后重试" {
+		t.Fatalf("expected job1 error frozen after mirror added, got code=%q action=%q detail=%q", got1.ErrorCode, got1.ErrorAction, got1.ErrorDetail)
+	}
+	got1En, err := up.GetJob(ctx, job1.ID, i18n.EnUS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got1En.ErrorAction != "" || !strings.Contains(got1En.ErrorDetail, "try again later") {
+		t.Fatalf("expected English localization to remain mirror-free, got %+v", got1En)
+	}
+
+	list, err := up.ListJobs(ctx, 10, i18n.ZhCN)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("ListJobs err=%v len=%d", err, len(list))
+	}
+	if list[0].ErrorAction != "" || list[0].ErrorDetail != "请检查设备网络连接，或稍后重试" {
+		t.Fatalf("expected ListJobs to keep frozen error without querying current host mirrors, got %+v", list[0])
+	}
+
+	// 4. 发起携带镜像源的新任务仍失败时，新任务定性为 pull_registry_unreachable_mirror
+	job2 := job1
+	job2.ID = "job-configured-2"
+	job2.StartedAt = 1700000030
+	job2.configuredMirrors = []string{"https://docker.1ms.run"}
+	if err := up.insertJob(ctx, job2); err != nil {
+		t.Fatal(err)
+	}
+	tracker2 := newJobProgressTracker(up, &job2)
+	tracker2.fail(job2, "pull_failed", `Get "https://docker.1ms.run/v2/": dial tcp: connection refused`)
+
+	got2, err := up.GetJob(ctx, job2.ID, i18n.ZhCN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got2.ErrorCode != "pull_registry_unreachable_mirror" || got2.ErrorAction != "mirror" || got2.ErrorDetail != "请检查设备网络连接，也可能是已配置的镜像源异常" {
+		t.Fatalf("expected job2 to record mirror failure code, got code=%q action=%q detail=%q", got2.ErrorCode, got2.ErrorAction, got2.ErrorDetail)
 	}
 }
 

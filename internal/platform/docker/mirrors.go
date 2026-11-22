@@ -296,48 +296,82 @@ func UpdateOpenWrtDockerdUCI(existing []byte, urls []string) ([]byte, bool) {
 	return []byte(encoded), true
 }
 
-// GetDockerHubMirrors 读取目标 Docker 宿主机当前配置的 docker.io 镜像加速源列表。
-func (a *Adapter) GetDockerHubMirrors(ctx context.Context) ([]string, error) {
-	if dcTr, ok := a.tr.(transport.DaemonConfigTransport); ok {
-		if st, err := dcTr.InspectDockerDaemonConfig(ctx); err == nil && st != nil {
-			if st.Exists && len(bytes.TrimSpace(st.ConfigBytes)) > 0 {
-				if urls, valid := ExtractMirrorsFromDaemonJSON(st.ConfigBytes); valid {
-					if len(urls) > 0 || !st.HasOpenWrtUCI {
-						return urls, nil
-					}
-				}
-			}
-			if st.HasOpenWrtUCI {
-				if uciURLs := ExtractMirrorsFromOpenWrtUCI(st.OpenWrtUCIBytes); len(uciURLs) > 0 {
-					return uciURLs, nil
-				}
-			}
-			if st.DefaultJSONExists && len(bytes.TrimSpace(st.DefaultJSONBytes)) > 0 {
-				if urls, valid := ExtractMirrorsFromDaemonJSON(st.DefaultJSONBytes); valid && len(urls) > 0 {
-					return urls, nil
-				}
-			}
+func normalizeInfoMirrors(rawList []string) []string {
+	var out []string
+	seen := make(map[string]bool, len(rawList))
+	for _, raw := range rawList {
+		u := NormalizeMirrorURL(raw)
+		if u != "" && !seen[u] {
+			seen[u] = true
+			out = append(out, u)
 		}
 	}
-	if b, err := a.tr.ReadFile(ctx, defaultDaemonJSONPath); err == nil && len(bytes.TrimSpace(b)) > 0 {
-		if urls, ok := ExtractMirrorsFromDaemonJSON(b); ok {
-			return urls, nil
+	return out
+}
+
+// GetDockerHubMirrors 读取目标 Docker 宿主机当前配置的 docker.io 镜像加速源列表。
+// 实时读取底层配置或运行态 /info 失败时必须原样返回错误，严禁静默降级为空列表以免前端误判为“未配置”而覆盖清空设备原有配置。
+func (a *Adapter) GetDockerHubMirrors(ctx context.Context) ([]string, error) {
+	if a == nil || a.tr == nil {
+		return nil, fmt.Errorf("docker transport unavailable")
+	}
+	if dcTr, ok := a.tr.(transport.DaemonConfigTransport); ok {
+		st, err := dcTr.InspectDockerDaemonConfig(ctx)
+		if err != nil {
+			return nil, err
 		}
+		if st == nil {
+			return nil, fmt.Errorf("empty daemon config state")
+		}
+		if st.Exists && len(bytes.TrimSpace(st.ConfigBytes)) > 0 {
+			urls, valid := ExtractMirrorsFromDaemonJSON(st.ConfigBytes)
+			if !valid {
+				return nil, fmt.Errorf("invalid %s JSON", st.ActiveConfigPath)
+			}
+			if len(urls) > 0 || !st.HasOpenWrtUCI {
+				return urls, nil
+			}
+		}
+		if st.HasOpenWrtUCI {
+			if uciURLs := ExtractMirrorsFromOpenWrtUCI(st.OpenWrtUCIBytes); len(uciURLs) > 0 {
+				return uciURLs, nil
+			}
+		}
+		if st.DefaultJSONExists && len(bytes.TrimSpace(st.DefaultJSONBytes)) > 0 {
+			urls, valid := ExtractMirrorsFromDaemonJSON(st.DefaultJSONBytes)
+			if !valid {
+				return nil, fmt.Errorf("invalid %s JSON", defaultDaemonJSONPath)
+			}
+			if len(urls) > 0 {
+				return urls, nil
+			}
+		}
+		var info dockerInfoMirrorResp
+		if err := a.getJSON(ctx, "/info", &info); err == nil {
+			return normalizeInfoMirrors(info.RegistryConfig.Mirrors), nil
+		}
+		return nil, nil
+	}
+
+	b, readErr := a.tr.ReadFile(ctx, defaultDaemonJSONPath)
+	if readErr != nil && !transport.IsNotExistError(readErr) {
+		return nil, readErr
+	}
+	if readErr == nil && len(bytes.TrimSpace(b)) > 0 {
+		urls, ok := ExtractMirrorsFromDaemonJSON(b)
+		if !ok {
+			return nil, fmt.Errorf("invalid %s JSON", defaultDaemonJSONPath)
+		}
+		return urls, nil
 	}
 	var info dockerInfoMirrorResp
-	if err := a.getJSON(ctx, "/info", &info); err == nil {
-		var out []string
-		seen := make(map[string]bool)
-		for _, raw := range info.RegistryConfig.Mirrors {
-			u := NormalizeMirrorURL(raw)
-			if u != "" && !seen[u] {
-				seen[u] = true
-				out = append(out, u)
-			}
+	if err := a.getJSON(ctx, "/info", &info); err != nil {
+		if readErr == nil {
+			return nil, nil
 		}
-		return out, nil
+		return nil, err
 	}
-	return nil, nil
+	return normalizeInfoMirrors(info.RegistryConfig.Mirrors), nil
 }
 
 func buildHostsTOML(source string, mirrorURLs []string) []byte {

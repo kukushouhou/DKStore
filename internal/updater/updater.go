@@ -82,7 +82,7 @@ func (j Job) LocalizeFor(lang i18n.Lang) Job {
 			raw = j.ErrorMsg
 		}
 		j.ErrorMsg = i18n.FormatUpdateError(lang, j.ErrorCode, raw)
-		st := i18n.FormatStructuredUpdateError(lang, j.ErrorCode, raw, j.HostName, j.Progress.DownloadedBytes, j.configuredMirrors)
+		st := i18n.FormatStructuredUpdateError(lang, j.ErrorCode, raw)
 		j.ErrorTitle = st.Title
 		j.ErrorDetail = st.Detail
 		j.ErrorAction = st.Action
@@ -1334,10 +1334,12 @@ func (t *jobProgressTracker) handleProgress(ctx context.Context, j *Job, p platf
 }
 
 func (t *jobProgressTracker) fail(j Job, code, msg string) {
-	displayErr := i18n.FormatUpdateError(i18n.ZhCN, code, msg)
+	hasMirror := len(j.configuredMirrors) > 0
+	diagCode := i18n.DiagnoseUpdateError(code, msg, j.Progress.DownloadedBytes, hasMirror)
+	displayErr := i18n.FormatUpdateError(i18n.ZhCN, diagCode, msg)
 	var extra strings.Builder
 	extra.WriteString("\r\n")
-	if code == "pull_failed" && len(j.configuredMirrors) > 0 {
+	if (code == "pull_failed" || strings.HasPrefix(diagCode, "pull_")) && hasMirror {
 		extra.WriteString(fmt.Sprintf("\x1b[33m! 设备已配置镜像源: %s\x1b[0m\r\n", strings.Join(j.configuredMirrors, ", ")))
 	}
 	if rawPlain := strings.TrimSpace(i18n.LocalizeDetail(i18n.ZhCN, msg)); rawPlain != "" && rawPlain != displayErr {
@@ -1349,7 +1351,7 @@ func (t *jobProgressTracker) fail(j Job, code, msg string) {
 	j.LogChunk = errChunk
 	j.Logs = t.logBuf.String()
 	j.LogOffset = t.logBuf.Len()
-	t.svc.finishJobFailed(j, code, msg, j.Logs)
+	t.svc.finishJobFailed(j, diagCode, msg, j.Logs)
 }
 
 func (t *jobProgressTracker) succeed(j *Job, extraLogs []string) {
@@ -1803,12 +1805,17 @@ func (s *Service) finalizeSucceededServiceJob(j *Job, tracker *jobProgressTracke
 
 func (s *Service) finishJobFailed(j Job, code, msg, logs string) {
 	finished := time.Now().Unix()
+	code = i18n.DiagnoseUpdateError(code, msg, j.Progress.DownloadedBytes, len(j.configuredMirrors) > 0)
 	j.Status = "failed"
 	j.Phase = "done"
 	j.Retryable = j.Source != string(platform.SourceVendorManaged)
 	j.ErrorCode = code
 	j.rawErrorMsg = msg
 	j.ErrorMsg = i18n.FormatUpdateError(i18n.ZhCN, code, msg)
+	st := i18n.FormatStructuredUpdateError(i18n.ZhCN, code, msg)
+	j.ErrorTitle = st.Title
+	j.ErrorDetail = st.Detail
+	j.ErrorAction = st.Action
 	if logs == "" {
 		errChunk := fmt.Sprintf("\r\n\x1b[31m✖ %s\x1b[0m\r\n", j.ErrorMsg)
 		logs = j.Logs + errChunk
@@ -2048,10 +2055,10 @@ func normalizeUpdateError(code, msg string, h *host.Host) (string, string) {
 		return code, msg
 	}
 	if h != nil && h.Info != nil && isDockerBeforeZstd(h.Info.DockerVersion) {
-		return "pull_failed", i18n.EngineDetail(i18n.MsgDockerPullOldZstdVer, strings.TrimSpace(h.Info.DockerVersion))
+		return "docker_old_zstd", i18n.EngineDetail(i18n.MsgDockerPullOldZstdVer, strings.TrimSpace(h.Info.DockerVersion))
 	}
 	if strings.Contains(raw, "ApplyLayer") && strings.Contains(raw, "archive/tar: invalid tar header") {
-		return "pull_failed", i18n.EngineDetail(i18n.MsgDockerPullOldZstd)
+		return "docker_old_zstd", i18n.EngineDetail(i18n.MsgDockerPullOldZstd)
 	}
 	return code, msg
 }

@@ -21,11 +21,13 @@ import {
   DownOutlined,
   ExclamationCircleFilled,
   PlusOutlined,
+  ReloadOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   api,
+  isAuthExpiredError,
   showApiError,
   type HostItem,
   type HostMirrorContainerItem,
@@ -155,6 +157,8 @@ function HostMirrorModalBody({
   )
 
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [reloadTick, setReloadTick] = useState(0)
   const [saving, setSaving] = useState(false)
   const [rows, setRows] = useState<PairRowState[]>([])
   const [localContainers, setLocalContainers] = useState<HostMirrorContainerItem[]>([])
@@ -185,6 +189,7 @@ function HostMirrorModalBody({
       .getHostMirrors(hostId)
       .then((res) => {
         if (cancelled) return
+        setLoadError(null)
         const validPairs = (res.pairs ?? []).filter((p) =>
           (p.urls ?? []).some((u) => u.trim() !== ''),
         )
@@ -209,18 +214,26 @@ function HostMirrorModalBody({
         )
       })
       .catch((e) => {
-        if (!cancelled) {
-          showApiError(e)
-          setRows([])
-        }
+        if (cancelled) return
+        if (isAuthExpiredError(e)) return
+        setLoadError((e as Error)?.message || 'Request failed')
+        setRows([])
       })
       .finally(() => {
-        if (!cancelled) setLoading(false)
+        if (!cancelled) {
+          setLoading(false)
+        }
       })
     return () => {
       cancelled = true
     }
-  }, [hostId])
+  }, [hostId, reloadTick])
+
+  const handleRetryLoad = () => {
+    setLoading(true)
+    setLoadError(null)
+    setReloadTick((v) => v + 1)
+  }
 
   const presetSources = useMemo(
     () => [
@@ -417,30 +430,7 @@ function HostMirrorModalBody({
     setSaving(true)
     try {
       await api.saveHostMirrors(hostId, pairs, applyPeerIds)
-      await Promise.all([
-        qc.invalidateQueries({ queryKey: ['hosts'] }),
-        qc.invalidateQueries({ queryKey: ['updates'] }),
-      ])
-      const st = useUIStore.getState()
-      const trackedFailedIds = new Set<string>()
-      for (const j of Object.values(st.updateQueueJobs)) {
-        if (j.status === 'failed') trackedFailedIds.add(j.id)
-      }
-      for (const j of Object.values(st.lastFinishedJobs)) {
-        if (j.status === 'failed') trackedFailedIds.add(j.id)
-      }
-      if (trackedFailedIds.size > 0) {
-        api
-          .listUpdates()
-          .then((res) => {
-            for (const item of res.items ?? []) {
-              if (trackedFailedIds.has(item.id) && item.status === 'failed') {
-                useUIStore.getState().upsertUpdateJob(item)
-              }
-            }
-          })
-          .catch(() => {})
-      }
+      await qc.invalidateQueries({ queryKey: ['hosts'] })
       message.success(
         applyPeerIds.length > 0
           ? t.hosts.mirrorSavedWithSyncMsg
@@ -455,6 +445,7 @@ function HostMirrorModalBody({
   }
 
   const handleSaveClick = () => {
+    if (loading || loadError) return
     const pairs = buildCleanedPairs()
     const applyPeerIds = alsoApply ? selectedPeerIds : []
     const nextDockerHubUrls =
@@ -958,6 +949,40 @@ function HostMirrorModalBody({
         <div style={{ textAlign: 'center', padding: '32px 0' }}>
           <Spin />
         </div>
+      ) : loadError ? (
+        <div
+          style={{
+            border: `1px solid ${token.colorErrorBorder}`,
+            background: token.colorErrorBg,
+            borderRadius: token.borderRadiusLG,
+            padding: '24px 16px',
+            textAlign: 'center',
+          }}
+        >
+          <Flex vertical align="center" gap={8}>
+            <Typography.Text
+              strong
+              style={{ fontSize: token.fontSize, color: token.colorError }}
+            >
+              {t.hosts.mirrorLoadFailedTitle}
+            </Typography.Text>
+            <Typography.Text
+              type="secondary"
+              style={{
+                fontSize: token.fontSizeSM,
+                wordBreak: 'break-word',
+                maxWidth: 540,
+              }}
+            >
+              {loadError}
+            </Typography.Text>
+            <div style={{ marginTop: 4 }}>
+              <Button icon={<ReloadOutlined />} onClick={handleRetryLoad}>
+                {t.hosts.mirrorLoadRetryBtn}
+              </Button>
+            </div>
+          </Flex>
+        </div>
       ) : (
         <>
           {rows.length === 0 ? (
@@ -1231,7 +1256,7 @@ function HostMirrorModalBody({
         <Button
           type="primary"
           loading={saving}
-          disabled={loading}
+          disabled={loading || Boolean(loadError)}
           onClick={handleSaveClick}
         >
           {t.hosts.saveBtn}

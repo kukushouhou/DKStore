@@ -131,11 +131,6 @@ func (s *Service) ListJobs(ctx context.Context, limit int, lang i18n.Lang) ([]Jo
 				seenWholeApp[ak] = true
 			}
 		}
-		if out[i].ErrorCode != "" && s.hosts != nil && out[i].HostID != "" {
-			pairs := s.hosts.LoadCachedHostMirrors(ctx, out[i].HostID)
-			out[i].configuredMirrors = matchingMirrorURLsForRef(pairs, out[i].TargetImageRef)
-			out[i] = out[i].LocalizeFor(lang)
-		}
 	}
 	return out, nil
 }
@@ -183,11 +178,6 @@ func (s *Service) GetJob(ctx context.Context, id string, lang i18n.Lang) (*Job, 
 		return nil, err
 	}
 	rows.Close()
-	if j.ErrorCode != "" && s.hosts != nil && j.HostID != "" {
-		pairs := s.hosts.LoadCachedHostMirrors(ctx, j.HostID)
-		j.configuredMirrors = matchingMirrorURLsForRef(pairs, j.TargetImageRef)
-		j = j.LocalizeFor(lang)
-	}
 	j.Retryable = s.computeSingleJobRetryable(ctx, j)
 	return &j, nil
 }
@@ -644,7 +634,7 @@ func scanJobRow(rows *sql.Rows, lang i18n.Lang) (Job, error) {
 	if j.ErrorCode != "" {
 		j.rawErrorMsg = j.ErrorMsg
 		j.ErrorMsg = i18n.FormatUpdateError(lang, j.ErrorCode, j.rawErrorMsg)
-		st := i18n.FormatStructuredUpdateError(lang, j.ErrorCode, j.rawErrorMsg, j.HostName, j.Progress.DownloadedBytes, nil)
+		st := i18n.FormatStructuredUpdateError(lang, j.ErrorCode, j.rawErrorMsg)
 		j.ErrorTitle = st.Title
 		j.ErrorDetail = st.Detail
 		j.ErrorAction = st.Action
