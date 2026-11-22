@@ -142,7 +142,7 @@ func FormatHint(lang Lang, hint string) string {
 		if lang == EnUS {
 			return fmt.Sprintf("Update within current major version is also available: %s", val)
 		}
-		return fmt.Sprintf("当前主版本内另有更新：%s", val)
+		return fmt.Sprintf("当前大版本内另有更新：%s", val)
 	case "higher_tag":
 		if lang == EnUS {
 			return fmt.Sprintf("Higher version tag also available in registry: %s", val)

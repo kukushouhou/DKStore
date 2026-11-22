@@ -659,28 +659,28 @@ function VersionPickerModalBody({
       tag?: string
       label: string
       tip: string
-      color: 'success' | 'processing' | 'warning'
+      color: 'cyan' | 'blue' | 'purple'
     }[] = [
       {
         kind: 'patch',
         tag: candidates.patch,
         label: t.versionPicker.candPatch,
         tip: t.versionPicker.candPatchTip,
-        color: 'success',
+        color: 'cyan',
       },
       {
         kind: 'minor',
         tag: candidates.minor,
         label: t.versionPicker.candMinor,
         tip: t.versionPicker.candMinorTip,
-        color: 'processing',
+        color: 'blue',
       },
       {
         kind: 'major',
         tag: candidates.major,
         label: t.versionPicker.candMajor,
         tip: t.versionPicker.candMajorTip,
-        color: 'warning',
+        color: 'purple',
       },
     ]
     const seen = new Set<string>()
@@ -689,7 +689,7 @@ function VersionPickerModalBody({
       tag: string
       label: string
       tip: string
-      color: 'success' | 'processing' | 'warning'
+      color: 'cyan' | 'blue' | 'purple'
     }[] = []
     for (const d of defs) {
       const tg = (d.tag || '').trim()
