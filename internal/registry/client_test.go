@@ -697,26 +697,26 @@ func TestSearchTagsExFullModalPoolAndConcurrentPages(t *testing.T) {
 }
 
 func TestModalCandidatesAndPinnedFlavorIsolation(t *testing.T) {
-	ref, _ := version.ParseImageRef("python:3.13.1-alpine")
+	ref, _ := version.ParseImageRef("nginx:1.26.1-alpine")
 	pool := []TagDigestEntry{
-		{Name: "3.13.1-alpine", RepoDigest: "sha256:cur"},
-		{Name: "3.13.4-alpine", RepoDigest: "sha256:patch"},
-		{Name: "3.13.5-alpine3.24", RepoDigest: "sha256:pinnedPatch"},
-		{Name: "3.14.2-alpine", RepoDigest: "sha256:minor"},
-		{Name: "3.14.2-alpine3.24", RepoDigest: "sha256:pinnedMinor"},
-		{Name: "4.0.0-alpine", RepoDigest: "sha256:major"},
-		{Name: "4.0.0-alpine3.24", RepoDigest: "sha256:pinnedMajor"},
+		{Name: "1.26.1-alpine", RepoDigest: "sha256:cur"},
+		{Name: "1.26.3-alpine", RepoDigest: "sha256:patch"},
+		{Name: "1.26.3-alpine3.20", RepoDigest: "sha256:pinnedPatch"},
+		{Name: "1.27.4-alpine", RepoDigest: "sha256:minor"},
+		{Name: "1.27.4-alpine3.20", RepoDigest: "sha256:pinnedMinor"},
+		{Name: "2.0.0-alpine", RepoDigest: "sha256:major"},
+		{Name: "2.0.0-alpine3.20", RepoDigest: "sha256:pinnedMajor"},
 	}
 	res := buildFullModalSearchResult(pool, ref, "", false, false, "", "sha256:cur")
-	if res.HighestStableTag != "4.0.0-alpine" {
-		t.Fatalf("expected HighestStableTag=4.0.0-alpine without alpine3.24 pollution, got %q", res.HighestStableTag)
+	if res.HighestStableTag != "2.0.0-alpine" {
+		t.Fatalf("expected HighestStableTag=2.0.0-alpine without alpine3.20 pollution, got %q", res.HighestStableTag)
 	}
-	if res.Candidates == nil || res.Candidates.Patch != "3.13.4-alpine" || res.Candidates.Minor != "3.14.2-alpine" || res.Candidates.Major != "4.0.0-alpine" {
+	if res.Candidates == nil || res.Candidates.Patch != "1.26.3-alpine" || res.Candidates.Minor != "1.27.4-alpine" || res.Candidates.Major != "2.0.0-alpine" {
 		t.Fatalf("unexpected modal candidates: %+v", res.Candidates)
 	}
 	for _, it := range res.Items {
 		if it.StableVisible && version.HasFlavorVersionPin(version.ParseTag(it.Name).Variant) {
-			t.Fatalf("pinned flavor tag %q should not pollute default stableVisible list for floating 3.13.1-alpine", it.Name)
+			t.Fatalf("pinned flavor tag %q should not pollute default stableVisible list for floating 1.26.1-alpine", it.Name)
 		}
 	}
 }

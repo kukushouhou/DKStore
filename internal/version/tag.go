@@ -164,7 +164,7 @@ var (
 	rePinnedFlavor   = regexp.MustCompile(`(?i)(?:^|[-_])(alpine|debian|ubuntu|oracle|ubi|centos|rocky|alma|fedora|openssl)[-_.]?\d+(?:\.\d+)*`)
 )
 
-// HasFlavorVersionPin 判断变体后缀是否显式锁定了基础发行版或运行时版本号（如 alpine3.24、alpine-3.24、alpine.3.24、ubuntu.24.04）。
+// HasFlavorVersionPin 判断变体后缀是否显式锁定了基础发行版或运行时版本号（如 alpine3.20、debian12、ubuntu22.04）。
 func HasFlavorVersionPin(variant string) bool {
 	v := strings.TrimSpace(variant)
 	if v == "" {

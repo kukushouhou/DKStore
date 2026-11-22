@@ -141,8 +141,8 @@ func TestSelectUpdateCandidatesAndFlavorVersionPinning(t *testing.T) {
 		t.Fatalf("unexpected 0.x candidates: %+v", zeroCands)
 	}
 
-	// 发行版后缀锁死版本识别与双向防串台（3-alpine vs 3-alpine3.24 / 3-alpine.3.24 / ubuntu.24.04）
-	for _, pinned := range []string{"alpine3.24", "alpine-3.24", "alpine.3.24", "ubuntu.24.04", "debian12", "slim-openssl3.1"} {
+	// 发行版后缀锁死版本识别与双向防串台（如 1.27-alpine vs 1.27-alpine3.20 / debian12 / ubuntu22.04）
+	for _, pinned := range []string{"alpine3.20", "alpine-3.20", "alpine.3.20", "ubuntu22.04", "ubuntu.22.04", "debian12", "slim-openssl3.1"} {
 		if !HasFlavorVersionPin(pinned) {
 			t.Fatalf("expected HasFlavorVersionPin(%q) == true", pinned)
 		}
@@ -154,12 +154,12 @@ func TestSelectUpdateCandidatesAndFlavorVersionPinning(t *testing.T) {
 	}
 
 	pairs := [][2]string{
-		{"3-alpine", "3-alpine3.24"},
-		{"3-alpine3.24", "3-alpine"},
-		{"3-alpine", "3-alpine.3.24"},
-		{"1.2.3-ubuntu", "1.2.4-ubuntu.24.04"},
-		{"3.14-rc1-alpine", "3.14-alpine3.24"},
-		{"3.14-rc1-alpine3.24", "3.14-alpine"},
+		{"1.27-alpine", "1.27-alpine3.20"},
+		{"1.27-alpine3.20", "1.27-alpine"},
+		{"1.27-alpine", "1.27-alpine.3.20"},
+		{"16.4-debian", "16.5-debian12"},
+		{"2.8-rc1-alpine", "2.8-alpine3.20"},
+		{"2.8-rc1-alpine3.20", "2.8-alpine"},
 	}
 	for _, p := range pairs {
 		cur := ParseTag(p[0])
@@ -168,10 +168,10 @@ func TestSelectUpdateCandidatesAndFlavorVersionPinning(t *testing.T) {
 			t.Fatalf("expected %q and %q to be incompatible across floating/pinned flavor boundary", p[0], p[1])
 		}
 	}
-	if !CompatibleCandidate(ParseTag("3.14-rc1-alpine"), ParseTag("3.14-alpine")) {
-		t.Fatalf("expected 3.14-rc1-alpine -> 3.14-alpine to be compatible")
+	if !CompatibleCandidate(ParseTag("2.8-rc1-alpine"), ParseTag("2.8-alpine")) {
+		t.Fatalf("expected 2.8-rc1-alpine -> 2.8-alpine to be compatible")
 	}
-	if !CompatibleCandidate(ParseTag("3.14-rc1-alpine3.24"), ParseTag("3.14-alpine3.24")) {
-		t.Fatalf("expected 3.14-rc1-alpine3.24 -> 3.14-alpine3.24 to be compatible")
+	if !CompatibleCandidate(ParseTag("2.8-rc1-alpine3.20"), ParseTag("2.8-alpine3.20")) {
+		t.Fatalf("expected 2.8-rc1-alpine3.20 -> 2.8-alpine3.20 to be compatible")
 	}
 }
