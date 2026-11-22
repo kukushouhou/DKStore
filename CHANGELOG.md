@@ -6,6 +6,14 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+### 问题修复
+- **容器外部降级或重建后旧版本号残留修复**：修复同名容器在外部被降级或重建为其他版本镜像且未命中远端标签反查时，卡片左侧当前版本号仍被上次升级残留的旧标签覆盖（如显示出 `0.8.5 → 0.8.5`）的问题 ([`d8623eb`](https://github.com/kukushouhou/DKStore/commit/d8623eb))
+
+---
+
+### Fixes
+- **Stale Current Version After External Container Rebuild**: Fixed the current version badge on app cards remaining overwritten by a previously cached tag (e.g. showing `0.8.5 → 0.8.5`) when a same-named container was downgraded or recreated externally and did not match remote tag lookup ([`d8623eb`](https://github.com/kukushouhou/DKStore/commit/d8623eb))
+
 ## [v0.8.2] - 2026-11-23
 
 ### 新功能
