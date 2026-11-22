@@ -1276,21 +1276,29 @@ function VersionPickerModalBody({
                 </Typography.Text>
               )}
 
-              {/* 标签列表 */}
+              {/* 标签列表：桌面双栏下由外层弹性壳吸收右栏撑出的全部剩余高度，避免列表下方留白且不反向撑高右栏 */}
               <div
-                ref={listBoxRef}
-                role="listbox"
-                onScroll={handleListScroll}
                 style={{
-                  flex: 1,
-                  maxHeight: 260,
-                  minHeight: 180,
-                  overflowY: 'auto',
-                  borderRadius: token.borderRadiusLG,
-                  border: `1px solid ${token.colorBorderSecondary}`,
-                  background: token.colorBgContainer,
+                  flex: screens.md ? '1 1 260px' : undefined,
+                  minHeight: screens.md ? 220 : undefined,
+                  position: screens.md ? 'relative' : 'static',
                 }}
               >
+                <div
+                  ref={listBoxRef}
+                  role="listbox"
+                  onScroll={handleListScroll}
+                  style={{
+                    position: screens.md ? 'absolute' : 'static',
+                    inset: screens.md ? 0 : undefined,
+                    maxHeight: screens.md ? undefined : 260,
+                    minHeight: screens.md ? undefined : 180,
+                    overflowY: 'auto',
+                    borderRadius: token.borderRadiusLG,
+                    border: `1px solid ${token.colorBorderSecondary}`,
+                    background: token.colorBgContainer,
+                  }}
+                >
                 {loading ? (
                   <Flex align="center" justify="center" gap={8} style={{ height: 180 }}>
                     <Spin size="small" />
@@ -1478,6 +1486,7 @@ function VersionPickerModalBody({
                     )}
                   </>
                 )}
+                </div>
               </div>
             </Col>
 
