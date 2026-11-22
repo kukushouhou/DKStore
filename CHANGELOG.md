@@ -6,6 +6,28 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+## [v0.8.2] - 2026-11-23
+
+### 新功能
+- **版本选择弹窗多版本快捷切换**：当同一镜像同时存在两个及以上更高版本候选时，在选择版本弹窗右栏顶部展示「可选更新版本」（小版本 / 中版本 / 大版本）快捷按钮并在左栏版本列表标注对应标签，点击即可切换目标镜像、自动滚动定位列表并与下方的提醒设置及分段版本锁定条联动（仅单档更新或已是最新时自动隐藏） ([`cc3fe53`](https://github.com/kukushouhou/DKStore/commit/cc3fe53), [`dfff9d5`](https://github.com/kukushouhou/DKStore/commit/dfff9d5))
+
+### 问题修复
+- **更新失败提示固化修复**：修复未配置镜像源时的更新失败记录在用户随后配置镜像源后，错误提示会自动变成「也可能是已配置的镜像源异常」的问题；失败原因现按任务执行当时的实际状态定性保留，未点击「重试」前不再随事后修改镜像源而变化 ([`1a2415c`](https://github.com/kukushouhou/DKStore/commit/1a2415c))
+- **镜像源读取失败保护**：修复实时读取设备镜像源失败时可能返回空列表或被弹窗当作「未配置」展示的问题；读取失败时现明确提示「读取镜像源配置失败」并提供「重试」按钮，同时禁用「保存」以防误覆盖清空设备原有配置（正常读取后再主动删除最后一条镜像源仍可正常保存） ([`1a2415c`](https://github.com/kukushouhou/DKStore/commit/1a2415c))
+- **版本选择弹窗列表底部留白修复**：修复桌面端选择版本弹窗在右栏展开更多选项时，左侧版本号列表下方出现空白的问题，现随右栏高度同步延展对齐 ([`60c35cd`](https://github.com/kukushouhou/DKStore/commit/60c35cd))
+- **版本选择弹窗后缀过滤修复**：修复带系统后缀的镜像打开选择版本弹窗时，默认版本列表可能混入附带系统小版本号标签的问题 ([`cc3fe53`](https://github.com/kukushouhou/DKStore/commit/cc3fe53), [`70b411f`](https://github.com/kukushouhou/DKStore/commit/70b411f))
+
+---
+
+### Features
+- **Quick Update Shortcuts in Version Picker**: Shows `Available updates:` (`Patch`, `Minor`, and `Major`) quick buttons at the top of the right column in the version picker modal with matching badges in the left tag list whenever two or more update candidates exist; clicking any option updates the target image, scrolls the list into view, and syncs with the reminder settings and segmented version lock bar below (automatically hidden when fewer than two candidates exist) ([`cc3fe53`](https://github.com/kukushouhou/DKStore/commit/cc3fe53), [`dfff9d5`](https://github.com/kukushouhou/DKStore/commit/dfff9d5))
+
+### Fixes
+- **Frozen Update Failure Prompts**: Fixed historical failed update jobs created without mirrors changing their error prompt to `configured mirrors may also be unavailable` after the user later configured mirrors; failure prompts are now determined and preserved at job failure time and do not change before clicking `Retry` ([`1a2415c`](https://github.com/kukushouhou/DKStore/commit/1a2415c))
+- **Mirror Read Failure Safeguard**: Fixed live mirror config read failures returning an empty list or rendering as an unconfigured state in the mirror modal; read failures now show `Failed to load mirror settings` with a `Retry` button while disabling `Save` so existing host mirrors cannot be accidentally wiped (deleting the last mirror after a successful read remains savable as normal) ([`1a2415c`](https://github.com/kukushouhou/DKStore/commit/1a2415c))
+- **Version Picker List Bottom Whitespace Fix**: Fixed blank space appearing below the desktop left tag list in the version picker modal when additional options expanded in the right column, stretching the list flush with the right column ([`60c35cd`](https://github.com/kukushouhou/DKStore/commit/60c35cd))
+- **Version Picker Suffix Filtering Fix**: Fixed the default tag list in the version picker mixing in tags with appended OS version numbers when inspecting images that use plain OS suffixes ([`cc3fe53`](https://github.com/kukushouhou/DKStore/commit/cc3fe53), [`70b411f`](https://github.com/kukushouhou/DKStore/commit/70b411f))
+
 ## [v0.8.1] - 2026-11-22
 
 ### 问题修复
