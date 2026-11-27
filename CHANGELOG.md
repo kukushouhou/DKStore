@@ -6,6 +6,18 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+## [v0.8.4] - 2026-11-27
+
+### 问题修复
+- **顶栏新版本提醒与文案修正**：修复发现新版本时顶栏「设置」菜单上方圆点被视口顶边裁切成半圆的问题，移除菜单圆点并改为在顶栏右侧显示「↑ 新版本 vX.Y.Z」按钮（悬停显示版本对比，点击直达设置页）；同时将设置页、初始化向导与通知推送中的「商店更新」表述统一改为「DKStore 版本更新」，并修复英文界面下该项标签文字截断的问题 ([`196b1c6`](https://github.com/kukushouhou/DKStore/commit/196b1c6))
+- **版本更新下载源提示遮挡修复**：修复切换至「自定义镜像」并点开镜像地址输入框时，弹出的预设节点下拉菜单会遮挡下方提示文字的问题；下载源说明现随「下载源」选项常驻显示，展开下拉菜单时仍可完整阅读 ([`6ab2462`](https://github.com/kukushouhou/DKStore/commit/6ab2462))
+
+---
+
+### Fixes
+- **Top-Bar Update Prompt & Copy Fix**: Fixed the update dot above `Settings` in the top navigation bar being clipped into a half-circle at the top edge of the viewport, replacing it with a clear `↑ Update vX.Y.Z` button in the top-right toolbar (showing version comparison on hover and jumping to `Settings` on click); unified self-update copy across `Settings`, the setup wizard, and push notifications to `DKStore Version Update`, and fixed label truncation in the English `Settings` view ([`196b1c6`](https://github.com/kukushouhou/DKStore/commit/196b1c6))
+- **Version Update Download Source Hint Overlap Fix**: Fixed the preset mirror dropdown covering the hint text underneath when clicking the custom mirror URL input; download source descriptions now stay visible alongside `Download Source` without being obscured when the dropdown opens ([`6ab2462`](https://github.com/kukushouhou/DKStore/commit/6ab2462))
+
 ## [v0.8.3] - 2026-11-27
 
 ### 新功能
