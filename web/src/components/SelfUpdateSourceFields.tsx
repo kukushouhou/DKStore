@@ -56,16 +56,13 @@ export default function SelfUpdateSourceFields({
   const { token } = theme.useToken()
 
   const [repoFocused, setRepoFocused] = useState(false)
-  const [urlFocused, setUrlFocused] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testOkLatency, setTestOkLatency] = useState<number | null>(null)
   const repoBlurTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const urlBlurTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     return () => {
       if (repoBlurTimerRef.current) clearTimeout(repoBlurTimerRef.current)
-      if (urlBlurTimerRef.current) clearTimeout(urlBlurTimerRef.current)
     }
   }, [])
 
@@ -76,14 +73,6 @@ export default function SelfUpdateSourceFields({
   const onRepoBlur = () => {
     if (repoBlurTimerRef.current) clearTimeout(repoBlurTimerRef.current)
     repoBlurTimerRef.current = setTimeout(() => setRepoFocused(false), 180)
-  }
-  const onUrlFocus = () => {
-    if (urlBlurTimerRef.current) clearTimeout(urlBlurTimerRef.current)
-    setUrlFocused(true)
-  }
-  const onUrlBlur = () => {
-    if (urlBlurTimerRef.current) clearTimeout(urlBlurTimerRef.current)
-    urlBlurTimerRef.current = setTimeout(() => setUrlFocused(false), 180)
   }
 
   const isVertical = layout === 'vertical'
@@ -128,7 +117,7 @@ export default function SelfUpdateSourceFields({
     [presetMirrors],
   )
 
-  const urlFocusHint =
+  const channelDesc =
     effectiveChannel === 'mirror'
       ? t.selfUpdate.hintMirror
       : effectiveChannel === 'custom'
@@ -236,8 +225,6 @@ export default function SelfUpdateSourceFields({
           value={value.customHost}
           options={presetOptions}
           onChange={handleCustomHostChange}
-          onFocus={onUrlFocus}
-          onBlur={onUrlBlur}
           placeholder={t.selfUpdate.customPlaceholder}
           popupMatchSelectWidth={false}
           style={{
@@ -259,8 +246,6 @@ export default function SelfUpdateSourceFields({
         readOnly
         spellCheck={false}
         value={readonlyUrl}
-        onFocus={onUrlFocus}
-        onBlur={onUrlBlur}
         style={{
           flex: 1,
           minWidth: 0,
@@ -348,11 +333,18 @@ export default function SelfUpdateSourceFields({
 
           <Form.Item
             label={t.selfUpdate.channelAndUrlLabel}
-            extra={urlFocused ? urlFocusHint : undefined}
             style={{ marginBottom: 0 }}
           >
             <Space orientation="vertical" size={10} style={{ width: '100%' }}>
-              {channelSegmented}
+              <div>
+                {channelSegmented}
+                <Typography.Text
+                  type="secondary"
+                  style={{ fontSize: token.fontSizeSM, display: 'block', marginTop: 4 }}
+                >
+                  {channelDesc}
+                </Typography.Text>
+              </div>
               <Flex gap={8} align="center">
                 {urlInputGroup}
                 <Button loading={testing} onClick={handleTest}>
@@ -423,53 +415,51 @@ export default function SelfUpdateSourceFields({
         </div>
 
         {/* 行 3：下载源 */}
-        <Flex align="center" gap={12} wrap>
-          <Typography.Text style={{ width: labelWidth, flexShrink: 0, whiteSpace: 'nowrap' }}>
+        <Flex align="flex-start" gap={12}>
+          <Typography.Text
+            style={{ width: labelWidth, flexShrink: 0, whiteSpace: 'nowrap', lineHeight: '32px' }}
+          >
             {t.selfUpdate.channelLabel}
           </Typography.Text>
-          {channelSegmented}
-          {showInlineSafetyLink && (
-            <Button
-              type="link"
-              size="small"
-              icon={<InfoCircleOutlined />}
-              style={{ padding: 0 }}
-              onClick={() => onSafetyModalChange(true)}
-            >
-              {t.selfUpdate.safetyLink}
-            </Button>
-          )}
+          <Flex align="center" gap={12} wrap style={{ flex: 1, minWidth: 0, minHeight: 32 }}>
+            {channelSegmented}
+            <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
+              {channelDesc}
+            </Typography.Text>
+            {showInlineSafetyLink && (
+              <Button
+                type="link"
+                size="small"
+                icon={<InfoCircleOutlined />}
+                style={{ padding: 0 }}
+                onClick={() => onSafetyModalChange(true)}
+              >
+                {t.selfUpdate.safetyLink}
+              </Button>
+            )}
+          </Flex>
         </Flex>
 
         {/* 行 4：请求地址 */}
-        <div>
-          <Flex align="center" gap={12} wrap>
-            <Typography.Text
-              type="secondary"
-              style={{ width: labelWidth, flexShrink: 0, whiteSpace: 'nowrap' }}
-            >
-              {t.selfUpdate.urlLabel}
-            </Typography.Text>
-            <Flex align="center" gap={8} wrap style={{ flex: 1, minWidth: 0 }}>
-              {urlInputGroup}
-              <Button loading={testing} onClick={handleTest}>
-                {testBtnLabel}
+        <Flex align="center" gap={12} wrap>
+          <Typography.Text
+            type="secondary"
+            style={{ width: labelWidth, flexShrink: 0, whiteSpace: 'nowrap' }}
+          >
+            {t.selfUpdate.urlLabel}
+          </Typography.Text>
+          <Flex align="center" gap={8} wrap style={{ flex: 1, minWidth: 0 }}>
+            {urlInputGroup}
+            <Button loading={testing} onClick={handleTest}>
+              {testBtnLabel}
+            </Button>
+            {onSave && (
+              <Button type="primary" loading={saving} onClick={onSave}>
+                {t.selfUpdate.saveBtn}
               </Button>
-              {onSave && (
-                <Button type="primary" loading={saving} onClick={onSave}>
-                  {t.selfUpdate.saveBtn}
-                </Button>
-              )}
-            </Flex>
+            )}
           </Flex>
-          {urlFocused && (
-            <div style={{ paddingLeft: labelWidth + 12, marginTop: 4 }}>
-              <Typography.Text type="secondary" style={{ fontSize: token.fontSizeSM }}>
-                {urlFocusHint}
-              </Typography.Text>
-            </div>
-          )}
-        </div>
+        </Flex>
       </Space>
       {safetyModal}
     </>
