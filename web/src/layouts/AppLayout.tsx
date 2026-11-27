@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  Badge,
   Button,
   Flex,
   Grid,
@@ -11,6 +10,7 @@ import {
   Segmented,
   Space,
   Spin,
+  Tooltip,
   Typography,
   message,
   theme,
@@ -243,17 +243,7 @@ export default function AppLayout() {
     { key: '/containers', icon: <ContainerOutlined />, label: t.nav.containers },
     { key: '/hosts', icon: <CloudServerOutlined />, label: t.nav.hosts },
     { key: '/history', icon: <HistoryOutlined />, label: t.nav.history },
-    {
-      key: '/settings',
-      icon: <SettingOutlined />,
-      label: selfUpdateNavQuery.data?.hasUpdate ? (
-        <Badge dot color={token.colorPrimary} offset={[5, -1]}>
-          <span>{t.nav.settings}</span>
-        </Badge>
-      ) : (
-        t.nav.settings
-      ),
-    },
+    { key: '/settings', icon: <SettingOutlined />, label: t.nav.settings },
   ]
   const selected = items.find((i) => i.key !== '/' && pathname.startsWith(i.key))?.key ?? '/'
 
@@ -483,6 +473,70 @@ export default function AppLayout() {
   const isHomeRoute = pathname === '/'
   const useHeaderPopover = !isUltrawide && !isHomeRoute
 
+  const selfUpdatePillBtn =
+    selfUpdateNavQuery.data?.hasUpdate && selfUpdateNavQuery.data?.latestVersion ? (
+      <Tooltip
+        title={t.nav.newVersionTip
+          .replace('{current}', selfUpdateNavQuery.data.currentVersion || '-')
+          .replace('{latest}', selfUpdateNavQuery.data.latestVersion)}
+      >
+        <button
+          type="button"
+          onClick={() => {
+            if (pathname === '/settings') {
+              window.scrollTo({ top: 0, behavior: 'smooth' })
+            } else {
+              navigate('/settings')
+            }
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.opacity = '0.85'
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.opacity = '1'
+          }}
+          style={{
+            height: 24,
+            paddingInline: 10,
+            borderRadius: 999,
+            border: 'none',
+            background: isDark ? 'rgba(47, 107, 255, 0.2)' : 'rgba(47, 107, 255, 0.1)',
+            color: token.colorPrimaryText,
+            fontFamily: 'inherit',
+            fontSize: 12,
+            lineHeight: 1,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 4,
+            cursor: 'pointer',
+            whiteSpace: 'nowrap',
+            transition: 'opacity 0.15s',
+          }}
+        >
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 16 16"
+            fill="none"
+            aria-hidden="true"
+            style={{ flexShrink: 0 }}
+          >
+            <path
+              d="M8 12.5V3.5M4.5 7L8 3.5L11.5 7"
+              stroke="currentColor"
+              strokeWidth="1.65"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+          {screens.sm && <span>{t.nav.newVersion}</span>}
+          <span style={{ fontFamily: token.fontFamilyCode, fontVariantNumeric: 'tabular-nums' }}>
+            {selfUpdateNavQuery.data.latestVersion}
+          </span>
+        </button>
+      </Tooltip>
+    ) : null
+
   const queuePillBtn =
     queueJobs.length > 0 ? (
       <Button
@@ -569,6 +623,7 @@ export default function AppLayout() {
             }}
           />
           <Space size={8} align="center">
+            {selfUpdatePillBtn}
             {queuePillBtn &&
               (useHeaderPopover ? (
                 <Popover

@@ -52,7 +52,7 @@ export default function SelfUpdateSourceFields({
   onSafetyModalChange,
   showInlineSafetyLink = false,
 }: Props) {
-  const { t } = useI18n()
+  const { locale, t } = useI18n()
   const { token } = theme.useToken()
 
   const [repoFocused, setRepoFocused] = useState(false)
@@ -360,11 +360,11 @@ export default function SelfUpdateSourceFields({
   }
 
   // Horizontal layout (Settings Page)
-  const labelWidth = 148
+  const labelWidth = locale === 'en-US' ? 216 : 148
   return (
     <>
       <Space orientation="vertical" size={12} style={{ width: '100%' }}>
-        {/* 行 1：商店更新(非容器更新) */}
+        {/* 行 1：版本更新(非容器更新) */}
         <Flex align="center" gap={12} wrap>
           <Typography.Text style={{ width: labelWidth, flexShrink: 0, whiteSpace: 'nowrap' }}>
             {t.selfUpdate.policyLabel}

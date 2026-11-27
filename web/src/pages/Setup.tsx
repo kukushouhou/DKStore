@@ -639,7 +639,7 @@ export default function SetupPage({ authStatus, onStepChange, onDone }: Props) {
     </div>
   )
 
-  // 步骤 3：商店更新设置（始终进入，标题右侧以状态徽章展示后台 GitHub 连通性结果）
+  // 步骤 3：DKStore 版本更新设置（始终进入，标题右侧以状态徽章展示后台 GitHub 连通性结果）
   if (step === 3) {
     const wizardDesc =
       probeState === 'ok'

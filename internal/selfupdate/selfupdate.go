@@ -101,7 +101,7 @@ type resolvedRelease struct {
 	AssetSHA256  string
 }
 
-// Service 管理商店自更新配置、探测缓存与在线/离线热更新流程。
+// Service 管理 DKStore 版本自更新配置、探测缓存与在线/离线热更新流程。
 type Service struct {
 	log        *slog.Logger
 	st         *store.Store
@@ -228,7 +228,7 @@ type upgradedNoticePayload struct {
 	CreatedAt int64  `json:"createdAt,omitempty"`
 }
 
-// StartScheduler 启动商店版本后台巡检循环，按用户选定的策略执行「自动更新」或「仅推送提醒」。
+// StartScheduler 启动 DKStore 版本后台巡检循环，按用户选定的策略执行「自动更新」或「仅推送提醒」。
 func (s *Service) StartScheduler(ctx context.Context) {
 	if s == nil || s.st == nil {
 		return
@@ -250,7 +250,7 @@ func (s *Service) StartScheduler(ctx context.Context) {
 		}
 		s.flushPendingUpgradedNotice(ctx)
 
-		// 首次后台商店版本巡检延迟 35 秒，避开启动高峰
+		// 首次后台版本巡检延迟 35 秒，避开启动高峰
 		select {
 		case <-ctx.Done():
 			return
@@ -314,8 +314,8 @@ func (s *Service) flushPendingUpgradedNotice(ctx context.Context) {
 	if s.ntf != nil {
 		err := s.ntf.SendMessage(
 			ctx,
-			fmt.Sprintf("DKStore 商店已自动更新至 %s", target),
-			fmt.Sprintf("商店已从 %s 自动升级至 %s 并正常运行。", nonEmpty(p.From, "旧版本"), target),
+			fmt.Sprintf("DKStore 已自动更新至 %s", target),
+			fmt.Sprintf("DKStore 已从 %s 自动升级至 %s 并正常运行。", nonEmpty(p.From, "旧版本"), target),
 			fmt.Sprintf("DKStore Auto-Updated to %s", target),
 			fmt.Sprintf("DKStore has automatically updated from %s to %s and is running normally.", nonEmpty(p.From, "previous version"), target),
 		)
@@ -324,7 +324,7 @@ func (s *Service) flushPendingUpgradedNotice(ctx context.Context) {
 		}
 		if err != nil && !errors.Is(err, notify.ErrNoChannel) {
 			if s.log != nil {
-				s.log.Warn("发送商店自动升级完成通知失败", "version", target, "err", err)
+				s.log.Warn("发送自动升级完成通知失败", "version", target, "err", err)
 			}
 			if p.CreatedAt <= 0 {
 				p.CreatedAt = time.Now().Unix()
@@ -370,10 +370,10 @@ func (s *Service) runScheduledPolicyCheck(ctx context.Context) time.Duration {
 		}
 		err := s.ntf.SendMessage(
 			ctx,
-			fmt.Sprintf("DKStore 商店发现新版本 %s", st.LatestVersion),
-			fmt.Sprintf("当前商店版本 %s，可前往「设置」一键更新。", st.CurrentVersion),
+			fmt.Sprintf("DKStore 发现新版本 %s", st.LatestVersion),
+			fmt.Sprintf("当前版本 %s，可前往「设置」一键更新。", st.CurrentVersion),
 			fmt.Sprintf("DKStore Update Available: %s", st.LatestVersion),
-			fmt.Sprintf("Current store version is %s. Open Settings to update.", st.CurrentVersion),
+			fmt.Sprintf("Current version is %s. Open Settings to update.", st.CurrentVersion),
 		)
 		if errors.Is(err, notify.ErrNoChannel) {
 			return interval
@@ -383,7 +383,7 @@ func (s *Service) runScheduledPolicyCheck(ctx context.Context) time.Duration {
 		}
 		if err != nil {
 			if s.log != nil {
-				s.log.Warn("发送商店更新提醒失败", "version", st.LatestVersion, "err", err)
+				s.log.Warn("发送版本更新提醒失败", "version", st.LatestVersion, "err", err)
 			}
 			return interval
 		}

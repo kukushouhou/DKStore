@@ -48,7 +48,7 @@ var (
 
 var validRepoRe = regexp.MustCompile(`^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`)
 
-// Config 保存商店自更新的策略、源码仓库与下载源配置。
+// Config 保存 DKStore 版本自更新的策略、源码仓库与下载源配置。
 type Config struct {
 	Policy     string `json:"policy"`     // "auto" | "notify" | "manual"，默认 "auto"
 	Repo       string `json:"repo"`       // 形如 "kukushouhou/DKStore"
@@ -66,7 +66,7 @@ func DefaultRepoSlug() string {
 	return r
 }
 
-// DefaultConfig 返回默认配置（默认自动更新商店，直连 GitHub 官方仓库）。
+// DefaultConfig 返回默认配置（默认自动更新 DKStore，直连 GitHub 官方仓库）。
 func DefaultConfig() Config {
 	return Config{
 		Policy:     PolicyAuto,
