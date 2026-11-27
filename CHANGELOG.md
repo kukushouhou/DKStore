@@ -6,6 +6,14 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+### 问题修复
+- **历史记录日志显示与镜像详情文案修复**：修复历史记录展开面板中的日志直接显示终端控制符乱码并把拉取镜像的中间百分比刷屏粘连成大段文字的问题，现统一改用终端文本框清晰渲染彩色日志（支持一键复制纯文本），只保存各步骤最新状态并自动清理旧历史记录中的冗余进度内容；同时将折叠标题与字段名称改写为通俗易懂的「镜像详情与执行日志」「镜像地址」「原镜像哈希」「目标镜像哈希」「原镜像对应标签」（详情抽屉同步更新为「当前镜像哈希」「新版镜像哈希」「新版对应标签」） ([`3c9104f`](https://github.com/kukushouhou/DKStore/commit/3c9104f))
+
+---
+
+### Fixes
+- **History Log Display & Image Detail Labels Fix**: Fixed expanded history logs displaying raw terminal escape characters and concatenating intermediate pull percentages into an unreadable wall of text; inline logs now render cleanly in the terminal view with a quick copy button while storing only the latest state of each line and automatically cleaning redundant progress frames from existing history records, alongside clearer labels (`Image Details & Logs`, `Image`, `Previous Image Digest`, `Target Image Digest`, and `Previous Image Tags`) ([`3c9104f`](https://github.com/kukushouhou/DKStore/commit/3c9104f))
+
 ## [v0.8.4] - 2026-11-27
 
 ### 问题修复
