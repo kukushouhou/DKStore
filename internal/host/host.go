@@ -51,9 +51,20 @@ type Host struct {
 	Info                *platform.HostInfo `json:"info,omitempty"`
 	MirrorCount         int                `json:"mirrorCount"`
 	Status              string             `json:"status"` // online | offline | unknown
+	LastError           string             `json:"lastError,omitempty"`
 	LastSeenAt          int64              `json:"lastSeenAt,omitempty"`
 	Sort                int                `json:"sort"`
 	CreatedAt           int64              `json:"createdAt"`
+}
+
+// LocalizeHosts 按请求语言原地转换主机列表中的 LastError 说明。
+func LocalizeHosts(lang i18n.Lang, list []Host) []Host {
+	for i := range list {
+		if list[i].LastError != "" {
+			list[i].LastError = i18n.LocalizeDetail(lang, list[i].LastError)
+		}
+	}
+	return list
 }
 
 // CreateOrUpdateInput 是新建、编辑主机或测试连接时的输入。
@@ -526,6 +537,7 @@ func (r *Registry) saveHostRuntimeSnapshot(ctx context.Context, hostID string, w
 			updated_at=excluded.updated_at`,
 		hostID, string(b), now,
 	)
+	_, _ = r.st.DB.ExecContext(wCtx, `UPDATE host SET status='online', last_error='', last_seen_at=? WHERE id=?`, now, hostID)
 
 	// 同步回填运行容器的对外端口映射到 service 表，确保首页在首次检查前或热升级后也能即时获取端口入口
 	for _, app := range toSave {
@@ -763,8 +775,14 @@ func (r *Registry) ListRuntimeContainers(ctx context.Context, hostIDFilter strin
 			defer wg.Done()
 			hCtx, cancel := context.WithTimeout(ctx, perHostTimeout)
 			defer cancel()
-			if apps, err := r.querySingleHostRuntime(hCtx, item, wantStats); err == nil && len(apps) > 0 {
-				perHost[idx] = apps
+			if apps, err := r.querySingleHostRuntime(hCtx, item, wantStats); err == nil {
+				if len(apps) > 0 {
+					perHost[idx] = apps
+				}
+			} else if !errors.Is(ctx.Err(), context.Canceled) {
+				wCtx, wCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+				r.MarkOffline(wCtx, item.ID, err)
+				wCancel()
 			}
 		}(i, h)
 	}
@@ -1027,11 +1045,11 @@ func (r *Registry) querySingleHostMetrics(ctx context.Context, h Host) (*platfor
 
 	if infoChanged && r.st != nil && r.st.DB != nil {
 		wCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
-		_, _ = r.st.DB.ExecContext(wCtx, `UPDATE host SET info_json=?, status='online', last_seen_at=? WHERE id=?`, marshalInfo(st.Info), now, h.ID)
+		_, _ = r.st.DB.ExecContext(wCtx, `UPDATE host SET info_json=?, status='online', last_error='', last_seen_at=? WHERE id=?`, marshalInfo(st.Info), now, h.ID)
 		cancel()
-	} else if (h.Status != "online" || now-h.LastSeenAt >= 30) && r.st != nil && r.st.DB != nil {
+	} else if (h.Status != "online" || h.LastError != "" || now-h.LastSeenAt >= 30) && r.st != nil && r.st.DB != nil {
 		wCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
-		_, _ = r.st.DB.ExecContext(wCtx, `UPDATE host SET status='online', last_seen_at=? WHERE id=?`, now, h.ID)
+		_, _ = r.st.DB.ExecContext(wCtx, `UPDATE host SET status='online', last_error='', last_seen_at=? WHERE id=?`, now, h.ID)
 		cancel()
 	}
 	r.saveHostMetricsSnapshot(ctx, h.ID, st)
@@ -1145,9 +1163,9 @@ func (r *Registry) ListHostMetrics(ctx context.Context, hostIDFilter string) ([]
 			defer cancel()
 			st, qErr := r.querySingleHostMetrics(hCtx, item)
 			if qErr != nil {
-				if ctx.Err() == nil {
+				if !errors.Is(ctx.Err(), context.Canceled) {
 					wCtx, wCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
-					r.markOffline(wCtx, item.ID)
+					r.MarkOffline(wCtx, item.ID, qErr)
 					wCancel()
 				}
 				out[idx] = platform.HostRuntimeStat{
@@ -1167,7 +1185,7 @@ const hostColumns = `id, name, kind, transport, COALESCE(address,''), COALESCE(p
 	COALESCE(ssh_user,''), COALESCE(ssh_auth,''), COALESCE(ssh_host_key,''),
 	COALESCE(ssh_prev_host_key,''), COALESCE(ssh_host_key_changed_at,0),
 	COALESCE(transport_mode,''), COALESCE(dsm_url,''), COALESCE(dsm_user,''),
-	COALESCE(info_json,''), COALESCE(status,'unknown'), COALESCE(last_seen_at,0),
+	COALESCE(info_json,''), COALESCE(status,'unknown'), COALESCE(last_error,''), COALESCE(last_seen_at,0),
 	sort, created_at`
 
 type rowScanner interface {
@@ -1180,7 +1198,7 @@ func scanHost(s rowScanner) (Host, error) {
 	if err := s.Scan(
 		&h.ID, &h.Name, &h.Kind, &h.Transport, &h.Address, &h.Port,
 		&h.SSHUser, &h.SSHAuth, &h.SSHHostKey, &h.SSHPrevHostKey, &h.SSHHostKeyChangedAt,
-		&h.TransportMode, &h.DSMURL, &h.DSMUser, &infoStr, &h.Status, &h.LastSeenAt,
+		&h.TransportMode, &h.DSMURL, &h.DSMUser, &infoStr, &h.Status, &h.LastError, &h.LastSeenAt,
 		&h.Sort, &h.CreatedAt,
 	); err != nil {
 		return h, err
@@ -1237,6 +1255,11 @@ func (r *Registry) RefreshHostsInfo(ctx context.Context) ([]Host, error) {
 
 			ad, wasWarm, release, err := r.acquireRuntimeAdapter(hCtx, item.ID)
 			if err != nil {
+				if !errors.Is(ctx.Err(), context.Canceled) {
+					wCtx, wCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+					r.MarkOffline(wCtx, item.ID, err)
+					wCancel()
+				}
 				return
 			}
 			info, pErr := ad.Probe(hCtx)
@@ -1247,9 +1270,16 @@ func (r *Registry) RefreshHostsInfo(ctx context.Context) ([]Host, error) {
 					if err2 == nil {
 						info, pErr = ad2.Probe(hCtx)
 						release2(pErr != nil)
+					} else {
+						pErr = err2
 					}
 				}
 				if pErr != nil {
+					if !errors.Is(ctx.Err(), context.Canceled) {
+						wCtx, wCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+						r.MarkOffline(wCtx, item.ID, pErr)
+						wCancel()
+					}
 					return
 				}
 			} else {
@@ -1264,7 +1294,7 @@ func (r *Registry) RefreshHostsInfo(ctx context.Context) ([]Host, error) {
 			now := time.Now().Unix()
 			if r.st != nil && r.st.DB != nil {
 				wCtx, wCancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
-				_, _ = r.st.DB.ExecContext(wCtx, `UPDATE host SET info_json=?, status='online', last_seen_at=? WHERE id=?`, marshalInfo(info), now, item.ID)
+				_, _ = r.st.DB.ExecContext(wCtx, `UPDATE host SET info_json=?, status='online', last_error='', last_seen_at=? WHERE id=?`, marshalInfo(info), now, item.ID)
 				wCancel()
 			}
 			_, _ = r.GetHostMirrors(hCtx, item.ID)
@@ -1560,7 +1590,7 @@ func (r *Registry) Update(ctx context.Context, id string, in CreateOrUpdateInput
 			UPDATE host SET name=?, kind=?, transport=?, address=?, port=?, ssh_user=?, ssh_auth=?,
 			                ssh_secret_ref=?, ssh_host_key=?, ssh_prev_host_key=?, ssh_host_key_changed_at=?,
 			                transport_mode=?, dsm_url=?, dsm_user=?, dsm_secret_ref=?, dsm_device_token_ref=?,
-			                info_json=?, status='online', last_seen_at=?
+			                info_json=?, status='online', last_error='', last_seen_at=?
 			WHERE id=?`,
 			in.Name, in.Kind, in.Transport, in.Address, in.Port, in.SSHUser, in.SSHAuth,
 			sshRef, hostKey, nullIfEmpty(prevKey), nullIfZero(changedAt),
@@ -1903,8 +1933,11 @@ func (r *Registry) OpenAdapter(ctx context.Context, hostID string) (platform.Ada
 		// 主动登录一次：登录失败时立即标记离线
 		if err := ad.Login(ctx); err != nil {
 			_ = ad.Close()
-			r.markOffline(ctx, h.ID)
+			if !errors.Is(ctx.Err(), context.Canceled) {
+				r.MarkOffline(ctx, h.ID, err)
+			}
 			h.Status = "offline"
+			h.LastError = i18n.EncodeHostConnError(err)
 			return nil, h, err
 		}
 		return ad, h, nil
@@ -1945,8 +1978,11 @@ func (r *Registry) OpenAdapter(ctx context.Context, hostID string) (platform.Ada
 		sshTr, prevKey, err = dialSSHRefreshingHostKey(ctx, cfg, transport.DialSSH)
 	}
 	if err != nil {
-		r.markOffline(ctx, h.ID)
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			r.MarkOffline(ctx, h.ID, err)
+		}
 		h.Status = "offline"
+		h.LastError = i18n.EncodeHostConnError(err)
 		return nil, h, err
 	}
 	prevMode := h.TransportMode
@@ -2024,7 +2060,16 @@ func refineDetectedKind(in *CreateOrUpdateInput, info *platform.HostInfo) {
 	}
 }
 
-func (r *Registry) markOffline(ctx context.Context, id string) {
+// MarkOffline 将指定主机标记为离线并保存最近一次连接失败原因（支持中英双语展示）。
+func (r *Registry) MarkOffline(ctx context.Context, id string, err error) {
+	if r == nil || r.st == nil || r.st.DB == nil {
+		return
+	}
+	encoded := i18n.EncodeHostConnError(err)
+	if encoded != "" {
+		_, _ = r.st.DB.ExecContext(ctx, `UPDATE host SET status='offline', last_error=? WHERE id=?`, encoded, id)
+		return
+	}
 	_, _ = r.st.DB.ExecContext(ctx, `UPDATE host SET status='offline' WHERE id=?`, id)
 }
 

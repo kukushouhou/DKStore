@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  Alert,
   Badge,
   Button,
   Card,
@@ -16,7 +15,6 @@ import {
   Select,
   Space,
   Spin,
-  Tag,
   Tooltip,
   Typography,
   message,
@@ -27,6 +25,8 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router'
 import { api, showApiError, type AppCardItem, type FailedItem } from '../api/client'
 import AppCard from '../components/AppCard'
+import { formatHostEndpoint, formatShortNames } from '../components/noticeUtils'
+import StatusNoticeBar, { type StatusNoticeRow } from '../components/StatusNoticeBar'
 import UpdateQueuePanel from '../components/UpdateQueuePanel'
 import { useIsUltrawide, useOrderedQueueJobs } from '../hooks/useUpdateQueue'
 import { useI18n } from '../i18n'
@@ -62,6 +62,7 @@ export default function HomePage() {
   const [tagFilter, setTagFilter] = useState<string>('')
   const liveProgress = useUIStore((s) => s.liveProgress)
   const setLiveProgress = useUIStore((s) => s.setLiveProgress)
+  const setActiveMirrorHostId = useUIStore((s) => s.setActiveMirrorHostId)
   const queueCollapsed = useUIStore((s) => s.queueCollapsed)
   const isUltrawide = useIsUltrawide()
   const queueJobs = useOrderedQueueJobs()
@@ -82,9 +83,6 @@ export default function HomePage() {
   const [regCredTarget, setRegCredTarget] = useState('')
   const [regCredForm] = Form.useForm<{ registry: string; username: string; secret: string }>()
   const [regCredSubmitting, setRegCredSubmitting] = useState(false)
-
-  // 其他错误提示条展开状态
-  const [failedExpanded, setFailedExpanded] = useState(false)
 
   const regCredsQuery = useQuery({
     queryKey: ['regCreds'],
@@ -301,7 +299,7 @@ export default function HomePage() {
     t.home.discoveringHost,
   ])
 
-  const hosts = overview.data?.hosts ?? []
+  const hosts = useMemo(() => overview.data?.hosts ?? [], [overview.data?.hosts])
   const rawFailed = overview.data?.failed
 
   const rateLimitedItems = useMemo(
@@ -375,25 +373,198 @@ export default function HomePage() {
     }
   }
 
-  const formatFailedItemLine = (f: FailedItem) => {
-    const displayName = f.serviceName && f.serviceName !== 'main' ? f.serviceName : f.appName
-    const hostPart = t.home.failedHostWrap.replace('{host}', f.hostName)
-    if (f.errorKind === 'auth_required') {
-      return (
-        <span>
-          <Typography.Text strong>{displayName}</Typography.Text>
-          {hostPart}
-          {t.home.failedAuthReason}
-        </span>
-      )
+  const displayFailedServiceName = (f: FailedItem): string =>
+    f.serviceName && f.serviceName !== 'main' ? f.serviceName : f.appName
+
+  const offlineHosts = useMemo(
+    () =>
+      hosts.filter(
+        (h) => (!hostFilter || h.id === hostFilter) && h.status === 'offline',
+      ),
+    [hostFilter, hosts],
+  )
+
+  const networkFailedHostIds = useMemo(() => {
+    const seen = new Set<string>()
+    const list: string[] = []
+    for (const f of otherFailedItems) {
+      if (f.errorKind === 'network' && f.hostId && !seen.has(f.hostId)) {
+        seen.add(f.hostId)
+        list.push(f.hostId)
+      }
     }
-    return (
-      <span>
-        <Typography.Text strong>{displayName}</Typography.Text>
-        {hostPart}— {f.errorMsg}
-      </span>
+    return list
+  }, [otherFailedItems])
+
+  const offlineHostNotice = useMemo(() => {
+    if (offlineHosts.length === 0) return null
+    const title =
+      offlineHosts.length === 1
+        ? t.home.hostOfflineSingle
+        : t.home.hostOfflineMulti.replace('{count}', String(offlineHosts.length))
+    const names = formatShortNames(
+      offlineHosts.map((h) => h.name),
+      t.home.nameListSep,
+      t.home.nameListMore,
     )
-  }
+    const summary =
+      offlineHosts.length === 1
+        ? `${offlineHosts[0].name} (${formatHostEndpoint(offlineHosts[0], t.home.localHostEndpoint)}) · ${
+            offlineHosts[0].lastError || t.home.hostOfflineDefaultReason
+          }`
+        : `${names} · ${t.home.hostOfflineMultiSummary}`
+    const rows: StatusNoticeRow[] = offlineHosts.map((h) => ({
+      key: h.id,
+      name: h.name,
+      sub: formatHostEndpoint(h, t.home.localHostEndpoint),
+      reason: h.lastError || t.home.hostOfflineDefaultReason,
+      actionText: t.home.hostOfflineFixRow,
+      onAction: () => navigate('/hosts'),
+    }))
+    return { title, summary, rows }
+  }, [
+    navigate,
+    offlineHosts,
+    t.home.hostOfflineDefaultReason,
+    t.home.hostOfflineFixRow,
+    t.home.hostOfflineMulti,
+    t.home.hostOfflineMultiSummary,
+    t.home.hostOfflineSingle,
+    t.home.localHostEndpoint,
+    t.home.nameListMore,
+    t.home.nameListSep,
+  ])
+
+  const rateLimitedNotice = useMemo(() => {
+    if (rateLimitedItems.length === 0) return null
+    const names = formatShortNames(
+      rateLimitedItems.map(displayFailedServiceName),
+      t.home.nameListSep,
+      t.home.nameListMore,
+    )
+    const rows: StatusNoticeRow[] = rateLimitedItems.map((f) => ({
+      key: f.serviceKey,
+      name: displayFailedServiceName(f),
+      sub: f.hostName,
+      reason: t.home.rateLimitRowReason,
+    }))
+    return {
+      title: t.home.rateLimitShortTitle,
+      summary: t.home.rateLimitSummary.replace('{names}', names),
+      rows,
+    }
+  }, [
+    rateLimitedItems,
+    t.home.nameListMore,
+    t.home.nameListSep,
+    t.home.rateLimitRowReason,
+    t.home.rateLimitShortTitle,
+    t.home.rateLimitSummary,
+  ])
+
+  const otherFailedNotice = useMemo(() => {
+    if (otherFailedItems.length === 0) return null
+    const title =
+      otherFailedItems.length === 1
+        ? t.home.failedTitleSingle
+        : t.home.failedTitleMulti.replace('{count}', String(otherFailedItems.length))
+    const names = formatShortNames(
+      otherFailedItems.map(displayFailedServiceName),
+      t.home.nameListSep,
+      t.home.nameListMore,
+    )
+    const allAuth = otherFailedItems.every((f) => f.errorKind === 'auth_required')
+    const allNetwork = otherFailedItems.every((f) => f.errorKind === 'network')
+    const hasAuth = authRequiredRegistries.length > 0
+
+    let reasonPart: string
+    if (allAuth) {
+      reasonPart =
+        authRequiredRegistries.length === 1 && authRequiredRegistries[0]
+          ? `${t.home.failedAuthShort} (${authRequiredRegistries[0]})`
+          : t.home.failedAuthShort
+    } else if (allNetwork) {
+      reasonPart =
+        otherFailedItems.length === 1 && otherFailedItems[0].errorMsg
+          ? otherFailedItems[0].errorMsg
+          : t.home.failedNetworkShort
+    } else if (otherFailedItems.length === 1) {
+      reasonPart = otherFailedItems[0].errorMsg || t.home.checkFailedStatus
+    } else {
+      reasonPart = t.home.failedMixedShort
+    }
+
+    const rows: StatusNoticeRow[] = otherFailedItems.map((f) => {
+      const reg = extractRegistryDomain(f)
+      if (f.errorKind === 'auth_required') {
+        const needRowCredLink = !allAuth || authRequiredRegistries.length > 1
+        return {
+          key: f.serviceKey,
+          name: displayFailedServiceName(f),
+          sub: f.hostName,
+          reason: reg ? `${t.home.failedAuthShort} (${reg})` : t.home.failedAuthShort,
+          actionText: needRowCredLink ? t.home.errLinkCred : undefined,
+          onAction: needRowCredLink ? () => openRegCredModal(reg) : undefined,
+        }
+      }
+      if (f.errorKind === 'network' && f.hostId) {
+        const needRowMirrorLink = hasAuth || networkFailedHostIds.length > 1 || !allNetwork
+        return {
+          key: f.serviceKey,
+          name: displayFailedServiceName(f),
+          sub: f.hostName,
+          reason: f.errorMsg || t.home.failedNetworkShort,
+          actionText: needRowMirrorLink ? t.home.errLinkMirror : undefined,
+          onAction: needRowMirrorLink ? () => setActiveMirrorHostId(f.hostId!) : undefined,
+        }
+      }
+      return {
+        key: f.serviceKey,
+        name: displayFailedServiceName(f),
+        sub: f.hostName,
+        reason: f.errorMsg || t.home.checkFailedStatus,
+      }
+    })
+
+    let actionText: string | undefined
+    let primaryAction = false
+    let onAction: (() => void) | undefined
+    if (hasAuth) {
+      actionText = t.home.failedGoCreds
+      primaryAction = true
+      onAction = () => openRegCredModal()
+    } else if (networkFailedHostIds.length > 0) {
+      actionText = t.home.errLinkMirror
+      primaryAction = false
+      onAction = () => setActiveMirrorHostId(networkFailedHostIds[0])
+    }
+
+    return {
+      title,
+      summary: `${names} · ${reasonPart}`,
+      rows,
+      actionText,
+      primaryAction,
+      onAction,
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    authRequiredRegistries,
+    networkFailedHostIds,
+    otherFailedItems,
+    setActiveMirrorHostId,
+    t.home.checkFailedStatus,
+    t.home.errLinkCred,
+    t.home.errLinkMirror,
+    t.home.failedAuthShort,
+    t.home.failedGoCreds,
+    t.home.failedMixedShort,
+    t.home.failedNetworkShort,
+    t.home.failedTitleMulti,
+    t.home.failedTitleSingle,
+    t.home.nameListMore,
+    t.home.nameListSep,
+  ])
 
   const renderGrid = (items: AppCardItem[], emptyText: string) => {
     if (items.length === 0) {
@@ -616,72 +787,50 @@ export default function HomePage() {
         </Space>
       )}
 
-      {/* 情况 A：Docker Hub 100 次/6小时未登录限流专用提醒条 */}
-      {rateLimitedItems.length > 0 && (
-        <Alert
-          type="warning"
-          showIcon
-          title={
-            <Space size={8} wrap>
-              <Tag color="warning" style={{ margin: 0 }}>
-                {t.home.rateLimitBadge}
-              </Tag>
-              <Typography.Text strong>{t.home.rateLimitTitle}</Typography.Text>
-            </Space>
-          }
-          description={t.home.rateLimitDesc}
-          action={
-            <Button type="primary" size="small" onClick={() => setHubModalOpen(true)}>
-              {t.home.rateLimitBtn}
-            </Button>
-          }
-        />
-      )}
+      {/* 统一极简白底通知条：设备连接失败 / Docker Hub 匿名限流 / 服务无法检查 */}
+      {(offlineHostNotice || rateLimitedNotice || otherFailedNotice) && (
+        <Flex vertical gap={8} style={{ width: '100%' }}>
+          {offlineHostNotice && (
+            <StatusNoticeBar
+              level="error"
+              title={offlineHostNotice.title}
+              summary={offlineHostNotice.summary}
+              expandText={t.home.noticeExpand}
+              collapseText={t.home.noticeCollapse}
+              actionText={t.home.hostOfflineGoHosts}
+              onAction={() => navigate('/hosts')}
+              rows={offlineHostNotice.rows}
+            />
+          )}
 
-      {/* 情况 B：私有仓库未授权或其他异常提示条 */}
-      {otherFailedItems.length > 0 && (
-        <Alert
-          type="warning"
-          showIcon
-          title={
-            <Space size={8} wrap>
-              <Typography.Text strong>
-                {otherFailedItems.length === 1
-                  ? t.home.failedBannerSingle
-                  : t.home.failedBannerMulti.replace('{count}', String(otherFailedItems.length))}
-              </Typography.Text>
-              <Typography.Text>{formatFailedItemLine(otherFailedItems[0])}</Typography.Text>
-              {otherFailedItems.length > 1 && (
-                <Button
-                  type="link"
-                  size="small"
-                  style={{ padding: 0, height: 'auto' }}
-                  onClick={() => setFailedExpanded((v) => !v)}
-                >
-                  {failedExpanded ? t.home.failedCollapse : t.home.failedExpandAll}
-                </Button>
-              )}
-            </Space>
-          }
-          description={
-            failedExpanded && otherFailedItems.length > 1 ? (
-              <Space direction="vertical" size={2} style={{ marginTop: 4 }}>
-                {otherFailedItems.slice(1).map((f) => (
-                  <Typography.Text key={f.serviceKey} style={{ fontSize: token.fontSizeSM }}>
-                    • {formatFailedItemLine(f)}
-                  </Typography.Text>
-                ))}
-              </Space>
-            ) : undefined
-          }
-          action={
-            authRequiredRegistries.length > 0 ? (
-              <Button type="link" size="small" onClick={() => openRegCredModal()}>
-                {t.home.failedGoCreds}
-              </Button>
-            ) : undefined
-          }
-        />
+          {rateLimitedNotice && (
+            <StatusNoticeBar
+              level="warning"
+              title={rateLimitedNotice.title}
+              summary={rateLimitedNotice.summary}
+              expandText={t.home.noticeExpand}
+              collapseText={t.home.noticeCollapse}
+              actionText={t.home.rateLimitBtn}
+              primaryAction
+              onAction={() => setHubModalOpen(true)}
+              rows={rateLimitedNotice.rows}
+            />
+          )}
+
+          {otherFailedNotice && (
+            <StatusNoticeBar
+              level="warning"
+              title={otherFailedNotice.title}
+              summary={otherFailedNotice.summary}
+              expandText={t.home.noticeExpand}
+              collapseText={t.home.noticeCollapse}
+              actionText={otherFailedNotice.actionText}
+              primaryAction={otherFailedNotice.primaryAction}
+              onAction={otherFailedNotice.onAction}
+              rows={otherFailedNotice.rows}
+            />
+          )}
+        </Flex>
       )}
 
       {/* 首次尚无应用数据且正在扫描时，不渲染虚假 0 空结论 */}

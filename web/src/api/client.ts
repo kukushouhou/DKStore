@@ -240,6 +240,7 @@ export interface HostItem {
   info?: HostInfo
   mirrorCount?: number
   status: 'online' | 'offline' | 'unknown'
+  lastError?: string
   lastSeenAt?: number
 }
 
@@ -410,6 +411,7 @@ export interface FailedItem {
   appKey: string
   appName: string
   serviceName: string
+  hostId?: string
   hostName: string
   imageRef: string
   registry?: string
@@ -983,9 +985,12 @@ export const api = {
       params.set('stats', '0')
     }
     const qs = params.toString()
-    return request<{ items: AppRuntimeTree[]; allTags?: string[]; cached?: boolean }>(
-      qs ? `/containers?${qs}` : '/containers',
-    )
+    return request<{
+      items: AppRuntimeTree[]
+      allTags?: string[]
+      hosts?: HostItem[]
+      cached?: boolean
+    }>(qs ? `/containers?${qs}` : '/containers')
   },
 
   saveMeta: (items: SaveMetaItem[]) =>

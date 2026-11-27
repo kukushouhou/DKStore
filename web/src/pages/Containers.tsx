@@ -46,6 +46,8 @@ import {
 import AppIconAvatar from '../components/AppIconAvatar'
 import ContainerMetaModal from '../components/ContainerMetaModal'
 import DeleteAppModal from '../components/DeleteAppModal'
+import { formatHostEndpoint, formatShortNames } from '../components/noticeUtils'
+import StatusNoticeBar, { type StatusNoticeRow } from '../components/StatusNoticeBar'
 import {
   buildMetaContextFromTree,
   pickUserTagColor,
@@ -158,7 +160,73 @@ export default function ContainersPage() {
     refetchInterval: 10000,
   })
 
-  const hosts = useMemo(() => hostsQuery.data?.items ?? [], [hostsQuery.data?.items])
+  const hosts = useMemo(() => {
+    const base = hostsQuery.data?.items ?? []
+    const liveCandidates = [
+      { list: statsQuery.data?.hosts, at: statsQuery.dataUpdatedAt },
+      { list: fastQuery.data?.hosts, at: fastQuery.dataUpdatedAt },
+      { list: cachedQuery.data?.hosts, at: cachedQuery.dataUpdatedAt },
+    ]
+      .filter((c) => c.list && c.list.length > 0)
+      .sort((a, b) => b.at - a.at)
+    const freshestLive = liveCandidates[0]
+    if (freshestLive && freshestLive.at >= (hostsQuery.dataUpdatedAt || 0)) {
+      return freshestLive.list!
+    }
+    return base.length > 0 ? base : (freshestLive?.list ?? [])
+  }, [
+    cachedQuery.data?.hosts,
+    cachedQuery.dataUpdatedAt,
+    fastQuery.data?.hosts,
+    fastQuery.dataUpdatedAt,
+    hostsQuery.data?.items,
+    hostsQuery.dataUpdatedAt,
+    statsQuery.data?.hosts,
+    statsQuery.dataUpdatedAt,
+  ])
+
+  const offlineHostNotice = useMemo(() => {
+    const offline = hosts.filter(
+      (h) => (!hostFilter || h.id === hostFilter) && h.status === 'offline',
+    )
+    if (offline.length === 0) return null
+    const title =
+      offline.length === 1
+        ? t.home.hostOfflineSingle
+        : t.home.hostOfflineMulti.replace('{count}', String(offline.length))
+    const names = formatShortNames(
+      offline.map((h) => h.name),
+      t.home.nameListSep,
+      t.home.nameListMore,
+    )
+    const summary =
+      offline.length === 1
+        ? `${offline[0].name} (${formatHostEndpoint(offline[0], t.home.localHostEndpoint)}) · ${
+            offline[0].lastError || t.home.hostOfflineDefaultReason
+          }`
+        : `${names} · ${t.home.hostOfflineMultiSummary}`
+    const rows: StatusNoticeRow[] = offline.map((h) => ({
+      key: h.id,
+      name: h.name,
+      sub: formatHostEndpoint(h, t.home.localHostEndpoint),
+      reason: h.lastError || t.home.hostOfflineDefaultReason,
+      actionText: t.home.hostOfflineFixRow,
+      onAction: () => navigate('/hosts'),
+    }))
+    return { title, summary, rows }
+  }, [
+    hostFilter,
+    hosts,
+    navigate,
+    t.home.hostOfflineDefaultReason,
+    t.home.hostOfflineFixRow,
+    t.home.hostOfflineMulti,
+    t.home.hostOfflineMultiSummary,
+    t.home.hostOfflineSingle,
+    t.home.localHostEndpoint,
+    t.home.nameListMore,
+    t.home.nameListSep,
+  ])
 
   const { rawTrees, isShowingCached } = useMemo(() => {
     const statsItems = statsQuery.data?.items
@@ -864,6 +932,19 @@ export default function ContainersPage() {
           style={{ width: 280, maxWidth: '100%' }}
         />
       </Flex>
+
+      {offlineHostNotice && (
+        <StatusNoticeBar
+          level="error"
+          title={offlineHostNotice.title}
+          summary={offlineHostNotice.summary}
+          expandText={t.home.noticeExpand}
+          collapseText={t.home.noticeCollapse}
+          actionText={t.home.hostOfflineGoHosts}
+          onAction={() => navigate('/hosts')}
+          rows={offlineHostNotice.rows}
+        />
+      )}
 
       {isInitialLoading ? (
         <Flex justify="center" style={{ padding: 48 }}>

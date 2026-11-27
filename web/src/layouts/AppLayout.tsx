@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  Alert,
   Badge,
   Button,
   Flex,
@@ -34,6 +33,7 @@ import { ApiError, api, onUnauthorized, type AuthStatus } from '../api/client'
 import AuthToolbar from '../components/AuthToolbar'
 import DKStoreLogo from '../components/DKStoreLogo'
 import HostMirrorModal from '../components/HostMirrorModal'
+import StatusNoticeBar from '../components/StatusNoticeBar'
 import UpdateLogModal from '../components/UpdateLogModal'
 import UpdateQueuePanel from '../components/UpdateQueuePanel'
 import { useEffectiveDark } from '../hooks/useEffectiveDark'
@@ -635,25 +635,15 @@ export default function AppLayout() {
         }}
       >
         {showLocalRemind && (
-          <Alert
-            type="info"
-            showIcon
-            closable={{
-              onClose: () => {
-                localStorage.setItem('dkstore_dismiss_local_remind', '1')
-                setDismissedRemind(true)
-              },
-            }}
+          <StatusNoticeBar
+            level="info"
             title={t.auth.localRemindText}
-            action={
-              <Button
-                size="small"
-                type="link"
-                onClick={() => navigate('/hosts?connectLocal=1')}
-              >
-                {t.auth.localRemindConnectBtn}
-              </Button>
-            }
+            actionText={t.auth.localRemindConnectBtn}
+            onAction={() => navigate('/hosts?connectLocal=1')}
+            onClose={() => {
+              localStorage.setItem('dkstore_dismiss_local_remind', '1')
+              setDismissedRemind(true)
+            }}
             style={{ marginBottom: 16 }}
           />
         )}

@@ -3,6 +3,7 @@ package i18n
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // 本文件提供主机管理（internal/host）与群晖适配器（internal/platform/synology）的中英双语文案。
@@ -101,4 +102,78 @@ func (e *HostError) Localize(lang Lang) string {
 		msg += sep + LocalizeErr(lang, e.Err)
 	}
 	return msg
+}
+
+// FormatHostConnError 将设备连接或探测失败错误转为面向用户的简洁单语说明。
+func FormatHostConnError(lang Lang, err error) string {
+	if err == nil {
+		return ""
+	}
+	var ee *EngineError
+	if errors.As(err, &ee) {
+		raw := ee.Localize(lang)
+		return simplifyHostErrText(lang, raw)
+	}
+	var he *HostError
+	if errors.As(err, &he) {
+		return simplifyHostErrText(lang, he.Localize(lang))
+	}
+	return simplifyHostErrText(lang, LocalizeDetail(lang, err.Error()))
+}
+
+func simplifyHostErrText(lang Lang, s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	lower := strings.ToLower(s)
+	pick := func(zh, en string) string {
+		if lang == EnUS {
+			return en
+		}
+		return zh
+	}
+	switch {
+	case strings.Contains(lower, "unable to authenticate") ||
+		strings.Contains(lower, "no supported methods remain") ||
+		strings.Contains(lower, "publickey,password"):
+		return pick("SSH 认证失败，请检查用户名、密码或密钥", "SSH authentication failed; check username, password, or key")
+	case strings.Contains(lower, "passphrase") ||
+		strings.Contains(lower, "encrypted private key") ||
+		strings.Contains(lower, "parse private key"):
+		return pick("SSH 私钥解析失败，请检查私钥或口令", "Failed to parse SSH private key; check key or passphrase")
+	case strings.Contains(lower, "i/o timeout") ||
+		strings.Contains(lower, "context deadline exceeded") ||
+		strings.Contains(lower, "timed out"):
+		return pick("连接超时，请检查设备在线状态或端口", "Connection timed out; check device status and port")
+	case strings.Contains(lower, "connection refused") ||
+		strings.Contains(lower, "connectex:") ||
+		strings.Contains(lower, "no route to host") ||
+		strings.Contains(lower, "network is unreachable"):
+		return pick("无法连接设备地址或端口，请检查网络与 SSH/管理端口", "Cannot reach device address or port; check network and service port")
+	case strings.Contains(lower, "no such host") ||
+		strings.Contains(lower, "name resolution"):
+		return pick("设备地址域名解析失败，请检查地址或 DNS", "DNS lookup failed for device address")
+	case strings.Contains(lower, "permission denied") && strings.Contains(lower, "docker"):
+		return pick("当前账号无权限访问设备上的 Docker 服务", "Permission denied accessing Docker Engine on device")
+	case strings.Contains(lower, "docker.sock") ||
+		strings.Contains(lower, "cannot connect to the docker daemon") ||
+		strings.Contains(lower, "is the docker daemon running"):
+		return pick("无法访问设备上的 Docker 服务，请确认 Docker 正在运行", "Cannot access Docker Engine on device; verify Docker is running")
+	default:
+		return s
+	}
+}
+
+// EncodeHostConnError 将设备连接失败原因编码为支持中英双语切换的持久化字符串。
+func EncodeHostConnError(err error) string {
+	if err == nil {
+		return ""
+	}
+	zh := FormatHostConnError(ZhCN, err)
+	en := FormatHostConnError(EnUS, err)
+	if zh == "" && en == "" {
+		return ""
+	}
+	return Bilingual(zh, en)
 }

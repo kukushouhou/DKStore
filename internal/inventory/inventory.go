@@ -4,6 +4,7 @@ package inventory
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
 
@@ -26,18 +27,30 @@ func New(st *store.Store, hosts *host.Registry) *Service {
 
 // SyncHost 连接单台主机，执行发现并将结果 upsert 到 app / service 表。
 func (s *Service) SyncHost(ctx context.Context, hostID string) ([]platform.App, *platform.HostInfo, error) {
+	markFail := func(err error) {
+		if err == nil || errors.Is(ctx.Err(), context.Canceled) {
+			return
+		}
+		wCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		s.hosts.MarkOffline(wCtx, hostID, err)
+		cancel()
+	}
+
 	ad, _, err := s.hosts.OpenAdapter(ctx, hostID)
 	if err != nil {
+		markFail(err)
 		return nil, nil, err
 	}
 	defer ad.Close()
 
 	info, err := ad.Probe(ctx)
 	if err != nil {
+		markFail(err)
 		return nil, nil, err
 	}
 	apps, err := ad.ListApps(ctx)
 	if err != nil {
+		markFail(err)
 		return nil, info, err
 	}
 	if err := s.saveHostInventory(ctx, hostID, info, apps); err != nil {
@@ -58,7 +71,7 @@ func (s *Service) saveHostInventory(ctx context.Context, hostID string, info *pl
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, `UPDATE host SET status='online', info_json=?, last_seen_at=? WHERE id=?`,
+	if _, err := tx.ExecContext(ctx, `UPDATE host SET status='online', last_error='', info_json=?, last_seen_at=? WHERE id=?`,
 		string(infoBytes), now, hostID); err != nil {
 		return err
 	}

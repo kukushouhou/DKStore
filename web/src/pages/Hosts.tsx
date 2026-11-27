@@ -52,6 +52,7 @@ import {
   type HostRuntimeStat,
   type HostTestResult,
 } from '../api/client'
+import StatusNoticeBar from '../components/StatusNoticeBar'
 import { useI18n } from '../i18n'
 import { useUIStore } from '../store/ui'
 
@@ -1224,6 +1225,14 @@ export default function HostsPage() {
                         )}
                       </div>
                     </div>
+
+                    {effectiveStatus === 'offline' && h.lastError && (
+                      <StatusNoticeBar
+                        level="error"
+                        title={h.lastError}
+                        style={{ padding: '8px 12px', background: token.colorFillAlter }}
+                      />
+                    )}
 
                     {h.transport === 'ssh' && Boolean(h.sshHostKeyChangedAt) && (
                       <Alert

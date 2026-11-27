@@ -326,3 +326,40 @@ func TestListCachedRuntimeContainers_InventoryFallbackAndSnapshotPersistence(t *
 		t.Fatalf("expected aged snapshot to mark StatsReady=false and clear stale literal Uptime, got %+v err=%v", agedSnap, err)
 	}
 }
+
+func TestMarkOfflinePersistsBilingualReasonAndClearsOnRecovery(t *testing.T) {
+	ctx := context.Background()
+	r := newTestRegistry(t)
+	defer r.Close()
+
+	now := time.Now().Unix()
+	_, err := r.st.DB.ExecContext(ctx, `INSERT INTO host(id, name, kind, transport, address, port, ssh_user, status, created_at) VALUES ('h-off', '软路由模拟器', 'docker', 'ssh', '192.0.2.88', 22, 'root', 'online', ?)`, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	r.MarkOffline(ctx, "h-off", errors.New("dial tcp 192.0.2.88:22: i/o timeout"))
+
+	zhHosts, err := r.List(ctx)
+	if err != nil || len(zhHosts) != 1 {
+		t.Fatalf("list failed: %v", err)
+	}
+	LocalizeHosts(i18n.ZhCN, zhHosts)
+	if zhHosts[0].Status != "offline" || zhHosts[0].LastError != "连接超时，请检查设备在线状态或端口" {
+		t.Fatalf("unexpected zh offline host: %+v", zhHosts[0])
+	}
+
+	enHosts, _ := r.List(ctx)
+	LocalizeHosts(i18n.EnUS, enHosts)
+	if enHosts[0].LastError != "Connection timed out; check device status and port" {
+		t.Fatalf("unexpected en offline host: %+v", enHosts[0])
+	}
+
+	// Recovery clears offline status and last_error
+	r.saveHostRuntimeSnapshot(ctx, "h-off", false, nil)
+	recHosts, _ := r.List(ctx)
+	LocalizeHosts(i18n.ZhCN, recHosts)
+	if recHosts[0].Status != "online" || recHosts[0].LastError != "" {
+		t.Fatalf("expected online with empty LastError after recovery, got %+v", recHosts[0])
+	}
+}

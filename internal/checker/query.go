@@ -220,6 +220,7 @@ type FailedItem struct {
 	AppKey      string `json:"appKey"`
 	AppName     string `json:"appName"`
 	ServiceName string `json:"serviceName"`
+	HostID      string `json:"hostId,omitempty"`
 	HostName    string `json:"hostName"`
 	ImageRef    string `json:"imageRef"`
 	Registry    string `json:"registry,omitempty"`
@@ -674,6 +675,7 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 				AppKey:      appKey,
 				AppName:     appName,
 				ServiceName: svcName,
+				HostID:      h.ID,
 				HostName:    h.Name,
 				ImageRef:    imageRef,
 				Registry:    failedReg,
@@ -695,7 +697,7 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 	}
 
 	resp := &OverviewResponse{
-		Hosts:         hosts,
+		Hosts:         host.LocalizeHosts(lang, hosts),
 		Normal:        []AppCard{},
 		Caution:       []AppCard{},
 		NoUpdate:      []AppCard{},

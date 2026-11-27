@@ -344,6 +344,7 @@ func (s *Server) handleGetApp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListContainers(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
 	hostID := strings.TrimSpace(r.URL.Query().Get("hostId"))
 	var allTags []string
 	if s.d.Store != nil {
@@ -353,20 +354,31 @@ func (s *Server) handleListContainers(w http.ResponseWriter, r *http.Request) {
 	if cachedParam == "1" || cachedParam == "true" {
 		items, err := s.d.Hosts.ListCachedRuntimeContainers(r.Context(), hostID)
 		if err != nil {
-			writeError(w, s.langOf(r), http.StatusInternalServerError, "db_error", err.Error())
+			writeError(w, lang, http.StatusInternalServerError, "db_error", err.Error())
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"items": items, "allTags": allTags, "cached": true})
+		hosts, _ := s.d.Hosts.List(r.Context())
+		writeJSON(w, http.StatusOK, map[string]any{
+			"items":   items,
+			"allTags": allTags,
+			"hosts":   host.LocalizeHosts(lang, hosts),
+			"cached":  true,
+		})
 		return
 	}
 	statsParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("stats")))
 	withStats := statsParam != "0" && statsParam != "false"
 	items, err := s.d.Hosts.ListRuntimeContainers(r.Context(), hostID, withStats)
 	if err != nil {
-		writeError(w, s.langOf(r), http.StatusInternalServerError, "db_error", err.Error())
+		writeError(w, lang, http.StatusInternalServerError, "db_error", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "allTags": allTags})
+	hosts, _ := s.d.Hosts.List(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":   items,
+		"allTags": allTags,
+		"hosts":   host.LocalizeHosts(lang, hosts),
+	})
 }
 
 func (s *Server) handleSaveMeta(w http.ResponseWriter, r *http.Request) {
@@ -505,6 +517,7 @@ func (s *Server) handleDeleteIgnore(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
+	lang := s.langOf(r)
 	refreshParam := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("refresh")))
 	var (
 		list []host.Host
@@ -516,9 +529,10 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 		list, err = s.d.Hosts.List(r.Context())
 	}
 	if err != nil {
-		writeError(w, s.langOf(r), http.StatusInternalServerError, "db_error", err.Error())
+		writeError(w, lang, http.StatusInternalServerError, "db_error", err.Error())
 		return
 	}
+	host.LocalizeHosts(lang, list)
 	hasLocalHost, canAddLocal, localStatus := s.d.Hosts.LocalStatus(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items":        list,
