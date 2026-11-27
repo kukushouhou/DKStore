@@ -716,3 +716,95 @@ func TestListAndGetJobs_OnlyLatestFailedPerServiceIsRetryable(t *testing.T) {
 		t.Fatalf("expected j_new_fail Retryable=false after later success, got %+v err=%v", gotNewAfterOK, err)
 	}
 }
+
+func TestTerminalLogCompactionAndLegacyCleanup(t *testing.T) {
+	ctx := context.Background()
+	up, _ := newTestUpdater(t, nil)
+
+	job := Job{
+		ID:             "up_compact_live",
+		Kind:           "upgrade",
+		HostID:         "h1",
+		HostName:       "NAS",
+		AppKey:         "h1:compose:ha",
+		AppName:        "home-assistant",
+		ServiceKey:     "h1:compose:ha:main",
+		ServiceName:    "home-assistant",
+		Source:         string(platform.SourceCompose),
+		Status:         "running",
+		Phase:          "pulling",
+		OldImageRef:    "homeassistant/home-assistant:latest",
+		TargetImageRef: "homeassistant/home-assistant:latest",
+		StartedAt:      1000,
+	}
+	initHdr := formatJobHeader(job)
+	job.Logs = initHdr
+	job.LogOffset = len(initHdr)
+	if err := up.insertJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+
+	tracker := newJobProgressTracker(up, &job)
+	tracker.handleProgress(ctx, &job, platform.PullProgress{
+		Phase:    "pulling",
+		Percent:  10,
+		LogChunk: "\r\x1b[2K\x1b[36m29b457564b10\x1b[0m: Downloading 15.97 MB / 83.50 MB (19%)",
+	})
+	off1 := job.LogOffset
+	if !strings.Contains(job.Logs, "(19%)") {
+		t.Fatalf("expected active uncommitted line (19%%) in Logs, got %q", job.Logs)
+	}
+
+	tracker.handleProgress(ctx, &job, platform.PullProgress{
+		Phase:    "pulling",
+		Percent:  50,
+		LogChunk: "\r\x1b[2K\x1b[36m29b457564b10\x1b[0m: Downloading 45.88 MB / 83.50 MB (54%)",
+	})
+	off2 := job.LogOffset
+	if off2 <= off1 {
+		t.Fatalf("expected stream LogOffset to keep increasing (%d -> %d)", off1, off2)
+	}
+	if strings.Contains(job.Logs, "(19%)") || !strings.Contains(job.Logs, "(54%)") {
+		t.Fatalf("expected (19%%) overwritten in-place by (54%%), got %q", job.Logs)
+	}
+
+	tracker.handleProgress(ctx, &job, platform.PullProgress{
+		Phase:    "pulling",
+		Percent:  85,
+		LogChunk: "\r\x1b[2K\x1b[32m✔\x1b[0m \x1b[36m29b457564b10\x1b[0m: Pull complete\r\n",
+	})
+	tracker.succeed(&job, nil)
+
+	if strings.Contains(job.Logs, "Downloading") || strings.Contains(job.Logs, "\x1b[2K") {
+		t.Fatalf("expected all intermediate Downloading frames and \\x1b[2K stripped, got %q", job.Logs)
+	}
+	if !strings.Contains(job.Logs, "Pull complete") || !strings.Contains(job.Logs, "Update completed successfully") {
+		t.Fatalf("expected final milestone lines preserved, got %q", job.Logs)
+	}
+
+	// 验证历史遗留脏日志（含裸 \x1b[2K 或 \r\x1b[2K 过程帧）在启动时自动归并清理
+	legacyRaw := "header\r\n\x1b[2K762464acc1fd: Downloading 16%\x1b[2K762464acc1fd: Downloading 99%\x1b[2K\x1b[36m762464acc1fd\x1b[0m: Verifying Checksum\r\n\x1b[36m762464acc1fd\x1b[0m: Download complete\r\n"
+	_, err := up.st.DB.ExecContext(ctx, `
+		INSERT INTO update_job(
+			id, kind, host_id, host_name, app_key, app_name, service_key, service_name, source,
+			status, phase, old_image_ref, target_image_ref, logs_text, started_at, finished_at
+		) VALUES ('up_legacy_dirty', 'upgrade', 'h1', 'NAS', 'a', 'ha', 's', 'ha', 'compose', 'succeeded', 'done', 'img:1', 'img:2', ?, 100, 120)`,
+		legacyRaw,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	up.compactLegacyJobLogs()
+
+	cleanedJob, err := up.GetJob(ctx, "up_legacy_dirty", i18n.ZhCN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(cleanedJob.Logs, "Downloading") || strings.Contains(cleanedJob.Logs, "\x1b[2K") {
+		t.Fatalf("expected legacy dirty logs compacted, got %q", cleanedJob.Logs)
+	}
+	if !strings.Contains(cleanedJob.Logs, "Verifying Checksum") || !strings.Contains(cleanedJob.Logs, "Download complete") {
+		t.Fatalf("expected final status lines retained in compacted legacy logs, got %q", cleanedJob.Logs)
+	}
+}

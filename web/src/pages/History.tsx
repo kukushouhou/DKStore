@@ -30,6 +30,7 @@ import {
 } from '@ant-design/icons'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, showApiError, type UpdateJobItem } from '../api/client'
+import TerminalLogBox from '../components/TerminalLogBox'
 import { useI18n } from '../i18n'
 import { useUIStore } from '../store/ui'
 
@@ -467,6 +468,7 @@ export default function HistoryPage() {
                   <Collapse
                     ghost
                     size="small"
+                    destroyOnHidden
                     styles={{
                       header: { paddingInline: 0 },
                       body: { paddingInline: 0, paddingBottom: 0 },
@@ -478,13 +480,21 @@ export default function HistoryPage() {
                         children: (
                           <Space direction="vertical" size="small" style={{ width: '100%' }}>
                             <Descriptions column={1} size="small">
-                              <Descriptions.Item label={t.detail.imageRef}>
-                                <Typography.Text code>{job.oldImageRef}</Typography.Text>{' '}
-                                <ArrowRightOutlined style={{ fontSize: token.fontSizeSM }} />{' '}
-                                <Typography.Text code>{job.targetImageRef}</Typography.Text>
+                              <Descriptions.Item label={t.history.imageAddrLabel}>
+                                {!job.targetImageRef || job.oldImageRef === job.targetImageRef ? (
+                                  <Typography.Text code>
+                                    {job.oldImageRef || job.targetImageRef}
+                                  </Typography.Text>
+                                ) : (
+                                  <>
+                                    <Typography.Text code>{job.oldImageRef}</Typography.Text>{' '}
+                                    <ArrowRightOutlined style={{ fontSize: token.fontSizeSM }} />{' '}
+                                    <Typography.Text code>{job.targetImageRef}</Typography.Text>
+                                  </>
+                                )}
                               </Descriptions.Item>
                               {job.oldRepoDigest && (
-                                <Descriptions.Item label={t.detail.localDigest}>
+                                <Descriptions.Item label={t.history.oldDigestLabel}>
                                   <Typography.Text
                                     code
                                     style={{ fontSize: token.fontSizeSM, wordBreak: 'break-all' }}
@@ -494,7 +504,7 @@ export default function HistoryPage() {
                                 </Descriptions.Item>
                               )}
                               {job.targetRepoDigest && (
-                                <Descriptions.Item label={t.detail.targetDigest}>
+                                <Descriptions.Item label={t.history.targetDigestLabel}>
                                   <Typography.Text
                                     code
                                     style={{ fontSize: token.fontSizeSM, wordBreak: 'break-all' }}
@@ -504,27 +514,31 @@ export default function HistoryPage() {
                                 </Descriptions.Item>
                               )}
                               {(job.oldMatchedTags?.length ?? 0) > 0 && (
-                                <Descriptions.Item label={t.detail.matchedTags}>
-                                  {job.oldMatchedTags?.join(', ')}
+                                <Descriptions.Item label={t.history.oldTagsLabel}>
+                                  <Space size={[4, 4]} wrap>
+                                    {job.oldMatchedTags?.map((tg) => (
+                                      <Tag
+                                        key={tg}
+                                        style={{ margin: 0, fontFamily: token.fontFamilyCode }}
+                                      >
+                                        {tg}
+                                      </Tag>
+                                    ))}
+                                  </Space>
                                 </Descriptions.Item>
                               )}
                             </Descriptions>
-                            {job.logs && (
-                              <pre
-                                style={{
-                                  margin: 0,
-                                  padding: 10,
-                                  fontFamily: token.fontFamilyCode,
-                                  fontSize: token.fontSizeSM,
-                                  background: token.colorFillAlter,
-                                  border: `1px solid ${token.colorBorderSecondary}`,
-                                  borderRadius: token.borderRadiusSM,
-                                  whiteSpace: 'pre-wrap',
-                                  wordBreak: 'break-all',
-                                }}
-                              >
-                                {job.logs}
-                              </pre>
+                            {(Boolean(job.logs) ||
+                              job.status === 'running' ||
+                              job.status === 'queued') && (
+                              <TerminalLogBox
+                                jobId={job.id}
+                                status={job.status}
+                                initialLogs={job.logs}
+                                fallbackMeta={job}
+                                height={240}
+                                showCopyOverlay
+                              />
                             )}
                           </Space>
                         ),

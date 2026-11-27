@@ -201,6 +201,7 @@ func New(
 	}
 	s.recoverInterruptedJobs()
 	s.backfillLegacyResolvedTags()
+	s.compactLegacyJobLogs()
 	return s
 }
 
@@ -1212,10 +1213,110 @@ func (s *Service) UpdateAppCompose(ctx context.Context, appKey, newYAML string, 
 	return hostID, nil
 }
 
-// jobProgressTracker 维护运行中任务的单调百分比、镜像层状态快照与实时原始终端日志缓冲（附录 E.1 / E.3）。
+// terminalLogBuffer 在内存中按终端同行覆盖语义实时归并日志流：
+// 遇到独立回车符 '\r'（非 "\r\n"）或整行擦除序列 "\x1b[2K" / "\x1b[1K" 时原地清空当前未换行内容，
+// 从源头只保存每一行的最新状态，避免把成百上千帧中间百分比进度写入内存与 SQLite；
+// 同时独立维护单调递增的 streamOffset，保证运行中前端 SSE 终端增量流去重不断流。
+type terminalLogBuffer struct {
+	committed    strings.Builder
+	curLine      []byte
+	pendingCR    bool
+	streamOffset int
+}
+
+func endsWithEraseWholeLine(buf []byte) int {
+	n := len(buf)
+	if n >= 4 && buf[n-4] == 0x1b && buf[n-3] == '[' && (buf[n-2] == '2' || buf[n-2] == '1') && buf[n-1] == 'K' {
+		return 4
+	}
+	return 0
+}
+
+func endsWithEraseToEOL(buf []byte) int {
+	n := len(buf)
+	if n >= 3 && buf[n-3] == 0x1b && buf[n-2] == '[' && buf[n-1] == 'K' {
+		return 3
+	}
+	if n >= 4 && buf[n-4] == 0x1b && buf[n-3] == '[' && buf[n-2] == '0' && buf[n-1] == 'K' {
+		return 4
+	}
+	return 0
+}
+
+func (b *terminalLogBuffer) WriteChunk(chunk string) {
+	if chunk == "" {
+		return
+	}
+	b.streamOffset += len(chunk)
+	for i := 0; i < len(chunk); i++ {
+		ch := chunk[i]
+		if b.pendingCR {
+			b.pendingCR = false
+			if ch == '\n' {
+				b.committed.Write(b.curLine)
+				b.committed.WriteString("\r\n")
+				b.curLine = b.curLine[:0]
+				continue
+			}
+			// 独立 '\r' 后跟非 '\n'：光标回到行首原地覆盖当前未提交行
+			b.curLine = b.curLine[:0]
+		}
+		if ch == '\r' {
+			b.pendingCR = true
+			continue
+		}
+		if ch == '\n' {
+			b.committed.Write(b.curLine)
+			b.committed.WriteString("\r\n")
+			b.curLine = b.curLine[:0]
+			continue
+		}
+		b.curLine = append(b.curLine, ch)
+		if eraseLen := endsWithEraseWholeLine(b.curLine); eraseLen > 0 {
+			b.curLine = b.curLine[:0]
+		} else if eolLen := endsWithEraseToEOL(b.curLine); eolLen > 0 && len(b.curLine) == eolLen {
+			b.curLine = b.curLine[:0]
+		}
+	}
+}
+
+func (b *terminalLogBuffer) HasUncommittedLine() bool {
+	return len(b.curLine) > 0
+}
+
+func (b *terminalLogBuffer) Len() int {
+	return b.committed.Len() + len(b.curLine)
+}
+
+func (b *terminalLogBuffer) StreamOffset() int {
+	return b.streamOffset
+}
+
+func (b *terminalLogBuffer) String() string {
+	if len(b.curLine) == 0 {
+		return b.committed.String()
+	}
+	var out strings.Builder
+	out.Grow(b.committed.Len() + len(b.curLine))
+	out.WriteString(b.committed.String())
+	out.Write(b.curLine)
+	return out.String()
+}
+
+// CompactTerminalLog 将包含 '\r' 同行覆盖或 "\x1b[2K" 整行擦除的终端日志流归并为仅保留最新行状态的紧凑文本。
+func CompactTerminalLog(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	var buf terminalLogBuffer
+	buf.WriteChunk(raw)
+	return buf.String()
+}
+
+// jobProgressTracker 维护运行中任务的单调百分比、镜像层状态快照与实时紧凑终端日志缓冲（附录 E.1 / E.3）。
 type jobProgressTracker struct {
 	svc         *Service
-	logBuf      strings.Builder
+	logBuf      terminalLogBuffer
 	prevPercent int
 	prevPhase   string
 	prevLayers  []platform.LayerProgress
@@ -1233,12 +1334,14 @@ func newJobProgressTracker(s *Service, j *Job) *jobProgressTracker {
 		j.Progress.Percent = 0
 	}
 	if j.Logs != "" {
-		t.logBuf.WriteString(j.Logs)
+		t.logBuf.WriteChunk(j.Logs)
+		j.Logs = t.logBuf.String()
+		j.LogOffset = t.logBuf.StreamOffset()
 	} else {
 		hdr := formatJobHeader(*j)
-		t.logBuf.WriteString(hdr)
-		j.Logs = hdr
-		j.LogOffset = len(hdr)
+		t.logBuf.WriteChunk(hdr)
+		j.Logs = t.logBuf.String()
+		j.LogOffset = t.logBuf.StreamOffset()
 	}
 	return t
 }
@@ -1306,13 +1409,13 @@ func (t *jobProgressTracker) handleProgress(ctx context.Context, j *Job, p platf
 		}
 	}
 
-	// 3. 追加原始终端增量流并同步 activeJobs 内存态
+	// 3. 按终端同行覆盖语义更新紧凑日志缓冲并同步 activeJobs 内存态
 	chunk := p.LogChunk
 	if chunk == "" && p.Phase != t.prevPhase && p.StatusText != "" {
 		chunk = fmt.Sprintf("\x1b[90m[%s]\x1b[0m %s\r\n", time.Now().Format("15:04:05"), p.StatusText)
 	}
 	if chunk != "" {
-		t.logBuf.WriteString(chunk)
+		t.logBuf.WriteChunk(chunk)
 	}
 
 	phaseChanged := p.Phase != t.prevPhase
@@ -1324,7 +1427,7 @@ func (t *jobProgressTracker) handleProgress(ctx context.Context, j *Job, p platf
 	j.Progress = progForDB
 	j.LogChunk = chunk
 	j.Logs = t.logBuf.String()
-	j.LogOffset = t.logBuf.Len()
+	j.LogOffset = t.logBuf.StreamOffset()
 
 	if phaseChanged || time.Since(t.lastPersist) >= 400*time.Millisecond {
 		t.svc.updateJobProgressAndLogs(ctx, j.ID, progForDB, j.Logs)
@@ -1347,19 +1450,23 @@ func (t *jobProgressTracker) fail(j Job, code, msg string) {
 	}
 	extra.WriteString(fmt.Sprintf("\x1b[31m✖ %s\x1b[0m\r\n", displayErr))
 	errChunk := extra.String()
-	t.logBuf.WriteString(errChunk)
+	t.logBuf.WriteChunk(errChunk)
 	j.LogChunk = errChunk
 	j.Logs = t.logBuf.String()
-	j.LogOffset = t.logBuf.Len()
+	j.LogOffset = t.logBuf.StreamOffset()
 	t.svc.finishJobFailed(j, diagCode, msg, j.Logs)
 }
 
 func (t *jobProgressTracker) succeed(j *Job, extraLogs []string) {
 	if len(extraLogs) > 0 && t.logBuf.Len() == 0 {
-		t.logBuf.WriteString(strings.Join(extraLogs, "\r\n") + "\r\n")
+		t.logBuf.WriteChunk(strings.Join(extraLogs, "\r\n") + "\r\n")
 	}
-	doneChunk := "\x1b[32m✔ Update completed successfully.\x1b[0m\r\n"
-	t.logBuf.WriteString(doneChunk)
+	donePrefix := ""
+	if t.logBuf.HasUncommittedLine() {
+		donePrefix = "\r\n"
+	}
+	doneChunk := donePrefix + "\x1b[32m✔ Update completed successfully.\x1b[0m\r\n"
+	t.logBuf.WriteChunk(doneChunk)
 	doneLayers := markLayersDone(t.prevLayers)
 
 	j.Status = "succeeded"
@@ -1374,7 +1481,7 @@ func (t *jobProgressTracker) succeed(j *Job, extraLogs []string) {
 	}
 	j.LogChunk = doneChunk
 	j.Logs = t.logBuf.String()
-	j.LogOffset = t.logBuf.Len()
+	j.LogOffset = t.logBuf.StreamOffset()
 }
 
 func (s *Service) resolveServicePlatform(ctx context.Context, serviceKey string, h *host.Host) string {
@@ -1818,11 +1925,19 @@ func (s *Service) finishJobFailed(j Job, code, msg, logs string) {
 	j.ErrorAction = st.Action
 	if logs == "" {
 		errChunk := fmt.Sprintf("\r\n\x1b[31m✖ %s\x1b[0m\r\n", j.ErrorMsg)
-		logs = j.Logs + errChunk
+		logs = CompactTerminalLog(j.Logs + errChunk)
 		j.LogChunk = errChunk
+		if j.LogOffset == 0 {
+			j.LogOffset = len(j.Logs)
+		}
+		j.LogOffset += len(errChunk)
+	} else {
+		logs = CompactTerminalLog(logs)
+		if j.LogOffset < len(logs) {
+			j.LogOffset = len(logs)
+		}
 	}
 	j.Logs = logs
-	j.LogOffset = len(logs)
 	j.FinishedAt = finished
 	progBytes, _ := json.Marshal(j.Progress)
 
@@ -1995,6 +2110,58 @@ func (s *Service) backfillLegacyResolvedTags() {
 			SET old_resolved_tag=?, target_resolved_tag=?, rollback_eligible=?, rollback_ref=?, rollback_reason=?
 			WHERE id=?`,
 			p.oldTag, p.tgtTag, p.eligible, p.rbRef, p.rbReason, p.id)
+	}
+}
+
+// compactLegacyJobLogs 启动时一次性归并清理历史 update_job.logs_text 中遗留的同行覆盖进度废帧。
+func (s *Service) compactLegacyJobLogs() {
+	if s.st == nil || s.st.DB == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), finalizeTimeout)
+	defer cancel()
+
+	rows, err := s.st.DB.QueryContext(ctx, `
+		SELECT id, COALESCE(logs_text,'')
+		FROM update_job
+		WHERE status NOT IN ('running', 'queued') AND logs_text <> ''`)
+	if err != nil {
+		return
+	}
+	type logPatch struct {
+		id, cleaned string
+	}
+	var patches []logPatch
+	for rows.Next() {
+		var id, raw string
+		if rows.Scan(&id, &raw) != nil || raw == "" {
+			continue
+		}
+		// 仅当存在整行擦除控制序列或独立 '\r' 覆盖符时执行归并更新
+		if !strings.Contains(raw, "\x1b[2K") && !strings.Contains(raw, "\x1b[1K") {
+			hasStandaloneCR := false
+			for i := 0; i < len(raw); i++ {
+				if raw[i] == '\r' && (i+1 >= len(raw) || raw[i+1] != '\n') {
+					hasStandaloneCR = true
+					break
+				}
+			}
+			if !hasStandaloneCR {
+				continue
+			}
+		}
+		cleaned := CompactTerminalLog(raw)
+		if cleaned != raw {
+			patches = append(patches, logPatch{id: id, cleaned: cleaned})
+		}
+	}
+	rows.Close()
+
+	for _, p := range patches {
+		_, _ = s.st.DB.ExecContext(ctx, `UPDATE update_job SET logs_text=? WHERE id=?`, p.cleaned, p.id)
+	}
+	if len(patches) > 0 && s.log != nil {
+		s.log.Info("已归并清理旧历史更新日志中的冗余过程帧", "count", len(patches))
 	}
 }
 

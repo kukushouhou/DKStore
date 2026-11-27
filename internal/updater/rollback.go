@@ -95,7 +95,12 @@ func (s *Service) ListJobs(ctx context.Context, limit int, lang i18n.Lang) ([]Jo
 				out[i].Status = live.Status
 				out[i].Phase = live.Phase
 				out[i].Progress = live.Progress
-				out[i].LogOffset = len(live.Logs)
+				out[i].Logs = live.Logs
+				if live.LogOffset > 0 {
+					out[i].LogOffset = live.LogOffset
+				} else {
+					out[i].LogOffset = len(live.Logs)
+				}
 			}
 		}
 	}
@@ -143,7 +148,9 @@ func (s *Service) GetJob(ctx context.Context, id string, lang i18n.Lang) (*Job, 
 			cp := active
 			s.mu.Unlock()
 			cp.LogChunk = ""
-			cp.LogOffset = len(cp.Logs)
+			if cp.LogOffset <= 0 {
+				cp.LogOffset = len(cp.Logs)
+			}
 			if cp.RollbackReason != "" {
 				cp.RollbackReasonText = i18n.FormatRollbackReason(lang, cp.RollbackReason)
 			}
