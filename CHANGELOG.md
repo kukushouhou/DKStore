@@ -6,12 +6,22 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+## [v0.8.3] - 2026-11-27
+
+### 新功能
+- **设备连接失败提醒**：当设备连接或同步失败时记录具体失败原因（恢复在线后自动清除），在「更新」与「容器」页面顶部展示连接失败提示条（支持展开查看各离线设备的地址与原因并一键前往设备管理），同时在「设备」页面的离线设备卡片上直接显示具体失败原因 ([`acfc057`](https://github.com/kukushouhou/DKStore/commit/acfc057))
+
 ### 问题修复
+- **顶部异常提示条重做**：重做「更新」页服务无法检查、Docker Hub 未登录限流及全局未连接本机提示条，修复原先展开多条报错时首尾错位与文案重复刷屏的问题；收起时单行展示数量与摘要，展开后对齐列出各服务的所属设备、仓库域名与失败原因，并按错误类型提供「设置仓库凭据」或「镜像源设置」快捷入口 ([`acfc057`](https://github.com/kukushouhou/DKStore/commit/acfc057))
 - **容器外部降级或重建后旧版本号残留修复**：修复同名容器在外部被降级或重建为其他版本镜像且未命中远端标签反查时，卡片左侧当前版本号仍被上次升级残留的旧标签覆盖（如显示出 `0.8.5 → 0.8.5`）的问题 ([`d8623eb`](https://github.com/kukushouhou/DKStore/commit/d8623eb))
 
 ---
 
+### Features
+- **Device Connection Failure Prompts**: Records the specific failure reason whenever a device fails to connect or sync (automatically cleared once back online), showing a connection failure notice bar at the top of both the `Updates` and `Containers` pages (expandable to inspect each offline device's address and reason with a quick `Manage Devices` button) and displaying the failure reason directly on offline cards on the `Devices` page ([`acfc057`](https://github.com/kukushouhou/DKStore/commit/acfc057))
+
 ### Fixes
+- **Top Notice Bar Redesign**: Redesigned the failed-check, Docker Hub anonymous rate-limit, and local Docker reminder bars to fix misaligned rows and repeated error copy when expanded; shows a single-line count and summary when collapsed, aligns each service's device, registry domain, and failure reason when expanded, and provides matching `Set Registry Credentials` or `Mirrors` quick actions ([`acfc057`](https://github.com/kukushouhou/DKStore/commit/acfc057))
 - **Stale Current Version After External Container Rebuild**: Fixed the current version badge on app cards remaining overwritten by a previously cached tag (e.g. showing `0.8.5 → 0.8.5`) when a same-named container was downgraded or recreated externally and did not match remote tag lookup ([`d8623eb`](https://github.com/kukushouhou/DKStore/commit/d8623eb))
 
 ## [v0.8.2] - 2026-11-23
