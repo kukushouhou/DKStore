@@ -6,12 +6,22 @@ All notable changes to **DKStore** are documented in this file.
 
 ## [开发中 / Unreleased]
 
+## [v0.8.5] - 2026-11-28
+
+### 新功能
+- **已下架仓库忽略提醒**：在「更新」页顶部无法检查提示条与下方应用卡片中，为远端仓库已不存在的服务新增「忽略提醒」快捷操作；点击后立即从顶部异常提示条移除，后续检查更新不再反复弹出警告（可随时在应用卡片上点击「恢复提醒」重新开启） ([`dc69f7f`](https://github.com/kukushouhou/DKStore/commit/dc69f7f))
+
 ### 问题修复
+- **已删除仓库误报需要凭据修复**：修复 `ghcr.io`、`lscr.io` 等公共仓库镜像在上游源码仓库或镜像包已被删除（返回 `404`）时，被误报为「私有仓库需要登录凭据」的问题；现准确提示「远端仓库或镜像已不存在」，应用卡片状态同步显示为「仓库已不存在」 ([`dc69f7f`](https://github.com/kukushouhou/DKStore/commit/dc69f7f))
 - **历史记录日志显示与镜像详情文案修复**：修复历史记录展开面板中的日志直接显示终端控制符乱码并把拉取镜像的中间百分比刷屏粘连成大段文字的问题，现统一改用终端文本框清晰渲染彩色日志（支持一键复制纯文本），只保存各步骤最新状态并自动清理旧历史记录中的冗余进度内容；同时将折叠标题与字段名称改写为通俗易懂的「镜像详情与执行日志」「镜像地址」「原镜像哈希」「目标镜像哈希」「原镜像对应标签」（详情抽屉同步更新为「当前镜像哈希」「新版镜像哈希」「新版对应标签」） ([`3c9104f`](https://github.com/kukushouhou/DKStore/commit/3c9104f))
 
 ---
 
+### Features
+- **Mute Alerts for Removed Repositories**: Added a quick `Mute` action in both the top failed-check notice bar and app card footer for services whose remote repository no longer exists; clicking `Mute` removes the service from the top warning bar across future update checks, and alerts can be re-enabled anytime via `Restore` on the card ([`dc69f7f`](https://github.com/kukushouhou/DKStore/commit/dc69f7f))
+
 ### Fixes
+- **Removed Repository Credential Misreport Fix**: Fixed `ghcr.io`, `lscr.io`, and other public registry images whose upstream repository or package was deleted (`404`) being misreported as `Private registry requires login credentials`; DKStore now accurately reports `Remote repository or image no longer exists` and shows `Repo not found` on the app card ([`dc69f7f`](https://github.com/kukushouhou/DKStore/commit/dc69f7f))
 - **History Log Display & Image Detail Labels Fix**: Fixed expanded history logs displaying raw terminal escape characters and concatenating intermediate pull percentages into an unreadable wall of text; inline logs now render cleanly in the terminal view with a quick copy button while storing only the latest state of each line and automatically cleaning redundant progress frames from existing history records, alongside clearer labels (`Image Details & Logs`, `Image`, `Previous Image Digest`, `Target Image Digest`, and `Previous Image Tags`) ([`3c9104f`](https://github.com/kukushouhou/DKStore/commit/3c9104f))
 
 ## [v0.8.4] - 2026-11-27
