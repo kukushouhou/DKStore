@@ -665,7 +665,7 @@ func (s *Service) Overview(ctx context.Context, hostIDFilter string, lang i18n.L
 		}
 		card.Services = append(card.Services, item)
 
-		if fKind == string(classify.KindCheckFailed) {
+		if fKind == string(classify.KindCheckFailed) && !isIgnored {
 			var failedReg string
 			if pr, pErr := version.ParseImageRef(imageRef); pErr == nil {
 				failedReg = pr.Registry

@@ -78,6 +78,7 @@ const (
 	MsgRegistryNetwork        = "registry.network"         // 访问 %s 网络失败: %s
 	MsgRegistryAuth           = "registry.auth"            // 仓库 %s 需要认证（HTTP %s）
 	MsgRegistryNotFound       = "registry.not_found"       // 仓库 %s 中未找到该镜像或标签
+	MsgRegistryRepoRemoved    = "registry.repo_removed"    // 远端仓库或镜像已不存在（%s）
 	MsgRegistryRateLimited    = "registry.rate_limited"    // 仓库 %s 限流
 	MsgRegistryStatus         = "registry.status"          // 仓库 %s 返回异常状态（HTTP %s）
 	MsgRegistryParse          = "registry.parse"           // 解析 %s 响应失败
@@ -145,6 +146,7 @@ var engineMessages = map[string][2]string{
 	MsgRegistryNetwork:        {"访问 %s 网络失败：%s", "Network error while contacting %s: %s"},
 	MsgRegistryAuth:           {"仓库 %s 需要认证或无权限访问（HTTP %s）", "Registry %s requires authentication or denied access (HTTP %s)"},
 	MsgRegistryNotFound:       {"仓库 %s 中未找到该镜像或标签（HTTP 404）", "Image or tag not found in registry %s (HTTP 404)"},
+	MsgRegistryRepoRemoved:    {"远端仓库或镜像已不存在，可能已被作者删除（%s）", "Remote repository or image no longer exists; it may have been removed (%s)"},
 	MsgRegistryRateLimited:    {"仓库 %s 请求触发限流（HTTP 429），请稍后重试或配置仓库账号", "Registry %s rate limit exceeded (HTTP 429); retry later or configure an account"},
 	MsgRegistryStatus:         {"仓库 %s 返回异常状态（HTTP %s）", "Registry %s returned an unexpected status (HTTP %s)"},
 	MsgRegistryParse:          {"解析 %s 响应失败", "Failed to parse the response from %s"},

@@ -161,6 +161,7 @@ export default function AppCard({
   const [retryingJobId, setRetryingJobId] = useState<string | null>(null)
   const [expandedErrIds, setExpandedErrIds] = useState<Record<string, boolean>>({})
   const [restoring, setRestoring] = useState(false)
+  const [mutingNotFound, setMutingNotFound] = useState(false)
 
   const isNoUpdate =
     app.group === 'no_update' || app.group === 'up_to_date' || app.group === 'ignored'
@@ -501,6 +502,24 @@ export default function AppCard({
     }
   }
 
+  const handleMuteNotFound = async () => {
+    const keys = app.services
+      .filter((s) => s.kind === 'check_failed' && s.errorKind === 'not_found')
+      .map((s) => s.key)
+    const targetKeys = keys.length > 0 ? keys : primaryService?.key ? [primaryService.key] : []
+    if (targetKeys.length === 0) return
+    setMutingNotFound(true)
+    try {
+      await api.setIgnore({ serviceKeys: targetKeys, mode: 'forever' })
+      message.success(t.home.failedIgnoreSaved)
+      onChanged()
+    } catch (e) {
+      showApiError(e)
+    } finally {
+      setMutingNotFound(false)
+    }
+  }
+
   // 角色标签（谨慎分组：数据库 / 消息队列 / 中间件）
   const renderRoleBadge = () => {
     if (!isCaution) return null
@@ -827,7 +846,9 @@ export default function AppCard({
                       strong
                       style={{ fontSize: token.fontSizeSM, flexShrink: 0 }}
                     >
-                      {t.home.checkFailedStatus}
+                      {primaryService.errorKind === 'not_found'
+                        ? t.home.repoNotFoundStatus
+                        : t.home.checkFailedStatus}
                     </Typography.Text>
                   ) : primaryService?.kind === 'uncomparable' ? (
                     <Typography.Text
@@ -1138,6 +1159,17 @@ export default function AppCard({
                     {t.queue.retryBtn}
                   </Button>
                 )}
+                {!isIgnored &&
+                  primaryService?.kind === 'check_failed' &&
+                  primaryService.errorKind === 'not_found' && (
+                    <Button
+                      size="small"
+                      loading={mutingNotFound}
+                      onClick={handleMuteNotFound}
+                    >
+                      {t.home.ignoreReminderBtn}
+                    </Button>
+                  )}
                 {isIgnored && (
                   <Button
                     size="small"

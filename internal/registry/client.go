@@ -38,8 +38,9 @@ const (
 
 // RegistryError 携带可向用户展示的分类与原因。
 type RegistryError struct {
-	Kind    ErrorKind
-	Message string
+	Kind            ErrorKind
+	Message         string
+	UpstreamRemoved bool // 确证上游代码仓库或镜像包已 404 下架（即使本地无 RepoDigest 也不归为本地构建镜像）
 }
 
 // Error 返回默认语言（zh-CN）文案；Message 可能是 i18n.EngineDetail 编码，展示时应使用 i18n.LocalizeDetail 按请求语言还原。
@@ -60,6 +61,7 @@ type ManifestCheckOptions struct {
 	BypassCache     bool
 	LocalRepoDigest string // 本地已知的 RepoDigest；存在时优先走 HEAD 比对免 GET
 	NeedConfig      bool   // 本地缺少 RepoDigest（如群晖 dsm_api 模式）需要比对 ConfigDigest 时设为 true
+	SourceURL       string // 容器 Label 推导出的源码仓库地址（用于复核公共仓库 401/403 是否实为上游已 404 下架）
 }
 
 // TagDigestEntry 表示仓库中一个标签及其关联的 Digest 与更新时间。
@@ -351,7 +353,7 @@ func (c *Client) fetchManifestRemote(
 				if hubFallback != nil {
 					return hubFallback, nil
 				}
-				return nil, hErr
+				return nil, c.refineAuthErrorIfUpstreamRemoved(ctx, ref, opts.SourceURL, opts.BypassCache, hErr)
 			}
 		}
 	}
@@ -373,7 +375,7 @@ func (c *Client) fetchManifestRemote(
 				return fbRes, nil
 			}
 		}
-		return nil, err
+		return nil, c.refineAuthErrorIfUpstreamRemoved(ctx, ref, opts.SourceURL, opts.BypassCache, err)
 	}
 
 	res := &ManifestResult{
@@ -2620,6 +2622,208 @@ func classifyHTTPStatus(reg string, status int) *RegistryError {
 	default:
 		return &RegistryError{Kind: ErrRegistry, Message: i18n.EngineDetail(i18n.MsgRegistryStatus, reg, strconv.Itoa(status))}
 	}
+}
+
+// refineAuthErrorIfUpstreamRemoved 复核公共镜像仓库在未配置本地凭据时返回的 401/403：
+// GHCR / LSCR / Docker Hub 对已删除或不存在的镜像同样返回 401/403 防枚举，若复核确认对应 GitHub 仓库/Package 页
+// 或 Docker Hub 命名空间已明确返回 HTTP 404/410，则将其归为 ErrNotFound（UpstreamRemoved=true），避免误导用户配置私有仓库凭据。
+func (c *Client) refineAuthErrorIfUpstreamRemoved(
+	ctx context.Context,
+	ref version.ParsedRef,
+	sourceURL string,
+	bypassCache bool,
+	origErr error,
+) error {
+	var re *RegistryError
+	if !errors.As(origErr, &re) || re.Kind != ErrAuthRequired {
+		return origErr
+	}
+	regLower := strings.ToLower(strings.TrimSpace(ref.Registry))
+	if creds, _ := c.getCredential(ctx, regLower); creds != nil && creds.Username != "" {
+		return origErr
+	}
+
+	removed := false
+	switch regLower {
+	case "ghcr.io", "lscr.io":
+		removed = c.isGitHubUpstreamNotFound(ctx, regLower, ref.Repository, sourceURL, bypassCache)
+	case "docker.io":
+		removed = c.isDockerHubNamespaceNotFound(ctx, ref.Repository, bypassCache)
+	}
+	if !removed {
+		return origErr
+	}
+	return &RegistryError{
+		Kind:            ErrNotFound,
+		Message:         i18n.EngineDetail(i18n.MsgRegistryRepoRemoved, ref.Registry),
+		UpstreamRemoved: true,
+	}
+}
+
+func extractGitHubRepoSlug(rawURL string) (owner, repo string, ok bool) {
+	s := strings.TrimSpace(rawURL)
+	if s == "" {
+		return "", "", false
+	}
+	u, err := url.Parse(s)
+	if err != nil || !strings.EqualFold(u.Hostname(), "github.com") {
+		return "", "", false
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", false
+	}
+	if strings.EqualFold(parts[0], "users") || strings.EqualFold(parts[0], "orgs") {
+		return "", "", false
+	}
+	return parts[0], strings.TrimSuffix(parts[1], ".git"), true
+}
+
+func (c *Client) isGitHubUpstreamNotFound(ctx context.Context, regLower, repository, sourceURL string, bypassCache bool) bool {
+	if c.BaseURLOverride != nil {
+		if _, hasGH := c.BaseURLOverride["github.com"]; !hasGH {
+			return false
+		}
+	}
+	ghBase := strings.TrimRight(c.GitHubBase(), "/")
+	repoClean := strings.Trim(repository, "/")
+	parts := strings.Split(repoClean, "/")
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return false
+	}
+
+	var urls []string
+	addURL := func(u string) {
+		for _, ex := range urls {
+			if ex == u {
+				return
+			}
+		}
+		urls = append(urls, u)
+	}
+
+	if owner, repo, ok := extractGitHubRepoSlug(sourceURL); ok {
+		addURL(fmt.Sprintf("%s/%s/%s", ghBase, url.PathEscape(owner), url.PathEscape(repo)))
+	} else {
+		switch regLower {
+		case "ghcr.io":
+			addURL(fmt.Sprintf("%s/%s/%s", ghBase, url.PathEscape(parts[0]), url.PathEscape(parts[1])))
+		case "lscr.io":
+			if strings.EqualFold(parts[0], "linuxserver") {
+				addURL(fmt.Sprintf("%s/linuxserver/%s", ghBase, url.PathEscape("docker-"+parts[1])))
+			} else {
+				addURL(fmt.Sprintf("%s/%s/%s", ghBase, url.PathEscape(parts[0]), url.PathEscape(parts[1])))
+			}
+		}
+	}
+
+	if regLower == "ghcr.io" {
+		pkgSub := strings.Join(parts[1:], "/")
+		addURL(fmt.Sprintf("%s/users/%s/packages/container/package/%s", ghBase, url.PathEscape(parts[0]), url.PathEscape(pkgSub)))
+	}
+	if len(urls) == 0 {
+		return false
+	}
+
+	cacheKey := fmt.Sprintf("up404:%s/%s|%s", regLower, repoClean, strings.TrimSpace(sourceURL))
+	if !bypassCache {
+		if b, ok := c.getCache(ctx, cacheKey); ok {
+			return string(b) == "1"
+		}
+	}
+
+	val, _ := c.flight.do("up404:"+cacheKey, func() (any, error) {
+		allProbedOK := true
+		for _, target := range urls {
+			nf, reached := c.probeURLNotFound(ctx, target)
+			if nf {
+				c.putCache(ctx, cacheKey, []byte("1"), 30*time.Minute)
+				return true, nil
+			}
+			if !reached {
+				allProbedOK = false
+			}
+		}
+		if allProbedOK {
+			c.putCache(ctx, cacheKey, []byte("0"), 30*time.Minute)
+		}
+		return false, nil
+	})
+	res, _ := val.(bool)
+	return res
+}
+
+func (c *Client) isDockerHubNamespaceNotFound(ctx context.Context, repository string, bypassCache bool) bool {
+	if c.BaseURLOverride != nil {
+		if _, hasHub := c.BaseURLOverride["hub.docker.com"]; !hasHub {
+			return false
+		}
+	}
+	repoClean := strings.Trim(repository, "/")
+	owner, _, ok := strings.Cut(repoClean, "/")
+	if !ok || owner == "" || strings.EqualFold(owner, "library") {
+		return false
+	}
+
+	cacheKey := "up404:docker.io/user/" + strings.ToLower(owner)
+	if !bypassCache {
+		if b, hit := c.getCache(ctx, cacheKey); hit {
+			return string(b) == "1"
+		}
+	}
+
+	target := fmt.Sprintf("%s/v2/users/%s", strings.TrimRight(c.hubAPIBase(), "/"), url.PathEscape(owner))
+	val, _ := c.flight.do("up404:"+cacheKey, func() (any, error) {
+		nf, reached := c.probeURLNotFound(ctx, target)
+		if nf {
+			c.putCache(ctx, cacheKey, []byte("1"), 30*time.Minute)
+			return true, nil
+		}
+		if reached {
+			c.putCache(ctx, cacheKey, []byte("0"), 30*time.Minute)
+		}
+		return false, nil
+	})
+	res, _ := val.(bool)
+	return res
+}
+
+func (c *Client) probeURLNotFound(ctx context.Context, target string) (notFound bool, reached bool) {
+	pCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+
+	doProbe := func(method string) (int, error) {
+		req, err := http.NewRequestWithContext(pCtx, method, target, nil)
+		if err != nil {
+			return 0, err
+		}
+		req.Header.Set("User-Agent", "DKStore/1.0")
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return 0, err
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		_ = resp.Body.Close()
+		return resp.StatusCode, nil
+	}
+
+	code, err := doProbe(http.MethodHead)
+	if err != nil {
+		return false, false
+	}
+	if code == http.StatusMethodNotAllowed {
+		code, err = doProbe(http.MethodGet)
+		if err != nil {
+			return false, false
+		}
+	}
+	if code == http.StatusNotFound || code == http.StatusGone {
+		return true, true
+	}
+	if code >= 200 && code < 400 {
+		return false, true
+	}
+	return false, false
 }
 
 func (c *Client) registryAPIBase(reg string) string {

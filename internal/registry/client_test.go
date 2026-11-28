@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -718,5 +719,71 @@ func TestModalCandidatesAndPinnedFlavorIsolation(t *testing.T) {
 		if it.StableVisible && version.HasFlavorVersionPin(version.ParseTag(it.Name).Variant) {
 			t.Fatalf("pinned flavor tag %q should not pollute default stableVisible list for floating 1.26.1-alpine", it.Name)
 		}
+	}
+}
+
+func TestCheckManifestEx_GHCRUpstream404RefinedToNotFound(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	box, _ := secret.LoadOrCreate(dir)
+
+	var ghcrURL string
+	ghcrSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/token":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"errors":[{"code":"DENIED","message":"requested access to the resource is denied"}]}`))
+		default:
+			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm="%s/token",service="ghcr.io",scope="repository:su-kaka/gcli2api:pull"`, ghcrURL))
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	}))
+	defer ghcrSrv.Close()
+	ghcrURL = ghcrSrv.URL
+
+	ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/su-kaka/gcli2api" || r.URL.Path == "/users/su-kaka/packages/container/package/gcli2api" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ghSrv.Close()
+
+	cli := New(st, box)
+	cli.BaseURLOverride = map[string]string{
+		"ghcr.io":    ghcrSrv.URL,
+		"github.com": ghSrv.URL,
+	}
+
+	// 1. 未配凭据且上游 GitHub 仓库返回 404 -> 应识别为 ErrNotFound（UpstreamRemoved=true），而非 ErrAuthRequired
+	ref404, _ := version.ParseImageRef("ghcr.io/su-kaka/gcli2api:master-ecc207f")
+	_, mErr := cli.CheckManifestEx(ctx, ref404, ManifestCheckOptions{
+		HostPlatform: "linux/amd64",
+		BypassCache:  true,
+		SourceURL:    "https://github.com/su-kaka/gcli2api",
+	})
+	var re *RegistryError
+	if !errors.As(mErr, &re) || re.Kind != ErrNotFound || !re.UpstreamRemoved {
+		t.Fatalf("expected ErrNotFound with UpstreamRemoved=true, got err=%v re=%+v", mErr, re)
+	}
+
+	// 2. 已配置 ghcr.io 凭据但仍返回 401/403 -> 保留 ErrAuthRequired（说明凭据无效或无权限）
+	if err := cli.SaveCredential(ctx, Creds{Registry: "ghcr.io", Username: "u", Secret: "bad-token"}); err != nil {
+		t.Fatal(err)
+	}
+	_, authErr := cli.CheckManifestEx(ctx, ref404, ManifestCheckOptions{
+		HostPlatform: "linux/amd64",
+		BypassCache:  true,
+		SourceURL:    "https://github.com/su-kaka/gcli2api",
+	})
+	var reAuth *RegistryError
+	if !errors.As(authErr, &reAuth) || reAuth.Kind != ErrAuthRequired {
+		t.Fatalf("expected ErrAuthRequired when credentials exist, got err=%v re=%+v", authErr, reAuth)
 	}
 }

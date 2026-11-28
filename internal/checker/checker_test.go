@@ -463,3 +463,61 @@ func TestStaleCurrentTagsClearedWhenContainerDowngradedExternally(t *testing.T) 
 		t.Fatalf("expected 0.6.0 -> 0.8.5, got %q -> %q", card.SummaryCurrent, card.SummaryTarget)
 	}
 }
+
+func TestOverview_GHCRUpstream404AndForeverIgnoreSuppressesFailedBanner(t *testing.T) {
+	var ghcrURL string
+	ghcrSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer realm="%s/token",service="ghcr.io",scope="repository:su-kaka/gcli2api:pull"`, ghcrURL))
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer ghcrSrv.Close()
+	ghcrURL = ghcrSrv.URL
+
+	ghSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer ghSrv.Close()
+
+	chk, st := newTestChecker(t, map[string]string{
+		"ghcr.io":    ghcrSrv.URL,
+		"github.com": ghSrv.URL,
+	})
+	ctx := context.Background()
+	now := time.Now().Unix()
+
+	_, _ = st.DB.ExecContext(ctx, `INSERT INTO host(id, name, kind, transport, status, created_at) VALUES ('h1', 'NAS', 'synology_dsm', 'dsm_api', 'online', ?)`, now)
+	_, _ = st.DB.ExecContext(ctx, `INSERT INTO app(key, host_id, name, source, updated_at) VALUES ('h1/dsm_project/gcli2api', 'h1', 'gcli2api', 'dsm_project', ?)`, now)
+	// 模拟群晖 dsm_api 模式（RepoDigest 为空，仅有 ImageID）
+	_, _ = st.DB.ExecContext(ctx, `
+		INSERT INTO service(key, app_key, name, state, image_ref, image_id, repo_digest, platform, updated_at)
+		VALUES ('h1/dsm_project/gcli2api/gcli2api', 'h1/dsm_project/gcli2api', 'gcli2api', 'running', 'ghcr.io/su-kaka/gcli2api:master-ecc207f', 'sha256:1111111111111111111111111111111111111111111111111111111111111111', '', 'linux/amd64', ?)`, now)
+
+	chk.runCheck(ctx, "manual", "h1", true)
+
+	ov, err := chk.Overview(ctx, "h1", i18n.ZhCN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ov.Failed) != 1 || ov.Failed[0].ErrorKind != string(registry.ErrNotFound) {
+		t.Fatalf("expected 1 failed item with errorKind=not_found, got %+v", ov.Failed)
+	}
+
+	// 开启永久忽略后，顶部 Failed 列表不再包含该服务，而下方 NoUpdate 卡片处于 Ignored 状态
+	if err := chk.ign.Set(ctx, []string{"h1/dsm_project/gcli2api/gcli2api"}, "forever", ""); err != nil {
+		t.Fatal(err)
+	}
+	ovMuted, err := chk.Overview(ctx, "h1", i18n.ZhCN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ovMuted.Failed) != 0 {
+		t.Fatalf("expected 0 failed items after forever ignore, got %+v", ovMuted.Failed)
+	}
+	if len(ovMuted.NoUpdate) != 1 || !ovMuted.NoUpdate[0].Ignored {
+		t.Fatalf("expected NoUpdate card marked Ignored=true, got %+v", ovMuted.NoUpdate)
+	}
+}

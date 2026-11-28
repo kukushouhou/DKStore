@@ -557,7 +557,9 @@ func (s *Service) runCheck(ctx context.Context, trigger, hostIDFilter string, by
 				})
 			}
 		case classify.KindCheckFailed:
-			failedCount++
+			if ignoreRules[svc.Key].Mode != ignore.ModeForever {
+				failedCount++
+			}
 		}
 	}
 
@@ -644,17 +646,19 @@ func (s *Service) checkSingleService(ctx context.Context, svc svcRow, bypassCach
 	}
 
 	isDSMAPI := svc.HostTransport == "dsm_api"
+	resolvedLinks := rules.Default().ResolveContainerLinks(ref.Registry, ref.Repository, labels, "")
 	mf, err := s.reg.CheckManifestEx(ctx, ref, registry.ManifestCheckOptions{
 		HostPlatform:    svc.Platform,
 		BypassCache:     bypassCache,
 		LocalRepoDigest: svc.RepoDigest,
 		NeedConfig:      isDSMAPI && svc.RepoDigest == "",
+		SourceURL:       resolvedLinks.Repo,
 	})
 	if err != nil {
 		var re *registry.RegistryError
 		if errors.As(err, &re) {
-			// 仅当远端明确返回 404 且本地无 RepoDigest（如本地构建/导入镜像）时，才归为 uncomparable（审计 M3）
-			if re.Kind == registry.ErrNotFound && svc.RepoDigest == "" && !ref.IsPinnedDigest() {
+			// 仅当远端明确返回 404 且非已确证上游仓库下架、本地无 RepoDigest（如本地构建/导入镜像）时，才归为 uncomparable（审计 M3）
+			if re.Kind == registry.ErrNotFound && !re.UpstreamRemoved && svc.RepoDigest == "" && !ref.IsPinnedDigest() {
 				curVer := localVerLabel
 				if curVer == "" && ref.Tag != "" {
 					curVer = ref.Tag
@@ -674,7 +678,7 @@ func (s *Service) checkSingleService(ctx context.Context, svc svcRow, bypassCach
 		return classify.Output{
 			Kind:           classify.KindCheckFailed,
 			CurrentVersion: curVer,
-			Links:          rules.Default().ResolveContainerLinks(ref.Registry, ref.Repository, labels, ""),
+			Links:          resolvedLinks,
 		}, errKind, errMsg, nil
 	}
 

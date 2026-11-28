@@ -376,6 +376,16 @@ export default function HomePage() {
   const displayFailedServiceName = (f: FailedItem): string =>
     f.serviceName && f.serviceName !== 'main' ? f.serviceName : f.appName
 
+  const handleMuteFailedService = async (serviceKey: string) => {
+    try {
+      await api.setIgnore({ serviceKeys: [serviceKey], mode: 'forever' })
+      message.success(t.home.failedIgnoreSaved)
+      void qc.invalidateQueries({ queryKey: ['overview'] })
+    } catch (e) {
+      showApiError(e)
+    }
+  }
+
   const offlineHosts = useMemo(
     () =>
       hosts.filter(
@@ -474,6 +484,8 @@ export default function HomePage() {
       t.home.nameListMore,
     )
     const allAuth = otherFailedItems.every((f) => f.errorKind === 'auth_required')
+    const allNotFound = otherFailedItems.every((f) => f.errorKind === 'not_found')
+    const hasNotFound = otherFailedItems.some((f) => f.errorKind === 'not_found')
     const allNetwork = otherFailedItems.every((f) => f.errorKind === 'network')
     const hasAuth = authRequiredRegistries.length > 0
 
@@ -483,6 +495,14 @@ export default function HomePage() {
         authRequiredRegistries.length === 1 && authRequiredRegistries[0]
           ? `${t.home.failedAuthShort} (${authRequiredRegistries[0]})`
           : t.home.failedAuthShort
+    } else if (allNotFound) {
+      const nfRegs = Array.from(
+        new Set(otherFailedItems.map((f) => extractRegistryDomain(f)).filter(Boolean)),
+      )
+      reasonPart =
+        nfRegs.length === 1 && nfRegs[0]
+          ? `${t.home.failedNotFoundShort} (${nfRegs[0]})`
+          : t.home.failedNotFoundShort
     } else if (allNetwork) {
       reasonPart =
         otherFailedItems.length === 1 && otherFailedItems[0].errorMsg
@@ -490,6 +510,8 @@ export default function HomePage() {
           : t.home.failedNetworkShort
     } else if (otherFailedItems.length === 1) {
       reasonPart = otherFailedItems[0].errorMsg || t.home.checkFailedStatus
+    } else if (hasNotFound) {
+      reasonPart = t.home.failedMixedWithNotFoundShort
     } else {
       reasonPart = t.home.failedMixedShort
     }
@@ -507,8 +529,20 @@ export default function HomePage() {
           onAction: needRowCredLink ? () => openRegCredModal(reg) : undefined,
         }
       }
+      if (f.errorKind === 'not_found') {
+        return {
+          key: f.serviceKey,
+          name: displayFailedServiceName(f),
+          sub: f.hostName,
+          reason: reg ? `${t.home.failedNotFoundShort} (${reg})` : t.home.failedNotFoundShort,
+          actionText: t.home.ignoreReminderBtn,
+          onAction: () => {
+            void handleMuteFailedService(f.serviceKey)
+          },
+        }
+      }
       if (f.errorKind === 'network' && f.hostId) {
-        const needRowMirrorLink = hasAuth || networkFailedHostIds.length > 1 || !allNetwork
+        const needRowMirrorLink = hasAuth || hasNotFound || networkFailedHostIds.length > 1 || !allNetwork
         return {
           key: f.serviceKey,
           name: displayFailedServiceName(f),
@@ -559,9 +593,12 @@ export default function HomePage() {
     t.home.failedAuthShort,
     t.home.failedGoCreds,
     t.home.failedMixedShort,
+    t.home.failedMixedWithNotFoundShort,
     t.home.failedNetworkShort,
+    t.home.failedNotFoundShort,
     t.home.failedTitleMulti,
     t.home.failedTitleSingle,
+    t.home.ignoreReminderBtn,
     t.home.nameListMore,
     t.home.nameListSep,
   ])
